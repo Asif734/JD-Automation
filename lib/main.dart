@@ -465,39 +465,11 @@ class _CaptureHomeState extends State<CaptureHome> {
       return extraction.capture;
     }
     final capturedMedia = <CapturedMessage>[];
-    var viewportFallbackUsed = false;
-    MessageClassification? copiedMessage;
-    String? copiedMessageKind;
-    if (allowUnlabeledLatestImage && extraction.copyTarget != null) {
-      copiedMessage = await _adapter.classifyMessageAt(
-        expectedCustomer: customer,
-        windowId: inspection.windowId,
-        x: extraction.copyTarget!.x,
-        y: extraction.copyTarget!.y,
-      );
-      copiedMessageKind = copiedMessage.kind;
-      // Copy classification is the single authority for an unread item. A
-      // text message continues through OCR; unknown/unavailable content must
-      // never be promoted to an image from screenshot geometry alone.
-      if (copiedMessageKind != 'image') {
-        _visibleMediaTrace = 'copied unread message kind='
-            '$copiedMessageKind; image capture skipped';
-        return extraction.capture;
-      }
-    }
     var imageCandidates = _incomingImageCandidates(
       inspection,
       customer,
       allowUnlabeledLatestImage: allowUnlabeledLatestImage,
     );
-    if (copiedMessageKind == 'image' && extraction.copyTarget != null) {
-      final targetY = extraction.copyTarget!.y;
-      imageCandidates = imageCandidates
-          .where((region) =>
-              targetY >= region.y - .01 &&
-              targetY <= region.y + region.height + .01)
-          .toList(growable: false);
-    }
     final visibleMessages = extraction.capture?.messages ?? const [];
     final latestVisible = visibleMessages.isEmpty ? null : visibleMessages.last;
     if (latestVisible?.direction == 'outgoing') {
@@ -505,100 +477,17 @@ class _CaptureHomeState extends State<CaptureHome> {
         final bottom = region.y + region.height;
         final sellerActivityBelow = inspection.observations.any((item) {
           final text = item.text.trim();
-          final sellerLabel = text.contains('旗舰店') &&
-              (text.contains(':') || text.contains('：'));
+          final sellerLabel = (text.contains('旗舰店') &&
+                  (text.contains(':') || text.contains('：'))) ||
+              RegExp(r'格志打印机[\u3400-\u9fffA-Za-z0-9_-]{1,12}').hasMatch(text);
           return sellerLabel && item.y > bottom + .005;
         });
         return !sellerActivityBelow;
       }).toList(growable: false);
-    } else if (latestVisible?.direction == 'incoming' &&
-        extraction.copyTarget != null) {
-      // A Vision rectangle overlapping the latest OCR text is usually the
-      // text bubble itself, not a customer image. Require clipboard image
-      // classification before promoting such a region to media.
-      if (copiedMessageKind != 'image') {
-        imageCandidates = const [];
-      } else {
-        final targetY = extraction.copyTarget!.y;
-        imageCandidates = imageCandidates
-            .where((region) =>
-                targetY >= region.y - .01 &&
-                targetY <= region.y + region.height + .01)
-            .toList(growable: false);
-      }
     }
-    if (imageCandidates.isEmpty && copiedMessageKind == 'image') {
-      // OCR can read a QR code or model label inside a photo and incorrectly
-      // report an incoming text body even though Vision found no outer image
-      // rectangle. Only a successful clipboard image classification permits
-      // this visible-chat screenshot fallback. This path never scrolls.
-      final rightPanelStart = inspection.observations
-          .where((item) =>
-              item.x > .50 &&
-              item.y < .18 &&
-              (item.text.trim() == '客服' || item.text.trim() == '营销'))
-          .map((item) => item.x)
-          .fold<double>(.69, (left, right) => left < right ? left : right);
-      final chatRight = (rightPanelStart - .01).clamp(.58, .72).toDouble();
-      imageCandidates = [
-        OcrVisualRegion(
-          x: .20,
-          y: .10,
-          width: chatRight - .20,
-          height: .79,
-          confidence: 0,
-        ),
-      ];
-      viewportFallbackUsed = true;
-    }
-    if (copiedMessageKind == 'image' &&
-        extraction.copyTarget != null &&
-        (copiedMessage?.visualFingerprint?.isNotEmpty ?? false)) {
-      final clipboardFingerprint = copiedMessage?.visualFingerprint ?? '';
-      if (clipboardFingerprint.isNotEmpty &&
-          await (await _database.history).hasSimilarImageFingerprint(
-            customer,
-            clipboardFingerprint,
-          )) {
-        _visibleMediaTrace =
-            'latest customer image already captured; download skipped';
-        return extraction.capture;
-      }
-      try {
-        final downloaded = await _adapter.downloadImageAt(
-          expectedCustomer: customer,
-          windowId: inspection.windowId,
-          x: extraction.copyTarget!.x,
-          y: extraction.copyTarget!.y,
-        );
-        if (downloaded.kind == 'image' && downloaded.bytes != null) {
-          final saved = await _saveVisibleImage(
-            customer,
-            downloaded,
-            originalDownload: true,
-          );
-          if (saved != null) {
-            _visibleMediaTrace =
-                'copied unread message kind=image, original downloaded from JD image viewer';
-            return CapturedConversation(
-              stableKey: extraction.capture?.stableKey ??
-                  'customer:${sha256.convert(utf8.encode(customer))}',
-              customerName: extraction.capture?.customerName ?? customer,
-              customerExternalId:
-                  extraction.capture?.customerExternalId ?? customer,
-              capturedAt: inspection.capturedAt,
-              messages: [
-                ...(extraction.capture?.messages ?? const <CapturedMessage>[]),
-                saved,
-              ],
-            );
-          }
-        }
-      } on PlatformException {
-        // JD versions and download preferences vary. Preserve the verified
-        // screenshot-region path below as a non-destructive fallback.
-      }
-    }
+    // Automatic media capture is deliberately screenshot-first and never
+    // opens JD's modal image viewer. Only the newest candidate can create work.
+    imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
     for (final region in imageCandidates) {
       try {
@@ -614,7 +503,6 @@ class _CaptureHomeState extends State<CaptureHome> {
           final saved = await _saveVisibleImage(
             customer,
             visible,
-            viewportFallback: viewportFallbackUsed,
           );
           if (saved != null) capturedMedia.add(saved);
         }
@@ -624,11 +512,9 @@ class _CaptureHomeState extends State<CaptureHome> {
         // text already extracted from the visible conversation.
       }
     }
-    _visibleMediaTrace = 'copied unread message kind='
-        '${copiedMessageKind ?? 'not_checked'}, '
-        'visible image candidates=${imageCandidates.length}, '
-        'captured=${capturedMedia.length}, failures=$failures, '
-        'viewport_fallback=$viewportFallbackUsed';
+    _visibleMediaTrace = 'screenshot-first image candidates='
+        '${imageCandidates.length}, captured=${capturedMedia.length}, '
+        'failures=$failures; JD image viewer was not opened';
     if (capturedMedia.isEmpty) return extraction.capture;
     final uniqueMedia = <String, CapturedMessage>{
       for (final message in capturedMedia) message.stableId: message,
@@ -702,9 +588,20 @@ class _CaptureHomeState extends State<CaptureHome> {
     bool allowUnlabeledLatestImage = false,
   }) {
     bool isCustomer(String value) {
-      final raw = value.toLowerCase().replaceAll('...', '').replaceAll('…', '');
+      final raw = value.toLowerCase().trim();
       final expected = customer.toLowerCase();
-      return raw == expected || (raw.length >= 6 && expected.startsWith(raw));
+      if (raw == expected) return true;
+      if (raw.startsWith(expected)) {
+        final suffix = raw.substring(expected.length).trim();
+        if (suffix.isEmpty || RegExp(r'\d{1,2}:\d{2}').hasMatch(suffix)) {
+          return true;
+        }
+      }
+      final visiblePrefix = raw
+          .replaceAll('...', '')
+          .replaceAll('…', '')
+          .replaceAll(RegExp(r'\s+'), '');
+      return visiblePrefix.length >= 6 && expected.startsWith(visiblePrefix);
     }
 
     final customerLabels = inspection.observations
@@ -713,7 +610,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     bool validGeometry(OcrVisualRegion region) {
       if (region.x < .20 || region.x + region.width > .76) return false;
       if (region.y < .14 || region.y + region.height > .90) return false;
-      if (region.width < .08 || region.height < .055) return false;
+      if (region.width < .035 || region.height < .065) return false;
       // Portrait customer photos commonly occupy almost half of the visible
       // chat height. The previous .40 cap rejected those exact image bubbles.
       if (region.width > .48 || region.height > .76) return false;
@@ -729,7 +626,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     for (final label in customerLabels) {
       final matches = inspection.visualRegions
           .where(validGeometry)
-          .where((region) => label.y <= region.y && region.y - label.y <= .09)
+          .where((region) => label.y <= region.y && region.y - label.y <= .13)
           .toList()
         ..sort((left, right) =>
             (right.width * right.height).compareTo(left.width * left.height));

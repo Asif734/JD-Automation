@@ -68,7 +68,10 @@ class OcrCaptureExtractor {
       final currentSender = label.observation;
       final bottom = index + 1 < messageLabels.length
           ? messageLabels[index + 1].observation.y
-          : (currentSender.y + 0.075).clamp(0, 0.82);
+          // JD can leave a larger vertical gap before the newest bottom
+          // bubble. The next sender safely bounds older messages; the final
+          // sender may use the remaining verified chat area above composer.
+          : 0.82;
       final bodies = observations.where((item) {
         final text = item.text.trim();
         if (item.y <= currentSender.y + 0.006 || item.y >= bottom) {
@@ -209,7 +212,15 @@ class OcrCaptureExtractor {
 
   bool _isSellerIdentity(String value) {
     final text = value.trim();
-    return text.contains('旗舰店') && (text.contains(':') || text.contains('：'));
+    if (text.contains('旗舰店') && (text.contains(':') || text.contains('：'))) {
+      return true;
+    }
+    // Current JD builds display the signed-in support identity as names such
+    // as "格志打印机小甘", often with the timestamp merged into the same Vision
+    // observation. These are seller labels, not customer message bodies.
+    final withoutTimestamp = text.replaceAll(_timestamp, '').trim();
+    return RegExp(r'^格志打印机[\u3400-\u9fffA-Za-z0-9_-]{1,12}$')
+        .hasMatch(withoutTimestamp);
   }
 
   String _fingerprintText(String value) => value

@@ -263,6 +263,100 @@ void main() {
     expect(capture.messages.last.sender, '加普威旗舰店:小雷');
   });
 
+  test('captures current JD seller-name format during human handoff', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: '17:38:38 格志打印机小甘',
+            confidence: 1,
+            x: .47,
+            y: .48,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'ok', confidence: 1, x: .49, y: .52, width: .02, height: .02),
+        OcrObservation(
+            text: '17:39:12 格志打印机小甘',
+            confidence: 1,
+            x: .47,
+            y: .60,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'i will sent in a moment',
+            confidence: 1,
+            x: .43,
+            y: .64,
+            width: .16,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture, isNotNull);
+    expect(capture!.messages, hasLength(2));
+    expect(capture.messages.every((message) => message.direction == 'outgoing'),
+        isTrue);
+    expect(capture.messages.map((message) => message.body),
+        ['ok', 'i will sent in a moment']);
+  });
+
+  test('captures newest customer body with a large bottom-layout gap', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: '15:59:06 格志打印机小甘',
+            confidence: 1,
+            x: .45,
+            y: .58,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'well, please let me know, how can i help you',
+            confidence: 1,
+            x: .39,
+            y: .62,
+            width: .22,
+            height: .02),
+        OcrObservation(
+            text: 'jd_41aeec7741d05 16:00:20',
+            confidence: 1,
+            x: .42,
+            y: .69,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'we are done for now',
+            confidence: 1,
+            x: .46,
+            y: .79,
+            width: .12,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture, isNotNull);
+    expect(capture!.messages.last.direction, 'incoming');
+    expect(capture.messages.last.body, 'we are done for now');
+  });
+
   test('fingerprint tolerates OCR whitespace variation', () {
     OcrInspection inspection(String body) => OcrInspection(
           image: Uint8List(0),
