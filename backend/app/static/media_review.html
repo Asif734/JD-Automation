@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Media catalogue review</title>
+  <style>
+    body{font:14px system-ui;margin:0;background:#f6f7f9;color:#202124}header{position:sticky;top:0;background:white;padding:14px 20px;border-bottom:1px solid #ddd;z-index:2}main{padding:18px;display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}.card{background:white;border:1px solid #ddd;border-radius:12px;padding:12px}.preview{width:100%;height:210px;object-fit:contain;background:#eee;border-radius:8px}.row{display:flex;gap:8px;margin-top:8px}.row>*{min-width:0;flex:1}input,select,button{box-sizing:border-box;padding:8px;border:1px solid #bbb;border-radius:7px}input{width:100%}button{cursor:pointer;background:#1769e0;color:white}.muted{color:#666}.ok{color:#087f23}.error{color:#b00020}
+  </style>
+</head>
+<body>
+<header><strong>Knowledge media review</strong><div class="row">
+  <input id="token" type="password" placeholder="RAG admin token">
+  <input id="query" placeholder="Search filename, model, product…">
+  <select id="filter"><option value="false">Unverified</option><option value="true">Verified</option><option value="">All</option></select>
+  <button id="load">Load</button></div><div id="status" class="muted"></div></header>
+<main id="items"></main>
+<script>
+const $=id=>document.getElementById(id),views=['exterior','screen','internal','label','setup','other'],purposes=['product_showcase','instruction','troubleshooting','other'];
+const esc=s=>String(s).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
+function select(values,current){return `<select>${values.map(v=>`<option ${v===current?'selected':''}>${v}</option>`).join('')}</select>`}
+async function load(){localStorage.setItem('ragAdminToken',$('token').value);$('status').textContent='Loading…';const p=new URLSearchParams({query:$('query').value,limit:'200'});if($('filter').value)p.set('verified',$('filter').value);const r=await fetch('/v1/media-catalog?'+p,{headers:{'X-Admin-Token':$('token').value}}),d=await r.json();if(!r.ok){$('status').textContent=d.detail||'Failed';return}$('status').textContent=`Showing ${d.items.length} of ${d.total}`;$('items').innerHTML='';d.items.forEach(render)}
+async function render(x){const c=document.createElement('article');c.className='card';c.innerHTML=`${x.kind==='image'?'<img class="preview">':'<div class="preview">Video asset</div>'}<b>${esc(x.filename)}</b><div class="muted">${x.media_id}</div><div class="row"><input data-k="line" value="${esc(x.product_line)}"><input data-k="models" value="${esc(x.models.join(', '))}" placeholder="Models"></div><div class="row">${select(views,x.view)}${select(purposes,x.purpose)}</div><input data-k="caption" value="${esc(x.caption)}"><div class="row"><label><input data-k="verified" type="checkbox" ${x.verified?'checked':''}> Verified</label><label><input data-k="allowed" type="checkbox" ${x.customer_send_allowed?'checked':''}> Send allowed</label><button>Save</button></div><div class="result"></div>`;if(x.kind==='image'){const r=await fetch('/v1/media-catalog/'+x.media_id+'/preview',{headers:{'X-Admin-Token':$('token').value}});if(r.ok)c.querySelector('img').src=URL.createObjectURL(await r.blob())}const sels=c.querySelectorAll('select');c.querySelector('button').onclick=async()=>{const body={product_line:c.querySelector('[data-k=line]').value,models:c.querySelector('[data-k=models]').value.split(',').map(v=>v.trim()).filter(Boolean),view:sels[0].value,purpose:sels[1].value,caption:c.querySelector('[data-k=caption]').value,verified:c.querySelector('[data-k=verified]').checked,customer_send_allowed:c.querySelector('[data-k=allowed]').checked};const r=await fetch('/v1/media-catalog/'+x.media_id,{method:'PUT',headers:{'Content-Type':'application/json','X-Admin-Token':$('token').value},body:JSON.stringify(body)});c.querySelector('.result').textContent=r.ok?'Saved':(await r.json()).detail;c.querySelector('.result').className=r.ok?'result ok':'result error'};$('items').append(c)}
+$('token').value=localStorage.getItem('ragAdminToken')||'';$('load').onclick=load;$('query').onkeydown=e=>{if(e.key==='Enter')load()};
+</script></body></html>

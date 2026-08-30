@@ -1,0 +1,762 @@
+
+
+--- page 1 ---
+M880UT
+user manual
+
+--- page 2 ---
+Download our app from
+App store & Play store
+iOS
+https://apps.apple.com/us/app/grozziie/id6476171035
+Android
+https://play.google.com/store/apps/details?id=com.grozziie.printer
+https://apps.apple.com/us/app/grozziie/id6476171035
+https://play.google.com/store/apps/details?id=com.grozziie.printer
+
+--- page 3 ---
+contents
+01. Product Introduction
+1.1. What ’ s in the Packag e
+1.2. Attendance Machine Features
+02. Specifications
+03. Placement
+04. Installation
+05. Basic Setting
+5.1. Introduction of Keypad
+5.2. Manually Change the time zone
+5.3. Check B luetooth Address
+5.4. Input Password
+5.5. Change Password
+5.6. Manual Punch ( Clock In / Clock O ut Time )
+06. Grozziie App
+6.1. Connect with the Grozziie App
+6.2. H ow to connect the Attendance Machine with Grozziie App
+6.3. First time setup wizard
+0 7 . D e v ice Setup
+7.1. Set Time & Date
+7.2. Set Working Time
+7.3. Set Password
+7.4. Pay Period
+7.5. About Machine
+7.6. Print Format
+7.7. Setup Paper
+7.8. Column Position
+7.9. R eplace R ibbon
+7.10. B acklight Setup
+7.11. Music Time Settings
+7.12. DST
+7.13. Display Week Format
+08. Features of Grozziie App
+8.1. Get Started
+8.2. L i v e Chat
+8.3. V ideo
+8.4. O nline Store
+0 9 . T ime card
+10. Precautions
+11. Safet y  N otice s
+12. After Sales Ser v ic e
+13. W arrant y
+02
+02
+03
+03
+04
+04
+05
+06
+06-07
+07-08
+08
+09-10
+10-12
+12-13
+13
+14
+14-16
+16-17
+17
+18
+19
+20-21
+21
+22-23
+23
+24
+24-25
+25
+26-28
+29
+29
+30
+31
+32
+32
+
+--- page 4 ---
+o1 Product Introduction
+1.1 What’s in the Package 
+1
+Punch Card Attendance Machine
+2
+Power adapter
+lCD display
+screen
+3 4
+punch cards user manual
+1.2 Attendance Machine Features
+punch 
+attendance card here
+hanger
+power supply
+Function buttons
+02
+5
+warranty card
+speaker
+
+--- page 5 ---
+o2
+o3
+Specifications
+type Attendance Machine
+model m880UT
+input/ output Power Input: 90V~240V, Output: 12V~2A 
+11V-1800mAH (only supported for M880D)battery
+Color White
+Weight 1.1kg
+Package(LxWxH) 295mm(L)*290mm(W)*170mm(H)
+Placement
+Proper Placement and good use environment can keep a good condition of the
+attendance machine. Properly placed as shown in the following picture
+ Place the machine on a stable table at least 75cm high. 
+* Incorrect Placement 
+A place with much dust. 
+The place with direct sunlight or near a heat source. 
+A wet place that is in raining or water.   
+A place that is strongly shaking or getting impact
+03
+
+--- page 6 ---
+o4 Installation
+05
+Look at the Picture
+A. First, determine the installation height (it is recommended to make it 36-40 cm high 
+from the ground and put the first screw into the wall).
+B. Put the second screw into the wall according to the spacing of the hanging holes on 
+the back of the machine. 
+C. Align the hanging hole and hang the machine on the screw. The screw head shall keep 
+a 3mm distance from the wall
+Basic Setting
+5.1. Introduction of Keypad
+Confirm KeyIncrease Key Decrease Key Previous Key Next Key Back Key
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+printer_interface.php 
+Set time zone/Setting Key
+04
+
+--- page 7 ---
+5.2. Manually Change the time zone
+The Punch Card Attendance Machine allows you to configure the time zone to ensure 
+accurate  timekeeping.
+To Set the Time Zone:
+Press the Setting (     ) button repeatedly to scroll through all available time zones (EST → 
+CST →  MST → PST → AKST → HST). 
+Stop when your desired time is displayed. 
+The machine will automatically save the selection and play a confirmation tone/music.
+To Verify the Time Zone:
+Insert a punch card into the machine. 
+The printed time will include a zone letter (E, C, M, P, A, H) confirming the active setting.
+Eastern Time (E)
+Pacifc Time(P)
+Central Time (C)
+Alaska Time (A)
+Mountain Time(M)
+Hawaii Time (H)
+UTC
+Date Hours
+AM
+PM
+Minutes
+H
+07 1130
+F
+08 0100
+W at c h v i d eo from thi s  lin k  or sc an the QR  c o d e
+https : //printernoble.com/training _ videos/english/Attendence/
+set _ timezone _ manually.php
+05
+
+--- page 8 ---
+5.3. Check Bluetooth Address
+You can easily view the Bluetooth MAC address of the Punch Card Attendance Machine 
+for pairing or  troubleshooting purposes.
+Steps to Check the MAC Address
+1. Enter the Menu Interface  
+Press and hold the Setting (    ) key to open the menu interface.  
+2. Access the MAC Address Menu  
+Use the Increase (+) key until the display shows the “MAC” menu.
+Mac menu
+Mac address
+Notes
+The MAC address displayed allows you to identify your machine during a manual 
+Bluetooth search  in the Grozziie App.  
+This helps ensure you are connecting to the correct device.
+5.4. Input Password
+Press and hold the Setting (    ) key to enter the menu interface. 
+Use the Increase (+) key until the display shows “-|KEY” menu.
+-|KEY  Menu
+Password input field
+06
+
+--- page 9 ---
+A. Enter the Current Password
+When “-|KEY” menu appears, you will be prompted to enter the current password.  
+The default password is 000000.  
+To enter the password
+Press the O K ( ✓ ) ke y  to activate password input. - |KEY   M enu  Password  Input field  
+Use the Increase (+) or D ecrease ( – ) keys to ad j ust the value of the selected digit .
+Use the P re viou s ( ← ) and N e xt  ( → ) keys to move between digit positions.
+After entering the full password, press the Back (↻) key.
+Y ou can move to the next menu by pressing the Increase (+) key.
+5 . 5 . Chan g e Password
+If you want to change the password, you must first enter the current password. 
+Press the Increase (+) key once to move to the next menu.  
+The display will show “三 KEY” menu, which is the Change Password group menu.
+三KEY  M enu
+Password input field
+Set a New Password
+The new password must be six digits long.  
+Press the OK (✓) key to activate password input.  
+Use the Increase (+) or Decrease (–) keys to set each digit. 
+Use the Previous (←) and Next (→) keys to move between digit positions.  
+After entering the new password, press OK (✓).
+Confirm the New Password
+Re-enter the new six-digit password following the same steps.  
+Press OK (✓) to confirm.  
+The system will now save the new password.
+07
+
+--- page 10 ---
+Notes
+Always remember your new password. If forgotten, you will not be able to access secure 
+settings.  
+The password must contain exactly six digits
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+set_password_manually.php
+5.6. Manual Punch (Clock In/Clock Out Time)
+Use this option to record your working hours manually. Select “Clock In” at the beginning of 
+your shift  and “Clock Out” at the end of your shift. The time card includes six columns for 
+recording clock-in and  clock-out times. You can select which column to print by pressing 
+the corresponding key.  
+To print in a specific column, press the corresponding key:
+Column 1: Press the (＋) Increase key.
+Column 2: Press the (−) Decrease key.
+Column 3: Press the (→) Next key.
+Column 4: Press the (←) Previous key.
+Column 5: Press the (    ) Back key.
+Column 6: Press the (√) Confirm key.
+1 2 3 4 5 6
+Notes
+If you need to configure work shifts, you can set the required options through our mobile app.
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+manual_punch.php
+08
+
+--- page 11 ---
+06 Grozziie app
+6.1. Connect with the Grozziie App
+Download our app from App store and Play store
+iOS Android
+https://apps.apple.com/us/app/
+grozziie/id6476171035
+https://play.google.com/store/apps/
+details?id=com.grozziie.printer
+To connect with the Grozziie app follow the instructions below.
+A. Search for "Grozziie" on the App Store or Google Play to download the app. 
+B. Install the app and sign in. 
+C. If you do not have an account, create one using your email
+To install the app, follow the identical process on your tablet or Chromebook as you 
+would on your mobile phone
+D. In our Grozziie app you can choose the language
+09
+
+--- page 12 ---
+You can change the app language go to Profile > Switch 
+Language > select language
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+Download_Grozziie_App.php
+6.2.How to connect the Attendance Machine with Grozziie App
+10
+
+--- page 13 ---
+Ensure the Attendance Machine remains turned on through out the process.
+Tap the Attendance Machine icon in the app.
+Choose M880UT from the list.
+Connect using either the QR Scan feature or the Search option.
+Ensure that your device's Bluetooth is also turned on.
+After selecting the QR Code Scan option, use the camera to scan the QR code 
+located on the back of the Attendance machine.
+Mac Address
+11
+
+--- page 14 ---
+If you choose the search option, a list of devices will appear, showing the Bluetooth 
+MAC addresses of nearby Attendance Machines.
+You can find your Attendance Machine’s MAC address using MAC Address Menu.
+Tap the connect button to establish the connection
+For the first time connect with the Attendance Machine you need to set the 
+password the password must be 6 digit without “000000”.
+Insert the new password in two input fields and tap on save button.
+For the first time connect with the Attendance Machine you need to set the 
+password the password must be 6 digit without “000000”.
+Insert the new password in two input fields and tap on save button.
+6.3. First time setup wizard
+When setting up the app for the first time, it will guide you through three setup screens:  
+Set Time & Date: Configure the time, date, and date format.  
+Pay Period: Select the desired pay period.  
+Set Working Time: Define shift times and overtime rules.  
+
+After each setup screen, tap Next at the bottom right to save your settings. When the setup 
+wizard is  complete, a ‘Congratulations!’ pop-up appears—just tap Complete.
+Note: On every screen in the app, you will see detailed instructions to help you complete 
+the setup. 
+12
+
+--- page 15 ---
+07
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+connection_process_with_APP.php 
+ Device Setup
+When using the device for the first time, the Setup Wizard guides you through all the required 
+settings. If  you later need to modify any settings, you can do so through the Device Setup 
+option.
+After connecting the device, tap the Device Setup icon to open the setup menu and adjust 
+your settings  as needed.
+Note: If a password is already set, you must log in using that password. In this case, the wizard 
+will not be  displayed
+13
+
+--- page 16 ---
+7.1. Set Time & Date
+This menu allow to configure the time, date, and date format. After entering the date and 
+time, tap the "Set" button to apply the configuration.
+7.2. Set Working Time
+In this menu, you can select the Shift and set the Working Time for each shift.
+In the Shift Selection drop-down menu, you will see four options:  
+Flexible Work Schedule – for manual punch
+1, 2, 3 – for different shift times.
+Flexible Work Schedule:
+The Flexible Work Schedule mode allows employees to punch in and out without fixed start 
+and end  times. This mode is designed for variable or non-standard hours. The attendance 
+record is printed on  the punch card column according to the cursor’s position.
+14
+
+--- page 17 ---
+Manual Punching – Employees can clock in and clock out at any time by pressing the 
+appropriate  buttons (1 – 6) by changing the cursor’s position.  
+No Fixed Shift Time – The device does not compare punch times to a predefined schedule, 
+so no  late or early status is recorded automatically.  
+Color Printing – When using Flexible Work Schedule, you can manually choose the print 
+color  (Black or Red). The Auto color feature is disabled because no fixed shift times exist 
+for  comparison.  
+Best Use Cases – Ideal for part-time workers, freelance schedules, or workplaces where 
+daily  start/end times change frequently.
+Shifts 1, 2, and 3:
+The P unch C ard Attendance M achine supports up to three fixed shifts. Selecting Shift 1,  2,  or 3  
+allows  you to define and manage separate working times for employees.
+Shift 1 – Select this to set the Clock-In and Clock-Out times for one shift. This is typically 
+used  for single-shift operations.
+Shift 2 – Select this to set the Clock-In and Clock-Out times for two shifts. This is useful for  
+organizations with a day and evening shift.  
+Shift 3 – Select this to set the Clock-In and Clock-Out times for three shifts. This is ideal for 
+24 hour operations with rotating or round-the-clock staff.
+How It Works:
+Each shift has its own Clock In and Clock Out times that you can configure in the menu.
+The device compares punch times to the scheduled shift time to determine late arrivals or 
+early  departures.  
+When using Auto Color Format, the machine automatically prints Red if an employee 
+punches in  late or leaves early according to the set shift time. 
+This mode ensures accurate attendance tracking for multiple shifts in a structured work 
+schedule.
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+15
+
+--- page 18 ---
+Set cross-midnight time: In this system, each day starts at midnight (00:00) and ends at 
+midnight  (24:00). For shifts that begin on one day and continue into the next day (such as 
+night shifts).
+You can set the cross-midnight time to define when the next workday begins. This ensures 
+that all in/out  records are printed under the same date on the punch card.
+Example
+If you set the cross-midnight time to 03:00 AM, the device will continue printing all entries on 
+the same  date until 03:00 AM on the punch card.
+7.3. Set Password
+In this menu, you can set a new password.
+The password must be a six-digit numerical code, with each digit between 0 and 9.
+Ensure the "Password" and "Confirm Password" fields match. 
+Avoid using 000000 as a password. 
+After entering the password, tap the "Set" button to save the changes.
+16
+
+--- page 19 ---
+7.4. Pay Period
+In this menu, you can select the desired pay period. Available options include:
+Normal Month 
+Monthly
+Semi-Monthly 
+Biweekly 
+Weekly 
+After entering the desired Pay Period, tap the "Set" button to apply the configuration.
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+Device_setup.php
+17
+
+--- page 20 ---
+7.5. About Machine
+This menu allows you to set the working mode for the attendance machine from a list of 
+predefined modes: Normal, Self Test, Aging Test, Password Clear, Display Test, Music Test, 
+and Clock Chip Test. 
+Each mode sends a specific command to the device via Bluetooth. 
+After selecting the Self Test or Aging Test and tap on “Set” button, then insert a card to 
+complete the test. 
+You can clear the password with or without music, and it will be reset after four hours, 
+requiring a new password. 
+In Display Test mode, all display segments will flash multiple times. 
+By selecting the Clock Chip Test, you can view the current time from the clock chip on the 
+display. 
+Ensure a mode is selected before pressing the "Set" button to apply the configuration.
+After using other functions, select "Normal" and press the "Set" button to restore the 
+machine to its standard functionality.
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+about_machine.php 
+18
+
+--- page 21 ---
+7.6. Print Format
+In this menu, you can set the Punch Card Print Format.
+Day Format – The default preset is 90 Degrees, so the device prints the date at 90 Degrees 
+by  default. If you want to change this setting, you can select the date print angle: Normal.
+N ormal 90  D egree
+Time Format – Choose between 24-hour or 12-hour time display.  
+UTC Format – Select either Normal or USA format. 
+Color Format – Choose the punch card printing color: Auto, Black, or Red.
+How It Works:
+Auto – The device automatically prints Red if an employee punches in late or leaves early  
+based on the scheduled shift time. To use this feature, you must select Shift 1, 2, or 3.  
+Black or Red – The device always prints in the selected color regardless of punch timing. 
+This  option is used when the Flexible Work Schedule shift is selected.
+Watch video from this link or scan the QR code
+https: // printernoble.com / training _ videos / english /A ttendence /
+P rint _ format.php 
+19
+
+--- page 22 ---
+7.7. Setup Paper
+In this menu, you can configure the paper gap settings for the upper and lower printing 
+positions and select the paper recognition method.
+A. Write the value for set the upper gap for the printed text so you can adjust the position 
+above and below of the printed text. 
+B. Choose the paper front and back recognition method. Options include AutoCheck or 
+NoCheck. AutoCheck enables automatic recognition, while NoCheck disables this 
+feature. 
+C. After entering the desired times, tap the "Set" button to apply the configuration.
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+D. If you want to set the AutoCheck Mode, the machine will automatically detect the front 
+and back of the punch card using an identification point.
+Identification point of punch card
+Note: If you are using another company’s punch card, ensure that it matches the 
+specifications of our punch card: Height: 18.5 cm and Width: 8.5 cm.
+20
+
+--- page 23 ---
+18.5 cm
+8.5 cm
+7.8. Column Position
+This setting allows you to adjust the column-wise printing position on the card.
+Set the starting position for the first column in 0.1 mm increments.
+Define the gaps between columns to adjust spacing dynamically. 
+Use positive values to move columns to the right and negative values to shift them to the left. 
+Ensure precise gap measurements for accurate alignment.
+Press the Save Button to apply the configuration.
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+Printing_position_setup.php 
+21
+
+--- page 24 ---
+7.9. Replace Ribbon
+This setting is used for ribbon replacement:
+Click the "Replace Ribbon" button to move the print head to the center, making ribbon 
+replacement easier. 
+Ensure the ribbon is properly aligned before resuming printing to maintain optimal 
+performance.
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+1
+Open the transparent cover
+2
+Take the ribbon out carefully 
+3
+R oll  the wheel  lik e this w a y  and try  t o tak e out some good ribbon f or  prin t
+22
+
+--- page 25 ---
+4
+Again set the ribbon and make sure that the ribbon is inserted 
+into this gap between the print head and the stainless steel plate
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+Replace_ribbon.php
+7.10. Backlight Setup
+This setting allows you to configure the backlight duration for operation on battery or while 
+connected to an AC adapter:
+A. Enter the number of minutes after which the backlight will turn off when running on battery. 
+B. Specify the number of minutes after which the machine will power off when running on 
+battery. 
+C. Input the number of minutes after which the backlight will turn off when the machine is 
+connected to an AC adapter. 
+D. After entering the desired times, tap the "Set" button to apply the configuration.
+23
+
+--- page 26 ---
+7.11. Music Time Settings
+In this menu, you can define and set music play times for every shift's in-time and out-time.
+Two parameters must be set for each shift: Play Music After and Play Music For. 
+Play Music After specifies the delay (in minutes) after the in-time or out-time before 
+the music starts. 
+Play Music For determines the duration (in seconds) the music will play
+Example: If Play Music After is set to 1 minute and Play Music For is 10 seconds, music will 
+play at 8:01 if the shift time is 8:00. After entering the values, tap the "Set" button to apply 
+the configuration.
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+7.12. DST
+With this menu, you can set Daylight Saving Time (DST) changes to Automatic or Manual.
+Auto DST – The machine will automatically adjust for DST according to the scheduled 
+changes. 
+Manual – The machine will not adjust for DST unless you change it manually.
+24
+
+--- page 27 ---
+Note: On every screen in the app, you will see detailed instructions to help you complete the 
+setup.
+7.13. Display Week Format
+In this menu, you can set your preferred Week Format according to your needs. 
+Press the Save Format button to apply the configuration.
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/
+More_settings_in_APP.php 
+25
+
+--- page 28 ---
+08 Features of Grozziie App
+8.1. Get Started
+Upon logging into the Grozziie app, you will first see the 'Get Started' section. Here, you can 
+access printer drivers for Windows and Mac, label printing software, Apps, user guide 
+manuals, and video tutorials to help you understand how to use the printer effectively.
+A. Printer Drivers
+In this menu, you can find our all-printer driver for Windows and MacBook, along installation 
+video tutorial.
+To download the driver, click the download button. 
+After downloading, if you download driver software for windows PC, please transfer the 
+software to a Windows PC.
+If you download driver software for MacBook, please transfer the software to a MacBook.
+Follow the installation steps in the video tutorial, which can be accessed by clicking the 
+tutorial button.
+B. Download Software's
+This section, you can find the label printing software for Windows and MacBook, and 
+installation video tutorial.
+You can download the software by clicking the download button.
+If you download software for Windows PC, please transfer the software to a Windows PC.
+If you download software for MacBook, please transfer the software to a MacBook.
+By clicking the tutorial button, you can access the video tutorial where you find installation 
+steps.
+26
+
+--- page 29 ---
+C. Download apps
+This menu includes download links for the Attendance Machine app, the Bluetooth thermal 
+printer app, and the Windows computer label printer software.
+Here, you can find download links for the Grozziie app, compatible with both Android and iOS 
+devices. Use these apps to connect and manage your printers wirelessly
+27
+
+--- page 30 ---
+D. Video Tutorials
+In this section, you will find video tutorials that provide visual guidance on installing drivers, 
+configuring software, and troubleshooting common printer issues. These tutorials are 
+designed for beginners and will help you get started quickly.
+E. User Guides and Manuals
+This section contains downloadable user manuals and guides with step-by-step instructions 
+for setting up and using your device. It covers topics such as installation, troubleshooting, and 
+maintenance.
+28
+
+--- page 31 ---
+8.2. Live Chat
+If you encounter any issues with our products or software, you can contact our Support team 
+via live chat. Our support team is available to assist you with anything you may need. In the 
+live chat, you can share with us Images, Video & files. To share any file, click the (+) icon there 
+you can share Images, Video & files.
+Live chat
+You can send
+document,photo 
+or videos from 
+here
+Watch video from this link or scan the QR code
+https://printernoble.com/training_videos/english/Attendence/Live_chat.php 
+8.3. Video
+Our app includes a video option where you can view all of our product videos and learn. how 
+to operate each one.
+29
+
+--- page 32 ---
+8.4. Online Store
+Inside the "Get Started" section, by clicking "Home," you will be redirected to 
+our online store.
+This is our online store. You can purchase all of our available products. The store offers a 
+wide range of items, allowing you to easily find and buy what you need directly from the 
+website.
+You can also visit our online store directly by using this link: https://www.wowomart.com.
+30
+
+--- page 33 ---
+09 Time Card
+Our time cards make your life easier. Here you can easily understand when employees 
+come to the office and when they leave. Those who came to the office late and left early 
+can be identified and easily understood.
+Column No
+01
+02
+03
+04
+05
+06
+07
+08
+Time card
+Column Details
+Column for the date.
+Column for entry time of the 1st shift.
+Columns for exit time of the 1st shift.
+Column for entry time for the 2nd shift.
+Column for exit time for the 2nd shift
+Columns for overtime entry time.
+Columns for overtime exit time.
+Columns for counting total working hours.
+31
+
+--- page 34 ---
+10
+11
+precautions 
+Avoid using and storing the Attendance Machine in high-temperature, high humidity, 
+or polluted environments. 
+The Attendance Machine power adapter should be connected to a properly grounded 
+outlet. Avoid large motors or other power supply voltage fluctuations that can cause 
+the device to use the same socket.
+Users are not allowed to disassemble the machine for repair or renovation. 
+Keep the manual for future reference.
+Safety Notices
+Do not bend the power cord excessively or place objects on the cord.
+Keep the printer out of reach of children.
+Use only approved accessories and do not try to disassemble, or repair the unit by 
+yourself.   Keep the attendance machine away from water and other objects that 
+could penetrate the components.
+lease unplug the printer when it is not in use for long periods.
+If your problem is still not resolved, please contact us.
+32
+
+--- page 35 ---
+Cer tificat e
+W arr an t y  Car d In f orma tion
+Dear  cust omer , thank y ou f or  choosing our  
+pr oducts, In or der  t o pr o vide y ou qualified 
+pr oducts and enjo y  pr o f essional  servic es, please 
+r ead the f ollo wing w arr an ty  t erms car e full y  t o 
+ensur e tha t the pr oducts ar e in v alid w arr an ty .
+
+W arr an t y , R e funds and ex change p olic y
+R e turn P olic y: Y ou can r e turn it ems within 30 
+da y s o f  deliv ery  (pr oducts must be r e turned 
+unused).
+W arr an t y  or  e x change P olic y: I f  pr oduct quality  
+pr oblems cause it t o be unusable, w e ar e willing 
+t o pr o vide w arr an ty  or  e x change servic e. Y ou can 
+e x change f or  a ne w  pr oduct within 30 da y s a ft er  
+the pr oduct is deliv er ed. I f  it e x c eeds 30 da y s but 
+does no t e x c eed 300 da y s, w e can pr o vide 
+w arr an ty  servic e. N on-pr oduct quality  issues ar e 
+no t within the sc ope o f  this servic e.
+S hipping M e thod f or  R e turns & Ex changes: W e 
+r ec ommend tha t y ou choose a shipping me thod 
+tha t can tr ack logistics in f orma tion online, and 
+in f orm us o f  the shipping in f orma tion f or  r e turn. 
+W e do no t ac c ep t C OD deliv ery  me thod.
+Timeliness: R e turns and r e funds gener all y  tak e 3 
+t o 4 w eeks; e x changes gener all y  tak e 1 t o 2 
+w eeks. The specific time limit is subject t o the 
+c ourier  c ompan y .
+R e fund Amoun t I ssue: W e will  r e fund the actual  
+amoun t o f  the pr oduct or der ed t o y our  pa ymen t 
+ac c oun t. I f  ther e is a cr edit car d or  tax deduction, 
+the actual  r e fund fr om the bank will  pr e v ail, 
+depending on the penalty  bank and billing c y cle.
+I f  possible, please use the original  shipping 
+pack aging f or  r e turns and e x changes.
+I f  y ou ha v e an y  questions, y ou can c on tact us 
+thr ough the QR c ode on the machine.
+
+ * Please k eep this w arr an ty  car d in a sa f e plac e, 
+no r eplac emen t if  missing this car d. 
+
+*S pecial  N o t e:
+
+The righ ts o f  t erms in t erpr e ta tion and modifica tion 
+belong t o the c ompan y N o t e:
+ Please k eep this car d as the w arr an ty  c ertifica t e
+and who it when r e turning the pr oduct or  r epair .
+R epair  R ec or ds
+Pr oduct m odel
+Ba t ch n o .
+in v oic e n o .
+pur chase d a t e
+installa tion d a t e
+buy er  n ame
+buy er  a ddr ess
+buy er  phone n o .
+buy er  E-m ail
+v endor  n ame
+v endor  a ddr ess
+v endor  phone n o .
+w arran ty  sc ope
+Pr oduct i ssues
+r e turning d a t e
+servic e s ta tion
+t r ouble shoo ting
+r epair  d a t e
+r epairman
+deliv ery  d a t e
+w arran ty  time
+
+--- page 36 ---
+- M ast er  Y our  H ours
+12 After Sale Services
+ If you encounter any issues with the product, please contact us promptly.
+TIMOZIA provides a 12-month warranty. If you encounter any issues with the product, 
+please contact the TIMOZIA team to promptly receive troubleshooting tips or a 
+replacement. 
+Visit our website www.printernoble.com
+version 4.2

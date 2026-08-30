@@ -1,0 +1,7 @@
+fastapi
+faiss-cpu
+numpy
+openai
+pydantic
+python-multipart
+uvicorn[standard]

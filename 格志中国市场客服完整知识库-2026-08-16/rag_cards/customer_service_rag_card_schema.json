@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CustomerServiceRagCard",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "status",
+    "source_files",
+    "product_line",
+    "models",
+    "intent",
+    "issue",
+    "keywords",
+    "risk_level",
+    "auto_reply_allowed",
+    "reply_template",
+    "actions"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_\\-]+$"
+    },
+    "version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "draft", "deprecated"]
+    },
+    "source_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "product_line": {
+      "type": "string",
+      "description": "all, attendance_machine, thermal_printer, dot_matrix_printer, wifi_bluetooth_printer, order_after_sales, tmall_rule, presale"
+    },
+    "models": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "intent": {
+      "type": "string",
+      "description": "tutorial, video_tutorial, troubleshooting, presale, after_sales, complaint, invoice, logistics, safety_rule"
+    },
+    "issue": {
+      "type": "string"
+    },
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "synonyms": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "auto_reply_allowed": {
+      "type": "boolean"
+    },
+    "required_slots": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "reply_template": {
+      "type": "string"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string" },
+          "location": { "type": "string" },
+          "url": { "type": ["string", "null"] },
+          "fields": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "do_not_say": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "escalation": {
+      "type": "string",
+      "default": ""
+    },
+    "priority": {
+      "type": "integer",
+      "default": 0
+    }
+  },
+  "additionalProperties": false
+}

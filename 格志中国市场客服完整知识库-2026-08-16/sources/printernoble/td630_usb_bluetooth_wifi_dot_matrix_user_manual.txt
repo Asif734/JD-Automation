@@ -1,0 +1,772 @@
+
+
+--- page 1 ---
+user manual
+USB, Bluetooth, WiFi
+Dot printer
+Download our app from App store & Play store
+Android
+ iOS
+
+--- page 2 ---
+01. Product Introduction 01
+02. Printer Components 01-02
+03. Installing Paper Tray 02
+04. Installing Continuous Feed Paper 02-03
+05. Installing The Ribbon Cartridge 03-05
+06. Paper thickness adjustment handle position 05
+07.  Paper specifications 06
+08. Printer alerts and solutions
+8.1. Printhead overheat protection 06
+8.2. Paper out or Paper jam error 06
+09. Printer Maintenance
+9.1. Regular cleaning and cleaning tools 06
+9.2. Cleaning components 06-07
+10. Printer S pecifications 08
+11. Connect to the c omputer 08-09
+12. Connect the printer to the w indo w s system 09-1 4
+13. Connect the printer w ith m ac system 1 4 -22
+14. G ro zz iie app
+1 4 .1. Connect the Printer w ith the A pp &  M o b ile 22-2 4
+1 4 .2. H o w  to connect the dot printer w ith gro zz iie app 2 4 -31
+1 4 .3. L ive chat 31-32
+1 4 . 4 . G et S tarted 32-3 4
+1 4 .5. V ideo 35
+1 4 .6. O nline S tore 35
+15. Precautions 36
+16. S afety N otices 36
+A fter S ale S er v ice
+W arranty
+Content
+
+--- page 3 ---
+01
+o1 Product Introduction
+o2 Printer Components
+1
+Printer
+2
+Ribbon Cartridge
+3
+Paper Holder
+6
+User Manual
+5
+USB Cable
+4
+Power cable
+7
+Warranty Card
+wiFi
+Dot Printer
+Control Panel
+Ribbon Cartridge
+Paper Thickness adjustment lever
+Paper Guide Roller
+Printer Cover
+Print Head
+
+--- page 4 ---
+02
+USB Interface
+1. Take the paper tray out of the packaging. 
+2. Place the printer on a flat surface.  
+3. Insert the paper tray horizontally into the printer, following the direction shown in the 
+diagram.  
+4. Slide the front guide plate to the far-left position. 
+1. Place the printer on a flat surface and move the guide sliders to the center for alignment.  
+2. Open the sprocket cover and align the holes of the continuous feed paper with the 
+sprocket pins.  
+3. Close the sprocket cover, pull the paper straight, and lock the clamps on both sides.  
+4. Turn on the printer. Once the startup process is complete, press the Feed/Eject button to 
+load or  reposition the paper.
+o3 Installing Paper Tray
+o4 installing Continuous Feed Paper
+
+
+--- page 5 ---
+03
+Socket Bracket Cover
+Sprocket Bracket 
+Sprocket
+Print Head
+paper thickness adjustment lever
+Printer cover
+SprocketIntermediate
+guide slider
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=1
+1.  Ensure the printer is turned off.
+2.  Open the printer cover.  
+3.  Move the paper thickness adjustment lever to the highest position.  
+4.  Shift the print head to the center position.
+ Warning: Do not replace the ribbon while the printer is powered on, as it may start  
+unexpectedly and cause injury.
+o5 Installing the Ribbon Cartridge
+
+--- page 6 ---
+04
+5.  Remove the ribbon cartridge, ensuring the side with the adjustment knob is facing you. 
+Turn the  knob in the direction of the arrow to tighten the ribbon for easier installation.
+6.  Align the clips on both sides of the ribbon cartridge with the installation slots on the 
+printer. Gently  push it forward until it securely clicks into place.
+7. Align both sides of the ribbon guide with the guide slots on the carriage and snap it into 
+place.  
+8. Ensure the ribbon is not wrinkled, then turn the ribbon cartridge knob in the direction of 
+the arrow  to tighten it.  
+9. Slide the print head back and forth several times to confirm the ribbon is properly 
+installed.  
+10. Once the ribbon cartridge is installed, return the paper thickness adjustment lever to its 
+original  position and close the printer cover.
+Ribbon nip
+Ribbon core
+print head
+Ribbon Cartridge
+Ribbon knob
+Ribbon Core
+Ribbon nip
+
+--- page 7 ---
+05
+1. Replace the ribbon cartridge promptly when print colors become faint. Continuing to use 
+a worn  ribbon may reduce print quality and damage the print head.  
+2. When removing the ribbon cartridge, ensure the printer is turned off. Move the print head 
+to the  center, remove the ribbon guide, and lift the old cartridge upward. Then, install a new 
+ribbon  cartridge following the steps above.  
+3. Use only original manufacturer-approved ribbon cartridges. Damage caused by third-
+party ribbons  will not be covered under warranty.  
+4. Turn the ribbon cartridge knob in the direction of the arrow.
+Important Notes
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=2
+*This model has 6 adjustable positions (able to print 1-6 layers of paper). When replacing 
+the ribbon, set  it to position 6.
+Note:
+To ensure good print quality and prevent paper jams, please adjust the paper 
+thickness adjustment lever  to the corresponding position based on the type of 
+paper being used.
+06 Paper Thickness Adjustment Handle Position
+No. 6 adjustable 
+position
+No. 1 adjustable 
+position
+
+--- page 8 ---
+06
+07 Paper Specifications
+Note:  
+To ensure print quality, make sure the printed content stays within the print area.  
+If the printed content exceeds the print area, it may cause damage to the printhead pins.
+08 Printer Alerts and Solutions
+• Symptom: The printer automatically switches from bidirectional printing to unidirectional  
+printing.  
+• Cause: The printhead temperature has exceeded the warning threshold and entered overheat  
+protection mode.  
+• Solution: Please wait patiently. Once the printhead temperature decreases, normal printing 
+will  resume automatically.
+8.1.  Printhead Overheat Protection
+09 Printer Maintenance
+• Regular Cleaning: Clean the printer every three months or after 300 operating hours.  
+• Cleaning Tools: Use a dry cloth (for metal parts, use a soft cloth).
+• Cleaning Oiled Parts: Wipe any oiled components of the printer with a dry cloth.  
+• Cleaning the Paper Feed Platform: Remove paper scraps, dirt, and dust.  
+9.1. Regular Cleaning and Cleaning Tools
+9. 2 . Cleaning Co mp onents
+• Symptom:  The paper indicator light is on.  
+• Cause:  The printer is out of paper or a paper j am has occurred.  
+• Solution:  Reinstall or remove the paper as needed. The printer will return to normal operation.
+8. 2 .  Pa p er Out o r Pa p er J a m  E rror
+
+--- page 9 ---
+07
+Notice  
+Before cleaning, turn off the printer and unplug the power cord.  
+If the printer is used in a dusty environment, dirt buildup may affect normal operation. In this 
+case,  shorten the maintenance interval.  
+After a print job, the printhead and surrounding components may be hot. Avoid cleaning at 
+this  time.  
+Do not use hard cloths or flammable solvents to clean the equipment.
+1. This is a Class A product. In a residential environment, it may cause radio interference. In such  
+cases, users may need to take appropriate measures to mitigate the interference.
+  
+2.                  This product is designed for safe use only in non-tropical climate conditions.  
+
+3.                 This product is intended for safe use only at altitudes below 2000 meters (≤2000m).  
+
+4. The power outlet should be installed near the device and should be easily accessible.
+Statement
+• Cleaning the Carriage Shaft:  The carriage shaft is coated with a layer of oil to ensure smooth 
+movement, but it easily attracts  dust.   
+Use a soft cloth to remove the dust.  
+Apply an appropriate amount of lubricant.  
+Move the printhead back and forth several times to distribute the lubricant evenly. 
+
+--- page 10 ---
+08
+Specification Details
+Print Dot Diameter 
+Carbon Copy Capability
+0.25 mm
+1 original + 5 copies (quick form)
+Number of Columns 82 columns
+Printing Method Serial impact dot matrix
+Printing Operation Bidirectional logic seeking print
+Bluetooth SPP / BLE
+Wi-Fi 2.4G
+Paper Feeding Method
+Interface Standard
+Flat push feed
+USB port
+Paper Thickness ≤ 0.45 mm
+Paper Size 100–200 mm
+Ribbon Life Approx. 2 million characters
+Soft w are Upgrade
+Po w er Input
+USB u pgrade
+100–240 V  ~  50/ 6 0 H z ,  2.0A
+10 Pr i n te r Sp e c i f i c ati on s
+This printer can be configured w ith a USB interface (the specific interface configuration of the 
+product is  sub j ect to the physical product).  Please use the appropriate interface cable to 
+connect the printer to the computer as needed.
+1.  Insert the A-type connector (flat) of the USB cable into the USB port of the computer.  
+2.  Insert the B-type connector (s q uare) of the USB cable into the USB port of the printer.
+Conn e c ti ng th e  USB c a b le :
+11 Conn e c t  to th e  compu te r
+USB Data cable
+
+--- page 11 ---
+09
+1. The power outlet voltage must be 220V~ (±10%).  
+2. A properly grounded power outlet is required.
+Warning
+12  Connect the printer to the Windows System
+To connect the printer to a Windows laptop or PC, follow the instructions below.
+A. Connect the printer to your Windows laptop or PC using a USB cable  
+B. Download the latest driver version from our official website. 
+ https://printernoble.com/td630series/
+C. Disable any antivirus software (e.g., 360 Security) before proceeding.  
+D. Install the downloaded driver by double-clicking the file, clicking Next, and then Install.  
+E. Make sure the printer stays powered on during the installation, then click Finish.
+Scan Me
+or
+F. A new printer setup window will appear—click Search.  
+G. Ensure paper is inserted into the printer. 
+H. Select the driver from the list and click Next.
+Note: After connecting the USB cable, avoid any impact or collision with the connectors.
+
+--- page 12 ---
+10
+I.  You will then see fields to enter the Wi-Fi SSID and password.  
+J. Enter the same Wi-Fi SSID and password that your computer is connected to, 
+then click Next.
+K. The printer should automatically power off. (If it does not, the Wi-Fi setup was 
+unsuccessful.)  
+L. Now, turn on the printer, and the paper will come out automatically. 
+M. Reinsert the paper and wait patiently for the installation to complete.
+search
+Password
+WiFi Name
+Next
+Next
+
+--- page 13 ---
+11
+N. A message will appear confirming that the printer driver has been successfully installed.  
+O. Go to the Control Panel and select View devices and printers.  
+P. Right-click the printer name, select Printer properties, and click Print Test Page. A 
+Windows test  page should print.
+Q.  If the Windows test page does not print, make sure the IP address of the printer driver 
+matches  the IP address of the Wi-Fi printer.  
+R. You can find the printer’s IP address by performing a self-test.
+Print test page
+
+
+--- page 14 ---
+12
+S. In Control Panel > Devices and Printers, you will see two TD630 S printers listed—one 
+for USB  and one for Wi-Fi.  
+T. Right-click on the Wi-Fi printer, go to Properties, and then click the Ports tab to find 
+the IP address  of the installed printer.
+Note: To perform a self-test, start with the printer powered off. Press and hold the right-side  
+button and the power button at the same time. Once the printer turns on, release the power  
+button but keep holding the right button for 3 more seconds, then release it. After that, insert  
+paper into the printer.
+Printer properties
+192.168.0.134
+IP: 192.168.0.134
+
+--- page 15 ---
+13
+U. If the IP address does not match, you will need to create a new IP port for the printer.  
+V. Click Add Port, then select Standard TCP/IP Port.
+W. Click Next, enter the printer's IP address from the self-test page, and click Next again.
+next
+Add port...
+next
+
+--- page 16 ---
+14
+X. Wait for the setup process to complete. You will see two more screens—click Next on 
+both, and  then click Finish.
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=3
+13 Connect the printer with Mac System
+To connect the printer to a MacBook, follow the instructions below.
+A. Connect the printer to your MacBook using a USB cable.  
+B. Download the latest driver version from our official website. 
+ https://printernoble.com/td630series/
+C. Locate the downloaded driver file in your Downloads folder.  
+D. Double-click the file to begin the installation.  
+E. Click Continue to proceed.
+Scan Me
+or
+1 . Installing the Printer Driver 
+n ext
+
+--- page 17 ---
+15
+F. After clicking Continue, the installation window will appear. Click the Install button. 
+When  prompted, enter your Mac password.
+G. Click Install again to start the installation process.  
+H. Once the installation is complete, click Close to exit the installer.
+Continue
+Close
+
+--- page 18 ---
+16
+A. From the Apple menu, open System Settings.
+2. Adding the Printer to Your Mac
+B. Scroll down and click Printers & Scanners.
+C. Click the Add Printer, Scanner, or Fax button to add a new printer.  
+D. Select your printer from the list of available printers.
+Add
+Printers & Scanners
+Add Printer, Scanner, or Fax 
+
+--- page 19 ---
+17
+E. Ensure the printer is turned on and connected via USB. If it is not connected, it will not  
+appear in the list.  
+F. Click the Add button in the bottom right corner. The printer is now successfully added.  
+G. Restart your MacBook or reconnect the printer’s USB cable to finalize the setup.
+A. For the first print job, restart your MacBook or reconnect the printer’s USB cable.  
+B. Open the document you wish to print.  
+C. Click the Print icon or press Command + P to open the print dialog.  
+D. Select your printer from the dropdown list.
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=4
+Printing Document with Advanced Settings
+1. Selecting the Printer
+
+
+--- page 20 ---
+18
+A. In the print dialog, click Page Size to view more size options.
+2. Adjusting Paper Size and Other Print Settings
+B. To add more custom page sizes, click Manage Custom Sizes.
+Manage custom
+sizes...
+
+--- page 21 ---
+19
+C. Click the + icon to create a new custom size, then enter the Width and Height in the  
+respective fields  
+D. Enter a name for the custom size, set the dimensions, and save it for future use.
+A. Scroll to the bottom of the system print dialog and click Printer Options, then select 
+Printer  Features..
+3. Configuring Advanced Settings for Specific Print Jobs
+
+
+--- page 22 ---
+20
+B. You will find two sections: General and Advanced Settings.
+C. To adjust the print rotation, use the Rotation option under the Advanced Settings 
+section.
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=5
+
+
+--- page 23 ---
+21
+Removing the Printer and Driver from Your Mac
+1. Removing the Printer
+A. Open System Settings, then click on Printers & Scanners. 
+B. Select the printer you want to remove and click the Remove Printer button. The printer  
+will be removed from the list.
+2. Removing the Printer Driver
+A. Open Finder, then navigate to the Library folder.
+remove Printer
+
+--- page 24 ---
+22
+B. Locate the Printers folder inside the Library.  
+C. Open the Printers folder, select the relevant driver files, and move them to the Trash.  
+D. If prompted, enter your Mac password to confirm the deletion. 
+ Your printer and driver are now completely removed from your Mac.
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=6
+14  Grozziie App
+14.1. Connect the Printer with the App & Mobile
+Download our app from App store and Play store
+iOS
+https://apps.apple.com/us/app/
+grozziie/id6476171035
+Android
+https://play.google.com/store/apps/
+details?id=com.grozziie.printer
+Move to bin
+
+--- page 25 ---
+23
+To connect the printer with the app & mobile follow the instructions below. 
+A. Search for “Grozziie” on the App Store or Google Play to download the app. 
+B. Install the app and sign in. 
+C. If you don’t have an account, create one using your  email.
+To install the app, follow the identical process on your tablet or Chromebook as you would on 
+your mobile phone.
+D. In our Grozziie app you can choose the language
+You can change the app language go to Profile > Switch Language > select language
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=7
+
+
+--- page 26 ---
+24
+The Grozziie App offers a plethora of functions. Here, I will delineate the primary functionalities 
+of the  Grozziie app.
+14.2.  How to connect the Dot Printer with Grozziie App
+Dot Printer
+Live chat
+Get started
+Video
+• Tap the Dot Printer icon in the Grozziie app.  
+• Connect using either the QR Scan feature or the Search option.
+• If you select the QR Code Scan option, use your device’s camera to scan the QR 
+code  located on the back of the Dot Printer.
+
+
+--- page 27 ---
+25
+• If you choose the Search option, a list of nearby Dot Printers will appear, showing 
+their  Bluetooth MAC addresses.  
+• You can find your Dot Printer’s MAC address by performing a self-test.
+• The Grozziie app supports printing via both Bluetooth and Wi-Fi.  
+• To print using Bluetooth, tap Connect Bluetooth.   
+• You will then see options for Document Print and Label Print.
+
+
+--- page 28 ---
+26
+• To print using Wi-Fi, tap Connect Wi-Fi.   
+• On the next screen, enter your Wi-Fi credentials.  
+• Tap the Set button to confirm. 
+• After setup, the Document Print and Label Print options will be available.
+Document Print:
+Tap on document print icon
+Here, you can conveniently print directly from WhatsApp, WeChat, and files/documents.  
+Simply click on the desired document, select your file, and proceed to print it with ease.
+
+--- page 29 ---
+27
+You can print a  single or 
+multiple  documents.
+First, select your  
+document.
+Various  customization  
+options are  available. Then 
+tap the print preview button
+Tap the Print Out  button to 
+start  printing.
+Paper Size (W)
+Paper Size (H)
+Contrast
+Copies
+Direction
+Position(Right)
+Position(Left)
+Page (Start)
+Page (End)
+Rotate
+
+--- page 30 ---
+28
+Paper Size (W)
+Paper Size (H)
+Page (Start)
+Page (end)
+Rotate
+Color Effect
+Printer
+Print Preview
+Paper Size (W) refers to the width of the paper. Here, 
+you can customize the paper width.
+Paper Size (H) refers to the paper's height. Here, you 
+can customize the paper's height size.
+Suppose your file has 15 pages, but you only need to 
+print pages 9 through 15. You can select page number 
+9 here.
+Suppose your file has 15 pages, but you need to print 
+pages 09 through 15. In that case, you can select page 
+number 15 here.
+Here, you can rotate any image.
+When printing an image, you have the option to 
+enhance it with various color effects.
+Here you can connect your printer via Bluetooth and 
+also check whether the printer is connected or not.
+After selecting "Print Preview," you'll be able to view the 
+document's printable area before proceeding with printing.
+DescriptionName
+Here ,  we will e x plain h ow to navigate o u r D oc um ent s ection .  U pon s electing t h e doc um ent , 
+y o u  will enco u nter s everal f u nction s,  w h ic h  I  will o u tline b elow .
+Print c op y
+Contra s t
+Here, you can choose the number of copies you need.
+If you believe the te x t print q uality could be improved, 
+you can bold or normalize the te x t.
+
+--- page 31 ---
+29
+Label Print:
+There are two sections on Label Print.
+Model: In the Model Section, there are some templates for printing purposes; you can choose 
+any  kind of template according to your label size for print.
+A. Model.  
+B. Create a Label.
+
+
+--- page 32 ---
+30
+Click on create label  Confirm Paper size  
+and tap on Create  
+Label button
+You can add Text,  
+Barcode, QR, Table,  
+Image, Emoji etc.
+To add Barcode, QR  code 
+tap on the  respective icon 
+and  type the content
+To add Table by tap  on 
+table icon.
+Now you can add  and 
+delete column,  row and 
+text
+You can save the  label 
+for later use
+To print click on  Print 
+Button
+Create a Label: Here, you can print labels and customize them in this section. Log in to our app  
+and click on the Label Print option. Then select Create Label. Our software will automatically  
+detect the paper size according to your printer. You can also change the paper size according 
+to  your requirements. The label will be displayed based on your printer, and now you can 
+customize  it.
+
+--- page 33 ---
+31
+Text
+Barcode
+QR Code
+Table
+Image
+Scan
+Time
+Emoji
+Serial Number
+Shape
+Line
+Background
+Here you can input text.
+Here, you can generate a barcode.
+Here, you can enter the text for a QR code.
+Here, you can create a table.
+Here, you can upload your image.
+Here you can scan.
+Here, you can select the time.
+Here, you can access emojis.
+Here, you can input a serial number.
+Here, you can obtain a customized shape.
+Here, you can draw a line.
+Here, you can change the background.
+DescriptionName
+F o ll o w t h e  instr u ction  b e l o w
+W atc h v i d eo  f rom  t h is  l in k or  scan  t h e  QR co d e
+U Hxa F gw 5K g 33 am 4JqVJ f 8 n N z IO& index =8
+1 4. 3  Li v e Chat
+I f you encounter any issues with our products or software, you can contact our S upport 
+team  v ia li v e chat. O ur support team is a v ailable to assist you with anything you may 
+need. I n the  li v e chat, you can share with us I mages, V ideo &  files. T o share any file, click 
+the (+)  icon  there you can share I mages, V ideo &  files.
+
+--- page 34 ---
+32
+Live chat
+You can send
+document,photo 
+or videos from 
+here
+Watch video from this link or scan the QR code
+UHxaFgw5Kg33am4JqVJf8nNzIO&index=9
+14.4. Get Started
+Upon logging into the Grozziie app, you will first see the 'Get Started' section. Here, you can 
+access  printer drivers for Windows and Mac, label printing software, Apps, user guide 
+manuals, and video  tutorials to help you understand how to use the printer effectively.
+
+
+--- page 35 ---
+33
+A. Printer Drivers
+To download the driver, click the download button. 
+After downloading, if you download driver software for windows PC, please 
+transfer the software to a Windows PC.
+If you download driver software for MacBook, please transfer the software to a 
+MacBook.
+Follow the installation steps in the video tutorial, which can be accessed by 
+clicking the tutorial button.
+In this menu, you can find our all-printer driver for Windows and MacBook, along installation 
+video tutorial.
+B. Download Software's
+You can download the software by clicking the download button.
+If you download software for Windows PC, please transfer the software to a 
+Windows PC.
+If you download software for MacBook, please transfer the software to a MacBook.
+By clicking the tutorial button, you can access the video tutorial where you find 
+installation steps.
+This section, you can find the label printing software for Windows and MacBook, and 
+installation video tutorial.
+
+
+--- page 36 ---
+34
+C. Download apps
+This menu includes download links for the Attendance Machine app, the Bluetooth thermal 
+printer app, and the Windows computer label printer software.
+Here, you can find download links for the Grozziie app, compatible with both Android 
+and iOS devices. Use these apps to connect and manage your printers wirelessly
+
+
+--- page 37 ---
+35
+14.6. Online store
+Inside the "Get Started" section, by clicking "Home," you will be redirected to our online store.
+14.5. Video
+Our app includes a video option where you can view all of our product videos and learn. 
+how to operate each one.
+This is our online store. You can purchase all of our available products. The store offers a wide 
+range of items, allowing you to easily find and buy what you need directly from the website.
+You can also visit our online store directly by using this link: https://www.wowomart.com.
+
+
+--- page 38 ---
+36
+Do not bend the power cord excessively or place objects on the cord.
+Do not touch the printhead while the printer is operating to prevent burns. 
+Keep the printer out of reach of children.
+Use only manufacturer-recommended consumables and parts to prevent damage or 
+reduce  performance.
+Always disconnect the power before cleaning or performing maintenance.  
+Please unplug the printer when it is not in use for long periods.
+If your problem is still not resolved, please contact us.
+Avoid using and storing the printer in high-temperature, high humidity, or polluted 
+environments. 
+The printer's power adapter should be connected to a properly grounded outlet. Avoid 
+large motors or other power supply voltage fluctuations that can cause the device to use 
+the same socket.
+Users are not allowed to disassemble the printer for repair or renovation. 
+To ensure print product quality and lifespan, we recommend using equivalent quality 
+thermal paper. 
+Keep the manual for future reference.
+15 precautions 
+16 Safety Notices
+
+--- page 39 ---
+Certificate
+Warranty Card Information
+Repair Records
+Product model
+invoice no.
+Batch no.
+purchase date
+installation date
+warranty time
+returning date
+service station
+trouble shooting
+repair date
+repairman
+delivery date
+buyer name
+buyer address
+buyer phone no.
+buyer E-mail
+vendor name
+vendor address
+vendor phone no.
+warranty scope
+Product issues
+Note:
+ Please keep this card as the warranty certificate
+and who it when returning the product or repair.
+Dear customer, thank you for choosing our 
+products. In order to provide you with 
+qualified products and enjoy professional 
+services, please read the following warranty 
+terms carefully to ensure that the products 
+are covered under valid warranty.
+
+
+Return Policy: You can return items within 30 
+days of delivery (products must be returned 
+unused).
+
+Warranty or exchange Policy: If product 
+quality problems cause it to be unusable, we 
+are willing to provide warranty or exchange 
+service. You can exchange for a new product 
+within 30 days after the product is delivered. If 
+it exceeds 30 days but does not exceed 300 
+days, we can provide warranty service. Non-
+product quality issues are not within the 
+scope of this service.
+
+Shipping Method for Returns & Exchanges: 
+We recommend that you choose a shipping 
+method that can track logistics information 
+online, and inform us of the shipping 
+information for return. We do not accept COD 
+delivery method.
+
+Timeliness: Returns and refunds generally 
+take 3 to 4 weeks; exchanges generally take 1 
+to 2 weeks. The specific time limit is subject to 
+the courier company.
+
+Refund Amount Issue: We will refund the 
+actual amount of the product ordered to your 
+payment account. If there is a credit card or 
+tax deduction, the actual refund from the 
+bank will prevail, depending on the penalty 
+bank and billing cycle.
+
+If possible, please use the original shipping 
+packaging for returns and exchanges.
+
+If you have any questions, you can contact us 
+through the QR code on the machine.
+
+ * Please keep this warranty card in a safe 
+place, no replacement if missing this card. 
+
+*Special Note:
+
+The rights of terms interpretation and 
+modification belong to the company
+Warranty, Refunds and exchange 
+policy
+
+
+--- page 40 ---
+GROZZIIE provides a 12-month warranty. If you encounter any issues with the product, please 
+contact the GROZZIIE team to promptly receive troubleshooting tips or a replacement. 
+Visit our website www.printernoble.com
+ If you encounter any issues with the product, please contact us promptly.
+version 1.1
+17 After Sale Services

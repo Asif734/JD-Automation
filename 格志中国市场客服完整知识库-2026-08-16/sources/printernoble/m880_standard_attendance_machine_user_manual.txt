@@ -1,0 +1,659 @@
+
+
+--- page 1 ---
+01
+c on t en ts
+01. Pr oduct In tr oduction
+     
+
+02. S pecifica tions
+03. Plac emen t
+04. Installa tion
+05. Se tting up the Time O' clock
+     1.1. Wha t ’ s in the P ack age
+     1.2. A tt endanc e M achine F ea tur es
+    5.1. In tr oduction o f  K e ypad
+    5.2. Input P ass w or d
+    5.3. Change P ass w or d
+    5.4 In tr oduction o f  Gr oup F unctions
+    5.5. Se t Y ear /M on th/D a y
+    5.6. Se t Time
+    5. 7 . Se t the Clock -In and Clock -Out Times t o Prin t M anuall y .
+    5.8. Se t the Quan tity  o f  w orking Shifts
+    5.9. Se t First A tt endanc e Shift 
+    5.10. Se t Sec ond A tt endanc e Shift
+    5.11. Se t Thir d A tt endanc e Shift
+    5.12. Se t the Clock -In & Clock -Out times f or  se v er al  t eam 
+    5.13. Prin t P osition
+    5.14. Se t Alarm
+    5.15. A ut o De t ect M ode
+02
+02
+03
+03
+04
+04 -05
+05
+06
+0 7 -08
+09
+10
+11
+10- 11
+12
+13
+13
+14
+15
+16
+16- 1 7
+18
+18- 19
+19- 20
+20
+22
+21
+23
+06. Prin t Sel f / T est P age
+07 . R ese t M achine
+08. C olor  Prin t
+09. E rr or  C ode & Solution
+10. R eplacing the R ibbon
+11. Time Car 
+Cust omer  Support U sing the Gr o zziie App
+13. W arran ty
+14. Sa f e ty  N o tic es
+15. A ft er  Sales Servic e
+02
+o1 Pr oduct In tr oduction
+1.1  Wha t ’ s i n th e P a c k ag e 
+1.2  A t t end a nc e M a c h ine F e a tur es
+Punch Car d A tt endanc e M achine P o w er  a da p t er
+u ser  m anual w arr an t y  c ar dp unch c ar ds
+p unch 
+a tt endanc e c ar d h er e
+p o w er  s u pp l y
+F unction b utt ons
+l C D  d is p la y
+s cr een
+h anger
+sp eak er
+1 2
+4 53
+0 3
+o 2 S p eci fi c a tions
+o 3 P la c e m en t
+batt er y
+t ype A tt endance Machine
+input/ output P o w er Input: 90V ~ 2 40V , Output: 12V ~ 2A 
+11V -1800mAH (only suppor t ed f or M880D)
+model m 880 , M880D
+C olor W hit e
+W e igh t 1 . 1 k g
+P a ck a g e (LxWxH) 29 5 mm (L)* 290mm (W)* 1 7 0mm ( H )
+ Place the machine on a stable table at least 75cm high. 
+* Incorrect Placement 
+A place with much dust.
+The place with direct sunlight or near a heat source.
+A wet place that is in raining or water.  
+A place that is strongly shaking or getting impact
+Proper Placement and good use environment can keep a good condition of the
+attendance machine. Properly placed as shown in the following picture
+0 5
+5 .2  In p u t P a ss w or d
+B .  E n t er  the pass w or d, the de f ault pass w or d is " 0000 "  t o en t er  the pass w or d t o f ollo w  the 
+instructions belo w .
+ Pr ess the (＋)  Incr ease K e y  onc e ,  it sho w s " 0 " . 
+ Pr ess the (→)  ne x t k e y  and the (＋)  Incr ease K e y  f or  “ 0 ” 
+ Pr ess the  (→) ne x t k e y  and the (＋)  Incr ease K e y  f or  “ 0 ” 
+ Pr ess the (→) ne x t k e y  and the (＋)  Incr ease K e y  f or  “ 0 ” . A ft er  en t ering ther e “ 0000 ”
+C .  Pr ess the (√) Con firm k e y  t o Con firm pass w or d
+A. L ong pr ess the Se tting k e y  (   ) un til  the “FF”  in t erf ac e appears.
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / www . y outu b e. c om / w a t ch ? v = 2I c c p A Qb x z w
+1 Incr ea s e K e y
+f unctionbutt onswit ch
+3 P r e v iou s  K e y
+2 Decr ea s e K e y
+4 N e x t K e y
+5 B ac k  K e y
+6
+7
+C on f irm K e y
+S ettin g  K e y
+T o en t er  a ne w  pass w or d
+ Pr ess the ( ＋ )  Incr ease K e y  f or  Incr ease the number  v alue. 
+ Pr ess the ( － )  Decr ease K e y  f or  Decr ease the number  v alue. 
+ Pr ess the ( → )  N e xt K e y  f or  the N e xt V alue. 
+ Pr ess the ( ← )  Pr e vious K e y  f or  the Pr e vious v alue. 
+ Pr ess the (√)  Con firm K e y  f or  change pass w or d. 
+N o w  y ou suc c essfull y  se t ne w  pass w or d.
+0 6
+5 . 3  C ha n g e P a ss w or d
+L ong p r ess the se tting k e y  (    ) ,  w hen the " FF "  in t erf ac e a pp ears don ' t mo v e y our  hand fr om the 
+Se tting k e y . Con tinue long p r essing the Se tting k e y  (    )  U n til  the " HH "  in t erf ac e a pp ears.
+A.  H er e E n t er  the old p ass w or d ,  D e f ault p ass w or d is “ 0000 ” . F or  w rit e de f ault p ass w or d 
+f ollo w  the instruction b elo w . 
+ Pr ess the (＋)  Incr ease K e y  onc e ,  it sho w s " 0 " . 
+ Pr ess the (→)  ne x t k e y  and the (＋)  Incr ease K e y  f or  “ 0 ” . 
+ Pr ess the  (→)  ne x t k e y  and the  (＋)  Incr ease K e y  f or  “ 0 ” 
+ Pr ess the (→)  ne x t k e y  and the (＋)  Incr ease K e y  f or  “ 0 ” . A ft er  en t ering ther e “ 0000 ”
+B.  Pr ess the  ( √ )  Con fi rm k e y  t o Con fi rm p ass w or d
+C .  E n t er  ne w  pass w or d in F 1 Displa y  , r e-en t er  the pass w or d in F 2 Displa y .
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / Y z yp f w V G h t0
+0 7
+ Y ou w ill  en t er  in t o gr oup 00  her e y ou can se t the y ear ,  m on th an d  d a 
+ T hen pr ess the (√)  c on fi r m  k e y  then y ou en t er  gr oup 01  an d  her e y ou can se t ti m e 
+ P r ess (√)  c on fi r m  k e y  then y ou en t er  gr oup no 02 . B y  f ollo w ing these st eps y ou can se t the 
+gr oup se tting fr o m  gr oup 00  t o gr oup 15 . W e d iscuss the gr oup se tting on the f ollo w ing ta b le.
+I f  y ou w an t t o dir ectl y  en t er  an y  gr ou p  f ollo w  the instructions b elo w 
+ L ong p r ess the se tting k e y  (     )  un til  “ FF ”  In t erf ac e a pp ear 
+ In p ut the p ass w or d then p r ess the ( √ )  Con fi rm k e y 
+ N o w  y ou en t er  in the gr ou p “ 00 
+ I f  y ou w an t t o go dir ect an y  gr ou p  then p r ess se tting k e y  (     )  and c on tinue un til  y our  gr ou p  
+se tting c omes.
+5 . 4  In tr oduction o f  G r ou p  F unctions
+T he A tt endanc e M achine has 00 gr ou p  t o 15 gr ou p . E v er y  kind o f  gr ou p  has di ff er en t o p er a tion. 
+I f  y ou w an t t o change an y  se ttings go t o the gr ou p  num b er  and change the gr ou p  se ttings. 
+ L ong p r ess the se tting k e y  (    )  un til  “ FF ”  In t erf ac e a pp ears. 
+ E n t er  Y our  P ass w or d and Pr ess Con fi rm K e y .
+L ook a t the p ictur e (H er e w e mark gr ou p  b y  p ictur e )
+G roup 00
+0 8
+* A ft er  select w orking shift and se t shift starting and ending time. T hen b ack t o gr ou p  02 f or  Color  
+Prin t. F or  mor e de tails p lease check c on t en t num b er “ 08. Color  Prin t Section ” .
+G r oup N o 00
+G r oup N o 0 6
+G r oup N o 12
+Y ear / Mont h / Da y
+E ndin g  time f or S econd s hi f t
+N o operation (L e f t t hi s  g r oup a s  it i s  w it h de f ault s ettin g)
+F unction s of t h e Gr ou pGr ou p N o
+G r oup N o 0 2
+G r oup N o 0 8
+G r oup N o 14
+W or k in g  S hi f t s / C olor P rint *
+E ndin g  time f or T hir d s hi f t
+S et Alarm
+G r oup N o 0 1
+G r oup N o 0 7
+G r oup N o 13
+S et T ime
+S tar tin g  time f or T hir d s hi f t
+P rint P o s ition
+G r oup N o 0 3
+G r oup N o 0 9
+G r oup N o 15
+S tar tin g  time f or F ir s t s hi f t
+N o operation (L e f t t hi s  g r oup a s  it i s  w it h de f ault s ettin g)
+Aut o Det ect Mode
+G r oup N o 0 4
+G r oup N o 1 0
+E ndin g  time f or F ir s t s hi f t
+N o operation (L e f t t hi s  g r oup a s  it i s  w it h de f ault s ettin g)
+G r oup N o 0 5
+G r oup N o 11
+S tar tin g  time f or S econd s hi f t
+N o operation (L e f t t hi s  g r oup a s  it i s  w it h de f ault s ettin g)
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / 2I c c p A Qb x z w
+0 9
+ Pr ess the (＋)  Incr ease K e y  f or  Incr ease the num b er  v alue 
+ Pr ess the (－)  D ecr ease K e y  f or  D ecr ease the num b er  v alue 
+ Pr ess the (→) N e x t K e y  f or  the ne x t V alue 
+ Pr ess the (←)  Pr e vious K e y  f or  the Pr e vious v alue. 
+B.   F or  E x am p le ,  Our  a tt endanc e machine curr en t da t e is 2023 / 03 / 0 7 and w e w an t t o se t the da t e 
+as 2024 / 11 / 25. So p lease f ollo w  the instruction b elo w - 
+ Pr ess the (→)  ne x t k e y  t o go t o 3 o f  2023 
+ Pr ess the (＋)  incr ease k e y  no w  the 3 w ill  change and se t 4. 
+ Pr ess the (→) ne x t k e y  and se t the mon th. 
+ Pr ess the (＋)  incr ease k e y  and se t 1. 
+ Pr ess (→) ne x t k e y  and p r ess  (＋)  incr ease k e y  f or  1 
+ Pr ess (→)  ne x t k e y  t o se t da y  p r ess (＋)  incr ease k e y  and se t 2 
+ Pr ess (→)  ne x t k e y  and p r ess (＋)  incr ease k e y  un til  da t e num b er  5 c oming. 
+ N o w  check the da t e is 2024 / 11 / 25 the da t e is se t and p r ess the  (√)  Con fi rm k e y  t o sa v e the da t e
+5 . 5  S e t Y e a r , M on t h  &  D a y  ( G r ou p  00 )
+A.  L ong pr ess se tting k e y  and en t er  y our  pass w or d in " FF "  in t erf ac e a ft er  E n t er  P ass w or d ,  Pr ess Con fi rm 
+k e y  and go t o " Gr oup 00 "
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / V 1 E O H 0 X H O N 4
+1 3
+B. F ollo w  the instructions belo w  t o Gr oups 05 & Gr oup 06 t o se t the Sec ond A tt endanc e Shift 
+ Pr ess the (＋) Incr ease K e y  f or  Incr ease the number  v alue 
+ Pr ess the (－) Decr ease K e y  f or  Decr ease the number  v alue 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue 
+ Pr ess the (←) Pr e vious K e y  f or  the Pr e vious v alue. 
+A djust the H our  and Minut e v alues as needed f or  the shift times. M o v e t o Gr oup 06 t o se t the 
+ending time o f  the shift. 
+C. Pr ess the (√) Con firm K e y  t o c on firm and sa v e the Sec ond a tt endanc e shift.
+5 .1 0 .  S e t S ec ond A t t end a nc e S h i f t ( G r ou p :  0 5  &  0 6 ) .
+5 .11.  S e t T h ir d A t t end a nc e S h i f t ( G r ou p  0 7  &  0 8 ) .
+A.  T o se t the 2 nd A tt endanc e shift then back t o g r oup 0 2  and se t 0 2  f or  the sec ond shift.
+A.  I f  y ou se t Thir d A tt endanc e shift then go t o back gr oup 02 and se t 03 f or  3r d shift. 
+N.B:  A s w e ar e se t onl y  fi rst shift ,  w e need t o k ee p  00 : 00 in G r ou p  0 7 ,  G r ou p  08. A s G r ou p  0 7 ,  
+G r ou p  08 is using f or  o ther  shift time.
+B .  F o ll o w  the instructions be l o w  t o G r oups 0 7  t o se t the Thir d A tt endanc e S hift. 
+ P r ess the ( ＋ )  Incr ease K e y  f or  Incr ease the nu m ber  v a l ue. 
+ P r ess the ( － )  D ecr ease K e y  f or  D ecr ease the nu m ber  v a l ue. 
+ P r ess the  ( → )  N e x t K e y  f or  the ne x t V a l ue. 
+ P r ess the ( ← )  P r e v ious K e y  f or  the P r e v ious v a l ue .
+A d j ust the H our  and M inut e v a l ues as needed f or  the shift ti m es. M o v e t o G r oup 0 8  t o se t the 
+ending ti m e o f  the shift. .  
+C .  P r ess the (√)  C on fi r m  K e y  t o C on fi r m  and sa v e the Thir d a tt endanc e S hift.
+12
+F . F or  e x ample w e w an t t o se t first shift start time a t 08:30am. So , f ollo w  the instruction belo w  f or  
+"Gr oup 03 " 
+ T o sho w s " 0 "  Pr ess (＋) incr ease k e y  or  Pr ess the (－) Decr ease K e y  onc e. 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue and pr ess the (＋) Incr ease K e y  un til  the number  “8”  
+c omes. 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue and pr ess the (＋) Incr ease K e y  f or  Incr ease the 
+number  “3”  v alue. 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue Pr ess (＋) incr ease k e y  or  Pr ess the (－) Decr ease K e y  
+onc e f or  the number  “0” . 
+ Pr ess the (√) Con firm K e y  t o c on firm and sa v e f or  the first a tt endanc e shift S tart Time.
+A ft er  c on firm the first a tt endanc e shift y ou en t er  Gr oup 04 t o se t the ending time o f  the first shift. 
+Also se t the ending time ho w  y ou se t the first a tt endanc e shift time.
+G. Pr ess the (√) Con firm K e y  t o Con firm and sa v e the ending time f or  first a tt endanc e Shift.
+ 5 . 9 .  S e t F irs t A t t end a nc e S h i f t ( G r ou p :  0 3  &  0 4 ) .
+A.  L ong p r ess se tting k e y  and en t er  y our  p ass w or d in " FF "  in t erf ac e . 
+B.  A ft er  E n t er  P ass w or d ,  Pr ess Con fi rm k e y  and go t o " G r ou p  02 " . 
+C.  H er e y ou need t o se t " 01 "  as w e ar e going t o se t First w orking shift . 
+D .  A ft er  tha t y ou need t o se t the start time o f  w orking shift in G r ou p  03 & E nd time o f  w orking shift 
+in G r ou p  04.
+E .  F ollo w  the instructions b elo w  t o se t the First A tt endanc e Shift 
+ Pr ess the (＋) Incr ease K e y  f or  Incr ease the number  v alue 
+ Pr ess the (－) Decr ease K e y  f or  Decr ease the number  v alue 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue 
+ Pr ess the (←) Pr e vious K e y  f or  the Pr e vious v alue.
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / T A Okh J vt q b w
+A ft er  se tting the start time o f  the fi rst a tt endanc e shift ,  p r ess the c on fi rm k e y . Y ou w ill  then b e 
+r edir ect ed t o G r ou p  04 ,  w her e y ou need t o se t the end time o f  the fi rst w orking shift. Y ou can f ollo w  
+the same instructions used t o se t the start time o f  the fi rst a tt endanc e shift.
+N .B :  A s w e ar e se t onl y  fi rst shift ,  w e need t o k ee p  00 : 00 in G r ou p  05 t o G r ou p  08. A s G r ou p  05 t o 
+G r ou p  08 is using f or  o ther  shift time.
+1 6
+5 .1 4 .  S e t A la r m  ( G r ou p  1 4 )
+5 .1 5 .  A u t o D e t ect M ode ( F or  O ur  Punc h  C a r d G r ou p  1 5)
+Our  machine ' s alarm is p r ogr ammed t o ring a t b o th the start and end times o f  the w orking p eriod. 
+W e ha v e the fl e x i b ilit y  t o se t the alarm do w n t o the sec ond. S p eci fi call y ,  our  machine ' s alarm rings 
+fr om the 00 sec ond t o 59 sec ond.
+A .  F ollo w  the instructions b elo w  t o se t the alarm 
+ Pr ess the (＋)  Incr ease K e y  f or  Incr ease the num b er  v alue 
+ Pr ess the (－)  D ecr ease K e y  f or  D ecr ease the num b er  v alue 
+ Pr ess the (→)  N e x t K e y  f or  the ne x t V alue 
+ Pr ess the  (←)  Pr e vious K e y  f or  the Pr e vious v alue .
+B.  Se t v alue fr om 00-59 sec onds. 
+C .  Pr ess the (√)  Con fi rm K e y  t o Con fi rm and sa v e t o se t alarm.
+B. F ollo w  the instructions belo w  t o A ut o De t ect M ode. Se t the v alue t o 01 in Gr oup 15 
+ Pr ess the ( ＋ )  Incr ease K e y  f or  Incr ease the number  v alue 
+ Pr ess the ( － )  Decr ease K e y  f or  Decr ease the number  v alue 
+ Pr ess the ( → )  N e xt K e y  f or  the ne xt V alue 
+ Pr ess the ( ← )  Pr e vious K e y  f or  the Pr e vious v alue.
+A. I f  y ou w an t t o se t A ut o De t ect M ode then the machine aut oma ticall y  de t ects the fr on t and back 
+o f  the punch car d  b y  using iden ti fi ca tion p oin t .  
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / f _ 5 q K ak W C GE
+C. Pr ess the (√)  Con firm K e y  t o Con firm when y ou se t V alue 01 in Gr oup15. The machine no w  
+aut oma ticall y  de t ects the fr on t and back o f  the punch car d  b y  using iden ti fi ca tion p oin t.
+I den ti fi ca tion p oin t o f  p unch car d
+1 7
+* N o t e :  I f  y ou using ano ther  Com p an y ' s Punch Car d then Se t the v alue t o 00 in G r ou p  15.
+E nsur e tha t the o ther  c om p anies p unch car d ma t ches the si z e ac c or ding t o our  p unch car d 
+s p eci fi ca tions. Our  p unch car d s p eci fi ca tions is H eigh t 18.5cm and Width 8.5cm.
+8.5 cm
+1 8 . 5  c m
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / H 9 Z l2 p X J R T 4
+1 8
+07 r ese t m a c h ine
+A. F ollo w  the instructions belo w  t o R ese t the M achine 
+ L ong pr ess the (    ) Se ttings K e y 
+ A ft er  a f e w  sec onds the in t erf ac e “FF”  will  appear  but y ou don 't mo v e y our  hand. Pr ess and 
+hold the (    ) Se ttings K e y  un til  y ou see the “HH”  in t erf ac e 
+ A ft er  the “HH”  in t erf ac e c omes L ong pr ess the (→) N e xt K e y  un til  the music bell  sounds 
+ Then en t er  y our  pass w or d. The de f ault pass w or d is " 0000 " .
+06 Prin t s e l f / t es t p ag e
+ A.  F ollo w  the instructions b elo w  t o Prin t Self  T est P age 
+ I f  y ou w an t t o T est a p age then U n p lug the p o w er  Su pp l y 
+ L ong p r ess the (＋)  Incr ease K e y  and p lug in the p o w er  su pp l y  t oge ther 
+ N o w  Insert p unch car d on the lid f or  self -t est p rin ting.
+U n p lug the p o w er  
+Su pp l y
+Plug the p o w er  Su pp l y  & L ong p r es s
+Incr ease k e y  a t the same time
+Insert Punch car d
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / z - K W g8l1 Z g E
+T he machine r estarts. T hen y ou w ill  see the F 1 in t erf ac e no w  y ou en t er  a ne w  p ass w or d. 
+1 2 3
+1 9
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+ h ttps :/ / y o u t u . b e /I w 8b l - 6 iti k
+0 8 c o l or  p rin t
+B. F ollo w  the instructions belo w  t o se t the ne w  pass w or d 
+ Pr ess the (＋) Incr ease K e y  f or  Incr ease the number  v alue 
+ Pr ess the (－) Decr ease K e y  f or  Decr ease the number  v alue 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue 
+ Pr ess the (←) Pr e vious K e y  f or  the Pr e vious v alue. 
+A ft er  se t ne w  p ass w or d in F 1 in t erf ac e ,  p r ess c on fi rm k e y  and y ou w ill  en t er  in F 2 in t erf ac e . 
+R e-t yp e the p ass w or d again in F 2 in t erf ac e.
+C. Pr ess (√) Con fi rm v alue t o c on fi rm and sa v e the ne w  p ass w or d
+O ur  Punch C ar d  A tt en d anc e M achine has 2  c olor  p rin t o p tions. O ne is B lac k  an d  ano ther  is R e d 
+ B lac k  in d ica t es tha t y ou en t er e d  or  le ft the o ffi c e a t the ri g h t time 
+ R e d  in d ica t es tha t y ou en t er e d  or  le ft the o ffi c e la t e or  no t a t the ri g h t time.  
+Y ou can se t 2  c olor  p rin t o p tions in the A tt en d anc e M achine. F ollo w  the instruction belo w .  
+A ft er  se ttin g  u p  g r ou p  01  t o g r ou p  15,  G o bac k  t o g r ou p  02  an d  se t her e " 01 " . I t w ill  g iv e y ou 2  c olor  
+p rin ts ,  if  y ou w an t t o p rin t onl y  1  c olor  or  blac k  c olor  then y ou can se t her e " 00 " 
+ Pr ess the (＋) Incr ease K e y  f or  Incr ease the number  v alue 
+ Pr ess the  (－) Decr ease K e y  f or  Decr ease the number  v alue 
+ Pr ess the  (→) N e xt K e y  f or  the ne xt V alue 
+ Pr ess the (←)  Pr e vious K e y  f or  the Pr e vious v alue
+00 0 1 B lac k
+C o l o r N u mb er of C o l o rV al u e
+0 20 1 B lac k  &  R ed
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / P z fl l K j J y H o
+20
+0 9 e rr or  c ode s o l u tion
+“ E 1 E 1 , E 2 E 2, E 3 E 3 , E 4 E 4 “  
+T he s e code s  w ill s ho w  on 
+t he s cr een i f  t her e i s  a 
+pr o b lem w it h t he har d w ar e .  
+I f  t he Di s pla y s ho w s  t hi s  
+code “ 5 004 ” , “ 4010 ”
+I f  t he machine print s  only 
+dat e b ut no time .
+S o l utionE rr o r C o d e
+ Y ou can tr y t o r ein s tall t he ri bb on f ir s 
+ P lea s e connect t he po w er a g ain &  r e s tar t t he 
+machine . 
+  I f  t he a b o v e met hod doe s  not w or k  plea s e contact 
+our a f t er s ale s  t eam .
+R e s tar t t he machine and r eplace t he po w er adapt er
+ C hec k  i f  t he ri bb on i s  s tuc k  and r ein s tall t he ri bb on 
+ Al s o chec k  i f  t he adapt er i s  ori g inal
+R ed mark f or  la t e c ome or  earl y  e x it
+M anual  Punch
+11 t i m e c a r d
+22
+Our  time car ds mak e y our  lif e easier . H er e y ou can easil y  understand w hen em p lo y ees c ome t o 
+the o ffi c e and w hen the y  lea v e. T hose w ho came t o the o ffi c e la t e and le ft earl y  can b e iden ti fi ed 
+and easil y  underst ood.
+T ime car d
+Our  time car d has 08 Columns.
+0 1
+0 7
+C olumn f or t he dat e .
+C olumn s  f or o v er time e x it time .
+C o l u m n  D e t a i l sC o l u m n  N o
+0 3 C olumn s  f or e x it time o f  t he 1 s t s hi f t .
+0 2
+0 8
+C olumn f or entr y time o f  t he 1 s t s hi f t .
+C olumn s  f or countin g  t otal w or k in g  hour s .
+0 4 C olumn f or entr y time f or t he 2nd s hi f t .
+0 5 C olumn f or e x it time f or t he 2nd s hi f t
+0 6 C olumn s  f or o v er time entr y time .
+1 0 r e pla cin g  th e r i bb on
+21
+I f  the p rin ting ge ts b lurr y  y ou need t o r einstall  the ri bb on 
+ First ,  o p en the T r ans p ar en t Co v er  o f  the machine 
+ D r ag the ri bb on case t o the c en t er 
+ Pull  the R i bb on slo w l y  and gen tl y 
+ R oll  the w heel  t o b e tt er  p rin ting 
+ A ft er  the Install  the ri bb on again. 
+O p en the tr ans p ar en t c o v er
+T ak e the ri bb on out car e full y  
+A gain se t the ri bb on and mak e sur e tha t the ri bb on is insert ed in t o this ga p  
+b e t w een the p rin t head and the stainless st eel  p la t e
+T ak e the ri bb on in the middle p osition lik e this w a y .
+R oll  the w heel  lik e this w a y  and tr y  t o tak e out some 
+good ri bb on f or  p rin t
+1 2
+4
+5
+3
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / 3 Y dM H Cr Q 46o
+1 4 S a f e t y  N o tic es
+ D o no t b end the p o w er  c or d e x c essiv el y  or  p lac e o b j ects on the c or d 
+K ee p  the p rin t er  out o f  r each o f  childr en 
+ U se onl y  a pp r o v ed ac c essories and do no t tr y  t o disassem b le ,  or  r e p air  the unit b y  y ourself .    
+K ee p  the a tt endanc e machine a w a y  fr om w a t er  and o ther  o b j ects tha t c ould p ene tr a t e the 
+c om p onen ts 
+ lease un p lug the p rin t er  w hen it is no t in use f or  long p eriods 
+ I f  y our  p r o b lem is still  no t r esol v ed ,  p lease c on tact us.
+1 5 A f t er  S al e S er v ic es
+- M ast er  Y our  H ours
+u ser  m anual
+a t t end a nc e  
+m a c h ine
+TIMO ZIA pr o vides a 12-mon th w arr an ty . I f  y ou enc oun t er  an y  issues with the pr oduct, please 
+c on tact the TIMO ZIA t eam t o pr omp tl y  r ec eiv e tr oubleshoo ting tips or  a r eplac emen t. 
+Visit our  w ebsit e www .prin t ernoble. c om
+ I f  y ou enc oun t er  an y  issues w ith the p r oduct ,  p lease c on tact us p r om p tl y .
+0 4
+o 4 Ins t alla tion
+o 5 S e t tin g  u p  th e T i m e O ' c l oc k
+5 .1  In tr oduction o f  K e y pa d
+S e t tin g  K e yD ecr e a se K e y Pr e v ious K e y N e x t K e y B a c k  K e y C on fi r m  K e yIncr e a se K e y
+L ook at the Picture
+A.  F irst ,  determine the installation height ( it is recommended to make it 36-4 0  cm high 
+from the ground and put the first screw into the wall ).
+B. Put the second screw into the wall according to the spacing of the hanging holes on 
+the back of the machine.  
+C. Align the hanging hole and hang the machine on the screw. The screw head shall keep 
+a 3 mm distance from the wall
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / D W s7 p L KK p m w
+1 5
+B . F ollo w  the instructions belo w  t o A d j ust up and do wn  f or  fi ne - tuning position 
+ Pr ess the ( ＋ ) I ncr ease K e y  f or  I ncr ease the number  v alue 
+ Pr ess the ( － ) D ecr ease K e y  f or  D ecr ease the number  v alue 
+ Pr ess the (→) N e xt K e y  f or  the ne xt V alue.
+5 .1 3 .  Prin t P osition /  M is pla c ed Prin tin g  ( G r ou p  1 3 )
+A.  I f  T he M achine M is p lac e d  Prin tin g  then y ou can fi x it easil y . C hec k  the se ttin g  in g r ou p  1 3 .
+C .  Pr ess the (√)  Con fi rm k e y  t o c on fi rm and sa v e.
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / M j C Z 4 w A N R r c
+1 . I f  the machine prin ts belo w  the line y ou need t o ad j ust it. T o ad j ust y ou need t o use the I ncr ease 
+k e y  t o bring it t o the middle o f  the line. Y ou can r aise t o a maximum o f  + 15 .
+2 . A gain ,  if  the machine prin ts abo v e the line ,  y ou must ad j ust it. T o ad j ust y ou need t o use the 
+D ecr ease k e y  t o bring it t o the middle o f  the line. The maximum y ou can r educ e is - 15 .
+C a se 0 1
+C a se 0 2
+v ersion 2 . 1
+10
+5 . 6   S e t T i m e ( G r ou p  0 1 )
+A.  L ong p r ess se tting k e y  and en t er  y our  p ass w or d in " FF "  in t erf ac e . 
+B.  A ft er  E n t er  P ass w or d ,  Pr ess Con fi rm k e y  and go t o " G r ou p  01 " . H er e y ou se t y our  curr en t time.
+C.  F ollo w  the instructions b elo w  t o se t the time. 
+ Pr ess the (＋)  Incr ease K e y  f or  Incr ease the num b er  v alue. 
+ Pr ess the  (－) D ecr ease K e y  f or  D ecr ease the num b er  v alue. 
+ Pr ess the (→) N e x t K e y  f or  the ne x t V alue. 
+ Pr ess the (←)  Pr e vious K e y  f or  the Pr e vious v alue. 
+ Pr ess the ( √ )  Con fi rm K e y  w hen c om p le t e the time u p da t e.
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / K lg V Z S8dA 8 A
+ 5 . 7 .   Se t  the  Clock -In  and  Clock -Ou t  Times  t o  Prin t  M anuall y .
+Y ou can manually print t he cloc k - in and cloc k - out time s  b y pr e ss in g  t he k e y s  w it hout s ettin g  a 
+w or k  s hi f t .  T he time car d ha s  s i x  column s  f or printin g  cloc k - in and cloc k - out time s .  Y ou can 
+choo s e w hich column t o print b y pr e ss in g  t he corr e s pondin g  k e y .  F ollo w  t he in s truction s  b elo w  
+t o print di ff er ent w or k  s hi f t po s ition s  u s in g  s peci f ic k e y s .
+A. Press and hold the Setting key until the "FF" interface appears.
+B. Enter your password.
+C. Press the (√) OK Button/Setting Button to go to Group 02.
+D. Set the value to 00 by pressing the Increase key or Decrease key in Group 02.
+E. Press the (√) OK Button, then press and hold the Back key to return to the 
+home interface.
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e /b W y W v om Z X D o
+11
+ 5 . 8 .  S e t t h e W or k in g  S h i f ts ( G r ou p  0 2 ) .
+A.  L ong p r ess se tting k e y  and en t er  y our  p ass w or d in " FF "  in t erf ac e . 
+B.  A ft er  E n t er  P ass w or d ,  Pr ess Con fi rm k e y  and go t o " G r ou p  02 " . 
+C .  H er e y ou can se t the num b er  o f  w orking shift. ( Minimum shift 01 and M a x imum shift 03 )
+D .  F ollo w  the instructions b elo w  t o se t the W orking Shift 
+ Pr ess the (＋)  Incr ease K e y  f or  Incr ease the num b er  v alue 
+ Pr ess the ( － )  D ecr ease K e y  f or  D ecr ease the num b er  v alue 
+ Pr ess the  (→)  N e x t K e y  f or  the ne x t V alue 
+ Pr ess the  ( ← )  Pr e vious K e y  f or  the Pr e vious v alue 
+ Pr ess the (√)  Con fi rm K e y  w hen Com p le t e the gr ou p  no .
+F .  T o print in a s peci f ic column, pr e ss  t he corr e s pondin g  k e y: 
+
+Column 1:  P r e ss  t he ( ＋ ) Incr ea s e k e y . 
+Column 2:  P r e ss  t he (−)  Decr ea s e k e y . 
+Column 3: P r e ss  t he (→)  N e x t k e y . 
+Column 4:  P r e ss  t he (←)  P r e v iou s  k e y . 
+Column 5:  P r e ss  t he (    ) B ac k  k e y . 
+Column 6: P r e ss  t he (√)  C on f irm k e y . 
+
+Not e:  I f  y ou s et t he manual punch mode, t he machine print s  in all b lac k  in k.  
+T hi s  mean s  t he machine print s  in b lac k  f or t ho s e w ho ar e comin g  lat e and 
+e x itin g  early . 
+W a t c h  v ideo f r o m  t h is l in k  or  sc a n t h e QR  c ode
+h tt p s :/ / y outu. b e / O H b 5iMS b ww I
+1 2  Cus t omer  S upport U sing the Gr o zziie App
+2 3
+I f  y ou e x perience an y i ss ue s  w it h our pr oduct s , our S uppor t T eam i s  her e t o help t hr ou g h t he 
+G r o zz iie App .  Her e ' s  ho w  y ou can g et a ss i s tance:
+A.Do wnloading t he Gr ozziie App:
+Sear ch f or "Gr ozziie" in t he App St or e (f or iOS) or Google Pla y St or e (f or Andr oid).
+Do wnload and install t he app on y our de vice.
+Sign in t o y our account. If y ou don’ t ha v e one, y ou can cr eat e an account using y our email 
+addr ess. 
+B. Liv e Cha t S upport:
+
+Con tact us via the liv e cha t f ea tur e in the app. Our  t eam is a v ailable t o assist y ou with an y  
+questions or  c onc erns.
+
+C. S har e M edia and Files:
+
+During the cha t, y ou can shar e images, videos, and files t o e xplain y our  issue mor e clearl y . J ust 
+click the (+) ic on in the cha t t o upload and shar e y our  files.
+Live chatYou can send
+document,photo 
+or videos from 
+here
+iOS Android
+https :// apps.apple.com / us / app /
+gro zz iie / id 64 7 6 1 7 1 0 3 5
+https :// play.google.com / store / apps /
+details ? id = com.gro zz iie.printer
+1 4
+5 .12.  S e t t h e C l oc k - In a nd C l oc k - O u t T i m es f or  se v er al  t e am
+I f  a  c o mpa n y  ha s m u l ti pl e t e am  w it h  o v er lapp in g  in - ou t ti m es :
+E x ampl e :
+F or  thr ee t eam :
+1. Shift In- T ime :  Se t the la t est in-time among all  t eam as the shift ' s starting time. 
+2. Shift Out - T ime :  Se t the earliest out -time among all  t eam as the shift ' s ending time.
+The la t est in-time is 12:00 (t eam 2), so se t the shift in-time t o 12:00. 
+The earliest out -time is 1 7:00 (t eam 1), so se t the shift out -time t o 1 7:00. 
+In this mode ,  the machine w ill  no t su pp ort dual -c olor  functionalit y ,  " R ed & B lack. "  E v en if  
+someone arriv es la t e or  lea v es earl y ,  their  en tr y  w ill  b e p rin t ed in b lack.
+E x ampl e :
+O v er lap s or  B a c k - t o - B a c k  S h i f ts in t h e S c h edu l e :
+C hall en g es a nd M a nu al  A d j us t m en ts :
+T e am s a nd T h eir  S c h edu l es :
+1.  B e t w een T e am  1  a nd T e am  2 :
+2.  B e t w een T e am  2  a nd T e am  3 :
+3 .  B e t w een T e am  3  a nd T e am  1 :
+A t t end a nc e R ec or din g :
+A. T eam 2’ s sec ond shift ( 18 : 00 – 22 : 00 )  tr ansitions dir ectl y  in t o T eam 3’ s fi rst shift ( 22 : 00 – 02 : 00 ) .
+B . T eam 2’ s sec ond shift ends a t 10:00  PM ,  and T eam 3’ s fi rst shift starts immedia t el y  a t 10:00 PM.
+A. T eam 3’ s sec ond shift ends a t 8:00  AM ,  w hile T eam 1’ s fi rst shift starts a t 8:00  AM.
+T he machine canno t aut oma ticall y  handle these o v erla pp ing or  tr ansitional  schedules. T o 
+ensur e ac cur a t e a tt endanc e :
+C er ti f ic a t e
+W a rr a n t y  C a r d In f or ma tion
+R e pa ir  R ec or ds
+P r od u ct  m od el
+i n v oic e n o .
+B a t ch  n o .
+p ur ch ase d a t e
+i ns t alla tio n d a t e
+w arran ty  tim e
+r e t urn i n g  d a t e
+s er vic e s t a tio n
+t r o u b le shoo ti n g
+r e p a i r  d a t e
+r e p a i r m an
+d el iv er y  d a t e
+b u y er  n a m e
+b u y er  a dd r ess
+b u y er  pho ne n o .
+b u y er  E- m a i l
+v en do r  n a m e
+v en do r  a dd r ess
+v en do r  pho ne n o .
+w arran ty  sc op e
+P r od u ct  i ssues
+N o t e:
+ Please k eep this car d as the w arr an ty  c ertifica t e
+and who it when r e turning the pr oduct or  r epair .
+Dear  cust omer , thank y ou f or  choosing our  
+pr oducts, In or der  t o pr o vide y ou qualified 
+pr oducts and enjo y  pr o f essional  servic es, please 
+r ead the f ollo wing w arr an ty  t erms car e full y  t o 
+ensur e tha t the pr oducts ar e in v alid w arr an ty .
+
+
+R e turn P olic y: Y ou can r e turn it ems within 30 
+da y s o f  deliv ery  (pr oducts must be r e turned 
+unused).
+
+W arr an t y  or  e x change P olic y: I f  pr oduct quality  
+pr oblems cause it t o be unusable, w e ar e willing 
+t o pr o vide w arr an ty  or  e x change servic e. Y ou can 
+e x change f or  a ne w  pr oduct within 30 da y s a ft er  
+the pr oduct is deliv er ed. I f  it e x c eeds 30 da y s but 
+does no t e x c eed 300 da y s, w e can pr o vide 
+w arr an ty  servic e. N on-pr oduct quality  issues ar e 
+no t within the sc ope o f  this servic e.
+
+S hipping M e thod f or  R e turns & Ex changes: W e 
+r ec ommend tha t y ou choose a shipping me thod 
+tha t can tr ack logistics in f orma tion online, and 
+in f orm us o f  the shipping in f orma tion f or  r e turn. 
+W e do no t ac c ep t C OD deliv ery  me thod.
+
+Timeliness: R e turns and r e funds gener all y  tak e 3 
+t o 4 w eeks; e x changes gener all y  tak e 1 t o 2 
+w eeks. The specific time limit is subject t o the 
+c ourier  c ompan y .
+
+R e fund Amoun t I ssue: W e will  r e fund the actual  
+amoun t o f  the pr oduct or der ed t o y our  pa ymen t 
+ac c oun t. I f  ther e is a cr edit car d or  tax deduction, 
+the actual  r e fund fr om the bank will  pr e v ail, 
+depending on the penalty  bank and billing c y cle.
+
+I f  possible, please use the original  shipping 
+pack aging f or  r e turns and e x changes.
+
+I f  y ou ha v e an y  questions, y ou can c on tact us 
+thr ough the QR c ode on the machine.
+
+ * Please k eep this w arr an ty  car d in a sa f e plac e, 
+no r eplac emen t if  missing this car d. 
+
+*S pecial  N o t e:
+
+The righ ts o f  t erms in t erpr e ta tion and modifica tion 
+belong t o the c ompan y
+W arr an t y , R e funds and ex change p olic y
+ t eam 1 in-time :  10 : 00 ,  out -time :  1 7 : 00   
+ t eam 2 in-time :  12 : 00 ,  out -time :  18 : 0 
+ t eam 3 in-time :  11 : 00 ,  out -time :  19 : 00
+T eam 1 :  Shift 1 :  08 : 00 – 12 : 00 & Shift 2 :  13 : 00 – 1 7 : 00 
+T eam 2 :  Shift 1 :  13 : 00 – 1 7 : 00 & Shift 2 :  18 : 00 – 22 : 00 
+T eam 3 :  Shift 1 :  22 : 00 – 02 : 00 & Shift 2 :  03 : 00 – 08 : 0
+N o t e: Ov erla pp ing or  b ack -t o- b ack shifts canno t b e c on fi gur ed aut oma ticall y  in the s y st em. 
+E m p lo y ees w orking these shifts need t o manuall y  clock in and out t o ensur e ac cur a t e 
+a tt endanc e tr acking
+A. T eam 1’ s sec ond shift ( 13 : 00 – 1 7 : 00 )  o v erla p s en tir el y  w ith T eam 2’ s fi rst shift ( 13 : 00 – 1 7 : 00 ) . 
+B . T eam 1’ s sec ond shift ends a t 5:00  PM ,  and T eam 2’ s fi rst shift b egins a t 5:00  PM .
+A. E m p lo y ees must manuall y  clock in / out. 
+B . T he y  migh t need t o p r ess a b utt on on the machine t o s p ecif y  their  shift.

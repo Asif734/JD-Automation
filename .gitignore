@@ -1,0 +1,74 @@
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dart and Flutter generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+doc/api/
+*.dill
+*.lockfile
+
+# macOS and Xcode generated files
+macos/Flutter/ephemeral/
+macos/Pods/
+macos/.symlinks/
+**/DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.moved-aside
+
+# Python generated files and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+
+# Local application state and customer data
+data/*
+!data/.gitkeep
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+
+# Generated reports, exports, and scratch files
+output/
+tmp/
+*.log
+
+# Compiled application artifacts
+*.app/
+*.framework/
+*.dSYM/
+*.o
+*.a
+*.so
+*.dylib
+**/flutter_assets/kernel_blob.bin

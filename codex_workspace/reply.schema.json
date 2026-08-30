@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reply",
+    "decision",
+    "confidence",
+    "used_record_ids",
+    "required_slots",
+    "actions",
+    "risk_level",
+    "risk_triggers",
+    "auto_send_allowed",
+    "model",
+    "attachments",
+    "image_descriptions",
+    "human_review_required",
+    "reason"
+  ],
+  "properties": {
+    "reply": { "type": "string" },
+    "decision": {
+      "type": "string",
+      "enum": ["draft", "ask_clarification", "human_review_required"]
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "used_record_ids": { "type": "array", "items": { "type": "string" } },
+    "required_slots": { "type": "array", "items": { "type": "string" } },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "description"],
+        "properties": {
+          "type": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical", "unknown"]
+    },
+    "risk_triggers": { "type": "array", "items": { "type": "string" } },
+    "auto_send_allowed": { "type": "boolean", "const": false },
+    "model": { "type": "string" },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["media_id", "kind", "caption", "path"],
+        "properties": {
+          "media_id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["image", "video", "file"] },
+          "caption": { "type": "string" },
+          "path": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "image_descriptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "human_review_required": { "type": "boolean" },
+    "reason": { "type": ["string", "null"] }
+  }
+}

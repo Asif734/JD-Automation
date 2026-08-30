@@ -1,0 +1,1291 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:crypto/crypto.dart';
+
+import 'backend/rag_backend_client.dart';
+import 'capture/capture_coordinator.dart';
+import 'capture/ocr_capture_extractor.dart';
+import 'codex/codex_reply_service.dart';
+import 'domain/capture_models.dart';
+import 'platform/macos_capture_adapter.dart';
+import 'storage/capture_database.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const JdAutomationApp());
+}
+
+class JdAutomationApp extends StatelessWidget {
+  const JdAutomationApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        title: 'JD Automation',
+        theme: ThemeData(
+            colorSchemeSeed: const Color(0xfff26b21), useMaterial3: true),
+        home: const CaptureHome(),
+      );
+}
+
+class CaptureHome extends StatefulWidget {
+  const CaptureHome({super.key});
+
+  @override
+  State<CaptureHome> createState() => _CaptureHomeState();
+}
+
+class _CaptureHomeState extends State<CaptureHome> {
+  static const _captureOperationTimeout = Duration(seconds: 12);
+  late final MacOSCaptureAdapter _adapter;
+  late final CaptureCoordinator _coordinator;
+  late final CaptureDatabase _database;
+  late final RagBackendClient _backend;
+  StreamSubscription? _updateSubscription;
+  StreamSubscription? _diagnosticSubscription;
+  List<ConversationSummary> _conversations = const [];
+  Map<String, Object?> _status = const {};
+  String _diagnostics = 'No AX inspection yet.';
+  Object? _error;
+  BackendHealth? _backendHealth;
+  Map<String, HumanReviewTicket> _tickets = const {};
+  OcrInspection? _ocrInspection;
+  bool _ocrLoading = false;
+  bool _sending = false;
+  bool _autoCaptureRunning = false;
+  bool _autoCaptureBusy = false;
+  Timer? _autoCaptureTimer;
+  final Set<String> _draftQueue = {};
+  bool _draftWorkerRunning = false;
+  String? _activeDraftUser;
+  final Map<String, int> _processingUnreadEvidence = {};
+  final Map<String, int> _handledUnreadEvidence = {};
+  String _visibleMediaTrace = 'visible image candidates=0, saved=0';
+
+  @override
+  void initState() {
+    super.initState();
+    _backend = RagBackendClient();
+    if (Platform.isMacOS) {
+      _adapter = MacOSCaptureAdapter();
+      _database = CaptureDatabase();
+      _coordinator = CaptureCoordinator(_adapter, _database);
+      _updateSubscription = _coordinator.updates.listen(
+        (value) {
+          setState(() => _conversations = value);
+          _refreshTickets();
+        },
+        onError: (Object error) => setState(() => _error = error),
+      );
+      _diagnosticSubscription = _adapter.diagnostics.listen(
+        (value) => setState(() =>
+            _diagnostics = const JsonEncoder.withIndent('  ').convert(value)),
+      );
+      _refreshStatus();
+      _refreshBackendHealth();
+      _refreshTickets();
+    }
+  }
+
+  Future<void> _refreshBackendHealth() async {
+    try {
+      final health = await _backend.health();
+      if (mounted) setState(() => _backendHealth = health);
+    } catch (_) {
+      if (mounted) setState(() => _backendHealth = null);
+    }
+  }
+
+  Future<void> _refreshStatus() async {
+    try {
+      final status = await _adapter.status();
+      if (mounted) setState(() => _status = status);
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  Future<void> _refreshTickets() async {
+    try {
+      await _database.improveGenericTicketReasons();
+      final tickets = await _database.humanReviewTickets();
+      if (!mounted) return;
+      setState(() => _tickets = {
+            for (final ticket in tickets)
+              if (ticket.status != 'resolved' && ticket.status != 'cancelled')
+                ticket.conversationId: ticket,
+          });
+    } catch (_) {
+      // Capture remains available if local ticket storage is unavailable.
+    }
+  }
+
+  Future<void> _markContacting(HumanReviewTicket ticket) async {
+    try {
+      await _database.markTicketContacting(ticket.id);
+      await _coordinator.refresh();
+      await _refreshTickets();
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  Future<void> _markContacted(HumanReviewTicket ticket) async {
+    try {
+      // Snapshot the human-handled chat before reopening AI eligibility. This
+      // records both the customer's existing question and a manual seller
+      // reply while the conversation is still in human_contacting state.
+      final windows = await _adapter.listOcrWindows();
+      if (windows.isEmpty) {
+        throw StateError(
+            'Keep the JD conversation visible before marking it Contacted.');
+      }
+      final reception = windows.firstWhere(
+          (window) => window.title.contains('咚咚融合工作台'),
+          orElse: () => windows.first);
+      final inspection =
+          await _adapter.inspectOcr(windowId: reception.windowId);
+      if (inspection.activeCustomerId?.trim() != ticket.conversationId) {
+        throw StateError('Open ${ticket.conversationId} in JD before marking '
+            'the ticket Contacted. The current chat was not changed.');
+      }
+      final baseline = const OcrCaptureExtractor().analyze(inspection).capture;
+      if (baseline == null) {
+        throw StateError('The visible human-handled conversation could not be '
+            'verified. Keep it open and try Contacted again.');
+      }
+      await _database.saveCapture(baseline);
+      await _database.markTicketContacted(ticket.id);
+      await _coordinator.refresh();
+      await _refreshTickets();
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  Future<void> _start() async {
+    if (_autoCaptureRunning) {
+      _autoCaptureTimer?.cancel();
+      setState(() => _autoCaptureRunning = false);
+      return;
+    }
+    setState(() {
+      _autoCaptureRunning = true;
+      _error = null;
+      _diagnostics =
+          'Automatic OCR capture started. Unread rows will be checked every 15 seconds.';
+    });
+    _autoCaptureTimer = Timer.periodic(
+        const Duration(seconds: 15), (_) => unawaited(_runAutoCaptureCycle()));
+    unawaited(_runAutoCaptureCycle());
+  }
+
+  Future<void> _runAutoCaptureCycle() async {
+    if (!_autoCaptureRunning || _autoCaptureBusy || _sending) return;
+    _autoCaptureBusy = true;
+    final scanStartedAt = DateTime.now();
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _diagnostics =
+            'Checking JD unread messages at ${_formatClock(scanStartedAt)}…';
+      });
+    }
+    try {
+      // A periodic monitor must never activate/unhide Qianniu. Doing so steals
+      // keyboard focus from whichever application the operator is using.
+      await _adapter
+          .ensureReceptionWindow(allowActivation: false)
+          .timeout(_captureOperationTimeout);
+      final rows = await _adapter
+          .listConversationRows()
+          .timeout(_captureOperationTimeout);
+      if (rows.isEmpty) {
+        throw StateError('No JD conversation rows are available.');
+      }
+      final evidenceAvailable = rows.any((row) => row.evidenceAvailable);
+      for (final row in rows.where((row) => !row.unread)) {
+        _handledUnreadEvidence.remove(row.customer);
+        _processingUnreadEvidence.remove(row.customer);
+      }
+      final orderedRows = evidenceAvailable
+          ? rows
+              .where((row) =>
+                  row.unread &&
+                  _activeDraftUser != row.customer &&
+                  !_draftQueue.contains(row.customer) &&
+                  _handledUnreadEvidence[row.customer] != row.unreadEvidence)
+              .toList(growable: false)
+          : const <QianniuConversationRow>[];
+      if (orderedRows.isEmpty) {
+        var insertedFromActiveChat = 0;
+        final windows =
+            await _adapter.listOcrWindows().timeout(_captureOperationTimeout);
+        if (windows.isNotEmpty) {
+          final reception = windows.firstWhere(
+              (window) => window.title.contains('咚咚融合工作台'),
+              orElse: () => windows.first);
+          final inspection = await _adapter
+              .inspectOcr(windowId: reception.windowId)
+              .timeout(_captureOperationTimeout);
+          if (mounted) setState(() => _ocrInspection = inspection);
+          // JD does not expose an unread flag for the active sidebar row.
+          // Poll the already-open chat independently; durable message IDs
+          // prevent duplicate saves while keeping the unread count truthful.
+          final activeCustomer = inspection.activeCustomerId?.trim();
+          if (activeCustomer != null &&
+              activeCustomer.isNotEmpty &&
+              rows.any((row) => row.customer == activeCustomer) &&
+              !await _database.isHumanContacting(activeCustomer)) {
+            final extraction = const OcrCaptureExtractor().analyze(inspection);
+            final capture = await _captureWithVisibleMedia(
+                inspection, extraction,
+                // Passive polling may save newly recognized text, but it must
+                // never open an old image without verified unread evidence.
+                allowUnlabeledLatestImage: false);
+            if (capture != null) {
+              insertedFromActiveChat = await _database.saveCapture(capture);
+            }
+            if (await _database.hasPendingUnanswered(activeCustomer)) {
+              _draftQueue.add(activeCustomer);
+              unawaited(_runDraftWorker());
+            }
+            if (insertedFromActiveChat > 0) await _coordinator.refresh();
+          }
+        }
+        if (mounted) {
+          setState(() => _diagnostics = evidenceAvailable
+              ? insertedFromActiveChat > 0
+                  ? 'Scan ${_formatClock(scanStartedAt)}: no unread conversations were detected; saved $insertedFromActiveChat unseen message(s) from the already-open JD chat.'
+                  : 'Scan ${_formatClock(scanStartedAt)}: checked ${rows.length} customer rows; no unread conversations were detected. The already-open JD chat was checked and contained no unseen messages.'
+              : 'Scan ${_formatClock(scanStartedAt)}: unread screenshot evidence was unavailable. Automatic row switching was skipped to avoid stealing keyboard focus.');
+        }
+        return;
+      }
+      final windows =
+          await _adapter.listOcrWindows().timeout(_captureOperationTimeout);
+      if (windows.isEmpty) {
+        throw StateError('No visible JD 咚咚 window is available.');
+      }
+      final reception = windows.firstWhere(
+          (window) => window.title.contains('咚咚融合工作台'),
+          orElse: () => windows.first);
+      var insertedTotal = 0;
+      for (final row in orderedRows) {
+        if (!_autoCaptureRunning) break;
+        final customer = row.customer;
+        // Human takeover is scoped to one customer. Keep monitoring every
+        // other row while leaving this customer's Qianniu chat untouched.
+        if (await _database.isHumanContacting(customer)) continue;
+        _processingUnreadEvidence[customer] = row.unreadEvidence;
+        try {
+          await _adapter
+              .openConversation(customer, allowActivation: false)
+              .timeout(_captureOperationTimeout);
+          final inspection = await _adapter
+              .inspectOcr(windowId: reception.windowId)
+              .timeout(_captureOperationTimeout);
+          if (mounted) setState(() => _ocrInspection = inspection);
+          final extraction = const OcrCaptureExtractor().analyze(inspection);
+          final capture = await _captureWithVisibleMedia(inspection, extraction,
+                  allowUnlabeledLatestImage: row.unread)
+              .timeout(_captureOperationTimeout);
+          if (capture != null) {
+            insertedTotal += await _database.saveCapture(capture);
+          }
+          // Queue the durable current message immediately. Optional history
+          // scrolling must never prevent an already-saved customer turn from
+          // reaching Codex.
+          if (await _database.hasPendingUnanswered(customer)) {
+            _draftQueue.add(customer);
+            unawaited(_runDraftWorker());
+          }
+
+          // Never scroll into history. Only the current bottom viewport may
+          // create work, so one unread turn cannot produce one historical
+          // reply followed by another reply for the actual latest item.
+          if (mounted) setState(() => _ocrInspection = inspection);
+        } on PlatformException catch (error) {
+          if (error.code == 'composer_not_empty') break;
+          if (error.code == 'qianniu_not_frontmost') {
+            if (mounted) {
+              setState(() => _diagnostics =
+                  'Unread conversation detected, but JD 咚咚 is not the active application. Capture deferred without stealing focus.');
+            }
+            break;
+          }
+          rethrow;
+        }
+      }
+      await _coordinator.refresh();
+      if (mounted) {
+        final unreadCount = rows.where((row) => row.unread).length;
+        final unreadEvidenceAvailable =
+            rows.any((row) => row.evidenceAvailable);
+        setState(() => _diagnostics = insertedTotal == 0
+            ? 'Scan ${_formatClock(scanStartedAt)} completed for ${rows.length} customers; '
+                '${unreadEvidenceAvailable ? '$unreadCount unread row(s) were prioritized' : 'unread screenshot evidence was unavailable'}; '
+                'no unseen messages were saved; $_visibleMediaTrace.'
+            : 'Scan ${_formatClock(scanStartedAt)} prioritized $unreadCount unread row(s) and saved '
+                '$insertedTotal unseen message(s) across ${rows.length} customers. '
+                'Draft generation is queued separately.');
+      }
+    } on TimeoutException {
+      if (mounted) {
+        setState(() => _diagnostics =
+            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next fixed 15-second check will retry.');
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      _autoCaptureBusy = false;
+    }
+  }
+
+  String _formatClock(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:'
+      '${value.minute.toString().padLeft(2, '0')}:'
+      '${value.second.toString().padLeft(2, '0')}';
+
+  Future<void> _runDraftWorker() async {
+    if (_draftWorkerRunning) return;
+    _draftWorkerRunning = true;
+    try {
+      while (_draftQueue.isNotEmpty) {
+        final userId = _draftQueue.first;
+        _draftQueue.remove(userId);
+        _activeDraftUser = userId;
+        try {
+          await _processDraftUser(userId);
+        } finally {
+          if (_activeDraftUser == userId) _activeDraftUser = null;
+        }
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      _draftWorkerRunning = false;
+      if (_draftQueue.isNotEmpty) unawaited(_runDraftWorker());
+    }
+  }
+
+  Future<void> _processDraftUser(String userId) async {
+    final pending = await _database.conversations();
+    final matches = pending
+        .where((conversation) => conversation.userId == userId)
+        .toList(growable: false);
+    if (matches.isEmpty) return;
+    if (!await _database.hasPendingUnanswered(userId)) return;
+    final conversation = matches.first;
+    final service = await CodexReplyService.discover(_database);
+    final draft =
+        await service.generate(conversation: conversation, database: _database);
+    final saved = await _database.saveDraft(conversation.id, draft);
+    // Contacting or a manually observed seller reply may remove the queue
+    // while Codex is generating. Never send a result from that stale turn.
+    if (saved == 0 || await _database.isHumanContacting(userId)) return;
+    final needsHuman = draftRequiresHumanReview(draft);
+    if (needsHuman) {
+      final document = await (await _database.history).read(userId);
+      final messages = (document?['messages'] as List<Object?>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
+      final latestIncoming = messages.reversed
+          .firstWhere((message) => message['direction'] == 'incoming');
+      await _database.createHumanReviewTicket(
+        userId: userId,
+        customerRequest: latestIncoming['body']?.toString() ?? '',
+        reason: draftHumanReviewReason(draft),
+      );
+      await _refreshTickets();
+      if (draft.attachments.isEmpty) {
+        final sent = await _sendAutomatically(userId, draft);
+        if (mounted && sent) {
+          setState(() => _diagnostics =
+              'Created an open human-review ticket and automatically sent the Codex acknowledgement to $userId. AI remains active until Contacting is clicked.');
+        }
+      } else if (mounted) {
+        setState(() => _diagnostics =
+            'Human-review acknowledgement for $userId unexpectedly contained media and was not sent.');
+      }
+    } else {
+      await _sendAutomatically(userId, draft);
+    }
+    await _coordinator.refresh();
+  }
+
+  Future<bool> _sendAutomatically(String userId, AiDraft draft) async {
+    if (await _database.isHumanContacting(userId)) return false;
+    if (mounted) setState(() => _sending = true);
+    try {
+      final mediaPaths = draft.attachments
+          .where((attachment) => attachment.url.scheme == 'file')
+          .map((attachment) => attachment.url.toFilePath())
+          .toList(growable: false);
+      if (mediaPaths.length != draft.attachments.length) {
+        throw StateError(
+            'Automatic media sending requires verified local files.');
+      }
+      await _adapter.sendDraftOnce(
+        expectedCustomer: userId,
+        reply: draft.reply,
+        mediaPaths: mediaPaths,
+      );
+      await _database.markReplySent(userId: userId, reply: draft.reply);
+      final evidence = _processingUnreadEvidence[userId];
+      if (evidence != null) _handledUnreadEvidence[userId] = evidence;
+      if (mounted) {
+        setState(() {
+          _diagnostics =
+              'Verified and automatically sent ${draft.model} reply to $userId.';
+        });
+      }
+      return true;
+    } catch (_) {
+      if (mounted) {
+        setState(() => _diagnostics =
+            'Automatic send to $userId failed. It was not retried to avoid duplicate delivery.');
+      }
+      rethrow;
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<CapturedConversation?> _captureWithVisibleMedia(
+    OcrInspection inspection,
+    OcrExtractionAttempt extraction, {
+    bool allowUnlabeledLatestImage = false,
+  }) async {
+    final customer = extraction.customerId ?? extraction.capture?.customerName;
+    if (customer == null || inspection.windowId == 0) {
+      return extraction.capture;
+    }
+    final capturedMedia = <CapturedMessage>[];
+    var viewportFallbackUsed = false;
+    MessageClassification? copiedMessage;
+    String? copiedMessageKind;
+    if (allowUnlabeledLatestImage && extraction.copyTarget != null) {
+      copiedMessage = await _adapter.classifyMessageAt(
+        expectedCustomer: customer,
+        windowId: inspection.windowId,
+        x: extraction.copyTarget!.x,
+        y: extraction.copyTarget!.y,
+      );
+      copiedMessageKind = copiedMessage.kind;
+      // Copy classification is the single authority for an unread item. A
+      // text message continues through OCR; unknown/unavailable content must
+      // never be promoted to an image from screenshot geometry alone.
+      if (copiedMessageKind != 'image') {
+        _visibleMediaTrace = 'copied unread message kind='
+            '$copiedMessageKind; image capture skipped';
+        return extraction.capture;
+      }
+    }
+    var imageCandidates = _incomingImageCandidates(
+      inspection,
+      customer,
+      allowUnlabeledLatestImage: allowUnlabeledLatestImage,
+    );
+    if (copiedMessageKind == 'image' && extraction.copyTarget != null) {
+      final targetY = extraction.copyTarget!.y;
+      imageCandidates = imageCandidates
+          .where((region) =>
+              targetY >= region.y - .01 &&
+              targetY <= region.y + region.height + .01)
+          .toList(growable: false);
+    }
+    final visibleMessages = extraction.capture?.messages ?? const [];
+    final latestVisible = visibleMessages.isEmpty ? null : visibleMessages.last;
+    if (latestVisible?.direction == 'outgoing') {
+      imageCandidates = imageCandidates.where((region) {
+        final bottom = region.y + region.height;
+        final sellerActivityBelow = inspection.observations.any((item) {
+          final text = item.text.trim();
+          final sellerLabel = text.contains('旗舰店') &&
+              (text.contains(':') || text.contains('：'));
+          return sellerLabel && item.y > bottom + .005;
+        });
+        return !sellerActivityBelow;
+      }).toList(growable: false);
+    } else if (latestVisible?.direction == 'incoming' &&
+        extraction.copyTarget != null) {
+      // A Vision rectangle overlapping the latest OCR text is usually the
+      // text bubble itself, not a customer image. Require clipboard image
+      // classification before promoting such a region to media.
+      if (copiedMessageKind != 'image') {
+        imageCandidates = const [];
+      } else {
+        final targetY = extraction.copyTarget!.y;
+        imageCandidates = imageCandidates
+            .where((region) =>
+                targetY >= region.y - .01 &&
+                targetY <= region.y + region.height + .01)
+            .toList(growable: false);
+      }
+    }
+    if (imageCandidates.isEmpty && copiedMessageKind == 'image') {
+      // OCR can read a QR code or model label inside a photo and incorrectly
+      // report an incoming text body even though Vision found no outer image
+      // rectangle. Only a successful clipboard image classification permits
+      // this visible-chat screenshot fallback. This path never scrolls.
+      final rightPanelStart = inspection.observations
+          .where((item) =>
+              item.x > .50 &&
+              item.y < .18 &&
+              (item.text.trim() == '客服' || item.text.trim() == '营销'))
+          .map((item) => item.x)
+          .fold<double>(.69, (left, right) => left < right ? left : right);
+      final chatRight = (rightPanelStart - .01).clamp(.58, .72).toDouble();
+      imageCandidates = [
+        OcrVisualRegion(
+          x: .20,
+          y: .10,
+          width: chatRight - .20,
+          height: .79,
+          confidence: 0,
+        ),
+      ];
+      viewportFallbackUsed = true;
+    }
+    if (copiedMessageKind == 'image' &&
+        extraction.copyTarget != null &&
+        (copiedMessage?.visualFingerprint?.isNotEmpty ?? false)) {
+      final clipboardFingerprint = copiedMessage?.visualFingerprint ?? '';
+      if (clipboardFingerprint.isNotEmpty &&
+          await (await _database.history).hasSimilarImageFingerprint(
+            customer,
+            clipboardFingerprint,
+          )) {
+        _visibleMediaTrace =
+            'latest customer image already captured; download skipped';
+        return extraction.capture;
+      }
+      try {
+        final downloaded = await _adapter.downloadImageAt(
+          expectedCustomer: customer,
+          windowId: inspection.windowId,
+          x: extraction.copyTarget!.x,
+          y: extraction.copyTarget!.y,
+        );
+        if (downloaded.kind == 'image' && downloaded.bytes != null) {
+          final saved = await _saveVisibleImage(
+            customer,
+            downloaded,
+            originalDownload: true,
+          );
+          if (saved != null) {
+            _visibleMediaTrace =
+                'copied unread message kind=image, original downloaded from JD image viewer';
+            return CapturedConversation(
+              stableKey: extraction.capture?.stableKey ??
+                  'customer:${sha256.convert(utf8.encode(customer))}',
+              customerName: extraction.capture?.customerName ?? customer,
+              customerExternalId:
+                  extraction.capture?.customerExternalId ?? customer,
+              capturedAt: inspection.capturedAt,
+              messages: [
+                ...(extraction.capture?.messages ?? const <CapturedMessage>[]),
+                saved,
+              ],
+            );
+          }
+        }
+      } on PlatformException {
+        // JD versions and download preferences vary. Preserve the verified
+        // screenshot-region path below as a non-destructive fallback.
+      }
+    }
+    var failures = 0;
+    for (final region in imageCandidates) {
+      try {
+        final visible = await _adapter.captureImageRegion(
+          expectedCustomer: customer,
+          windowId: inspection.windowId,
+          x: region.x,
+          y: region.y,
+          width: region.width,
+          height: region.height,
+        );
+        if (visible.kind == 'image' && visible.bytes != null) {
+          final saved = await _saveVisibleImage(
+            customer,
+            visible,
+            viewportFallback: viewportFallbackUsed,
+          );
+          if (saved != null) capturedMedia.add(saved);
+        }
+      } on PlatformException {
+        failures++;
+        // One invalid visual rectangle must not discard other candidates or
+        // text already extracted from the visible conversation.
+      }
+    }
+    _visibleMediaTrace = 'copied unread message kind='
+        '${copiedMessageKind ?? 'not_checked'}, '
+        'visible image candidates=${imageCandidates.length}, '
+        'captured=${capturedMedia.length}, failures=$failures, '
+        'viewport_fallback=$viewportFallbackUsed';
+    if (capturedMedia.isEmpty) return extraction.capture;
+    final uniqueMedia = <String, CapturedMessage>{
+      for (final message in capturedMedia) message.stableId: message,
+    }.values.toList(growable: false);
+    return CapturedConversation(
+      stableKey: extraction.capture?.stableKey ??
+          'customer:${sha256.convert(utf8.encode(customer))}',
+      customerName: customer,
+      customerExternalId: customer,
+      capturedAt: inspection.capturedAt,
+      messages: [...?extraction.capture?.messages, ...uniqueMedia],
+    );
+  }
+
+  Future<CapturedMessage?> _saveVisibleImage(
+    String customer,
+    VisibleImagePayload image, {
+    bool viewportFallback = false,
+    bool originalDownload = false,
+  }) async {
+    final bytes = image.bytes!;
+    final fingerprint = image.visualFingerprint ?? '';
+    if (fingerprint.isNotEmpty &&
+        await (await _database.history).hasSimilarImageFingerprint(
+          customer,
+          fingerprint,
+        )) {
+      return null;
+    }
+    final extension = image.extension ?? 'png';
+    final originalName = image.originalName ??
+        'qianniu_${DateTime.now().millisecondsSinceEpoch}.$extension';
+    final path = await (await _database.history).saveMedia(
+      userId: customer,
+      filename: originalName,
+      bytes: bytes,
+    );
+    final digest = sha256.convert(bytes).toString();
+    return CapturedMessage(
+      stableId: 'visible-image:$digest',
+      direction: 'incoming',
+      body: originalDownload
+          ? '[Customer sent an image; original downloaded]'
+          : '[Customer sent an image; visible portion captured]',
+      sender: customer,
+      axPath: viewportFallback
+          ? 'ocr:visible-chat-viewport-fallback'
+          : 'ocr:visible-image-region',
+      media: [
+        CapturedMedia(
+          type: 'image',
+          path: path,
+          mimeType: image.mimeType,
+          originalName: originalName,
+          captureSource: originalDownload
+              ? 'jd_image_viewer_download'
+              : viewportFallback
+                  ? 'verified_chat_viewport_fallback'
+                  : 'verified_window_crop',
+          isPartial: !originalDownload,
+          description: 'Pending Codex visual analysis.',
+          visualFingerprint: fingerprint,
+        ),
+      ],
+    );
+  }
+
+  List<OcrVisualRegion> _incomingImageCandidates(
+    OcrInspection inspection,
+    String customer, {
+    bool allowUnlabeledLatestImage = false,
+  }) {
+    bool isCustomer(String value) {
+      final raw = value.toLowerCase().replaceAll('...', '').replaceAll('…', '');
+      final expected = customer.toLowerCase();
+      return raw == expected || (raw.length >= 6 && expected.startsWith(raw));
+    }
+
+    final customerLabels = inspection.observations
+        .where((item) => isCustomer(item.text))
+        .toList(growable: false);
+    bool validGeometry(OcrVisualRegion region) {
+      if (region.x < .20 || region.x + region.width > .76) return false;
+      if (region.y < .14 || region.y + region.height > .90) return false;
+      if (region.width < .08 || region.height < .055) return false;
+      // Portrait customer photos commonly occupy almost half of the visible
+      // chat height. The previous .40 cap rejected those exact image bubbles.
+      if (region.width > .48 || region.height > .76) return false;
+      return true;
+    }
+
+    // Vision often returns the full photo plus several rectangles inside it.
+    // Associate regions with the explicit buyer label above them and retain
+    // only the largest rectangle for each label. An image whose buyer label is
+    // offscreen is deliberately deferred until a later scan can prove its
+    // direction; a partial viewport crop must not be treated as a new photo.
+    final selected = <OcrVisualRegion>[];
+    for (final label in customerLabels) {
+      final matches = inspection.visualRegions
+          .where(validGeometry)
+          .where((region) => label.y <= region.y && region.y - label.y <= .09)
+          .toList()
+        ..sort((left, right) =>
+            (right.width * right.height).compareTo(left.width * left.height));
+      if (matches.isNotEmpty) selected.add(matches.first);
+    }
+    if (selected.isEmpty && allowUnlabeledLatestImage) {
+      // An image-only unread message often has its sender label just above the
+      // visible viewport. AX has already verified the active customer and the
+      // sidebar has independently verified that this row is unread. In that
+      // narrow case, accept only the largest substantial left-side rectangle
+      // inside the chat column; right-side customer panels remain excluded.
+      final unlabeled = inspection.visualRegions
+          .where(validGeometry)
+          .where((region) =>
+              region.x >= .20 &&
+              region.x < .50 &&
+              region.x + region.width <= .64 &&
+              region.width >= .12 &&
+              region.width <= .38 &&
+              region.height >= .12)
+          .toList();
+      // Vision also reports QR codes, labels and controls inside the photo.
+      // Drop rectangles contained by a meaningfully larger candidate so the
+      // outer message image defines where capture starts and ends.
+      final outer = unlabeled.where((candidate) {
+        return !unlabeled.any((container) {
+          if (identical(candidate, container)) return false;
+          const tolerance = .008;
+          return container.x <= candidate.x + tolerance &&
+              container.y <= candidate.y + tolerance &&
+              container.x + container.width >=
+                  candidate.x + candidate.width - tolerance &&
+              container.y + container.height >=
+                  candidate.y + candidate.height - tolerance &&
+              container.width * container.height >
+                  candidate.width * candidate.height * 1.25;
+        });
+      }).toList()
+        ..sort((left, right) {
+          final byBottom =
+              (right.y + right.height).compareTo(left.y + left.height);
+          if (byBottom != 0) return byBottom;
+          return (right.width * right.height)
+              .compareTo(left.width * left.height);
+        });
+      if (outer.isNotEmpty) selected.add(outer.first);
+    }
+    selected.sort((left, right) => right.y.compareTo(left.y));
+    return selected;
+  }
+
+  Future<void> _loadDemoData() async {
+    try {
+      await _database.seedDemoData();
+      await _coordinator.refresh();
+      final root = await _database.storageRoot;
+      if (mounted) {
+        setState(() {
+          _ocrInspection = null;
+          _diagnostics =
+              'Demo data created.\n\nJSON: ${root.path}/<user_id>.json\nMedia: ${root.path}/media/<user_id>/\nSQLite pending queue: ${root.path}/jd_automation.sqlite3';
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  Future<void> _inspect() async {
+    try {
+      final result = await _adapter.inspectTree();
+      setState(() => _diagnostics = result['tree'] as String? ?? '$result');
+    } catch (error) {
+      setState(() => _error = error);
+    }
+  }
+
+  Future<void> _inspectOcr({bool chooseWindow = false}) async {
+    setState(() {
+      _ocrLoading = true;
+      _error = null;
+    });
+    try {
+      final windows = await _adapter.listOcrWindows();
+      if (windows.isEmpty) {
+        throw StateError(
+            'No visible JD 咚咚 windows found. Open the customer-service window and retry.');
+      }
+      // CGWindowList is ordered front-to-back. The Qianniu reception/message
+      // window floats in front of the main workbench, so it is the safe default.
+      final selected = chooseWindow && windows.length > 1
+          ? await _selectOcrWindow(windows)
+          : windows.first;
+      if (selected == null) return;
+      final inspection = await _adapter.inspectOcr(windowId: selected.windowId);
+      final extraction = const OcrCaptureExtractor().analyze(inspection);
+      final capture = await _captureWithVisibleMedia(
+        inspection,
+        extraction,
+        allowUnlabeledLatestImage: true,
+      );
+      var outcome = 'OCR did not save a message: ${extraction.reason}; '
+          '$_visibleMediaTrace.';
+      if (capture != null) {
+        final inserted = await _database.saveCapture(capture);
+        await _coordinator.refresh();
+        final userId = capture.customerExternalId ?? capture.customerName;
+        final unanswered = await _database.hasPendingUnanswered(userId);
+        if (!unanswered) {
+          outcome = 'OCR completed. The latest message for '
+              '${capture.customerName} is not awaiting a reply. '
+              '${inserted == 0 ? 'No duplicate was added.' : 'Newly observed seller activity was saved without generating a draft.'}';
+        } else {
+          final pending = await _database.conversations();
+          final conversation =
+              pending.firstWhere((item) => item.userId == userId);
+          final service = await CodexReplyService.discover(_database);
+          final draft = await service.generate(
+              conversation: conversation, database: _database);
+          final saved = await _database.saveDraft(conversation.id, draft);
+          if (saved == 0 || await _database.isHumanContacting(userId)) {
+            outcome =
+                'The reply became ineligible while it was generating. Nothing was sent.';
+            if (mounted) {
+              setState(() {
+                _ocrInspection = inspection;
+                _diagnostics = outcome;
+              });
+            }
+            return;
+          }
+          final needsHuman = draftRequiresHumanReview(draft);
+          if (needsHuman) {
+            await _database.createHumanReviewTicket(
+              userId: capture.customerName,
+              customerRequest: capture.messages.last.body,
+              reason: draftHumanReviewReason(draft),
+            );
+            await _refreshTickets();
+            if (draft.attachments.isEmpty) {
+              final sent = await _sendAutomatically(userId, draft);
+              outcome = sent
+                  ? 'Created an open human-review ticket and automatically sent the Codex acknowledgement. AI remains active until Contacting is clicked.'
+                  : 'The ticket remains open, but Contacting was clicked before the acknowledgement could be sent.';
+            } else {
+              outcome =
+                  'Created the human-review ticket, but its reply includes media and could not be auto-sent safely.';
+            }
+          } else {
+            final sent = await _sendAutomatically(userId, draft);
+            outcome = sent
+                ? 'Saved the customer message and automatically sent a verified ${draft.model} reply to ${capture.customerName}.'
+                : 'Human takeover started before sending. Nothing was sent.';
+          }
+          await _coordinator.refresh();
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _ocrInspection = inspection;
+          _diagnostics = outcome;
+        });
+      }
+    } on PlatformException catch (error) {
+      if (error.code == 'screen_recording_not_allowed') {
+        await _adapter.requestScreenRecording();
+      }
+      if (mounted) setState(() => _error = error);
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      if (mounted) setState(() => _ocrLoading = false);
+    }
+  }
+
+  Future<OcrWindowInfo?> _selectOcrWindow(List<OcrWindowInfo> windows) async {
+    return showDialog<OcrWindowInfo>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Select JD 咚咚 window to scan'),
+        children: [
+          for (final window in windows)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, window),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.chat_outlined),
+                title: Text(
+                    window.title.isEmpty ? 'Untitled JD window' : window.title),
+                subtitle: Text(window.description),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _autoCaptureTimer?.cancel();
+    _updateSubscription?.cancel();
+    _diagnosticSubscription?.cancel();
+    _backend.close();
+    _database.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!Platform.isMacOS) {
+      return const Scaffold(
+          body: Center(
+              child:
+                  Text('The capture adapter currently supports macOS only.')));
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('JD Automation'),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Center(
+              child: Tooltip(
+                message: _backendHealth == null
+                    ? 'Backend unavailable'
+                    : '${_backendHealth!.records} knowledge records • ${_backendHealth!.model}',
+                child: Chip(
+                  avatar: Icon(Icons.circle,
+                      size: 11,
+                      color: _backendHealth?.available == true
+                          ? Colors.green
+                          : Colors.red),
+                  label: Text(_backendHealth?.available == true
+                      ? 'AI backend ready'
+                      : 'AI backend offline'),
+                ),
+              ),
+            ),
+          ),
+          TextButton(
+              onPressed: _refreshStatus, child: const Text('Refresh status')),
+          TextButton(onPressed: _inspect, child: const Text('Inspect AX tree')),
+          TextButton.icon(
+            onPressed: _ocrLoading ? null : () => _inspectOcr(),
+            icon: _ocrLoading
+                ? const SizedBox.square(
+                    dimension: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.document_scanner_outlined),
+            label: Text(_ocrLoading ? 'Scanning…' : 'Inspect OCR'),
+          ),
+          IconButton(
+            tooltip: 'Choose a different JD window',
+            onPressed:
+                _ocrLoading ? null : () => _inspectOcr(chooseWindow: true),
+            icon: const Icon(Icons.filter_none),
+          ),
+          TextButton(
+            onPressed: _loadDemoData,
+            child: const Text('Load demo'),
+          ),
+          FilledButton(
+              onPressed: _start,
+              child:
+                  Text(_autoCaptureRunning ? 'Stop capture' : 'Start capture')),
+          const SizedBox(width: 12),
+        ],
+      ),
+      body: Row(children: [
+        SizedBox(
+          width: 310,
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                  'PID: ${_status['pid'] ?? 'not running'}  •  Accessibility: ${_status['trusted'] == true ? 'allowed' : 'not allowed'}'),
+            ),
+            if (_status['trusted'] != true)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: OutlinedButton(
+                  onPressed: () async {
+                    await _adapter.requestAccessibility();
+                    await _refreshStatus();
+                  },
+                  child: const Text('Request Accessibility access'),
+                ),
+              ),
+            if (_error != null)
+              Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text('Error: $_error',
+                      style: const TextStyle(color: Colors.red))),
+            const Divider(),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(12, 4, 12, 4),
+              child: Text('Human review',
+                  style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+            if (_tickets.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(12, 2, 12, 10),
+                child: Text('No open tickets',
+                    style: TextStyle(color: Colors.grey)),
+              )
+            else ...[
+              for (final ticket in _tickets.values)
+                ListTile(
+                  dense: true,
+                  title: Text(ticket.conversationId),
+                  subtitle: Text('${ticket.status}: ${ticket.reason}',
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(
+                      tooltip: 'Contacting — pause AI for this customer',
+                      onPressed: ticket.status == 'open'
+                          ? () => _markContacting(ticket)
+                          : null,
+                      icon: const Icon(Icons.support_agent),
+                    ),
+                    IconButton(
+                      tooltip: 'Contacted/solved — resume on next new message',
+                      onPressed: ticket.status == 'contacting'
+                          ? () => _markContacted(ticket)
+                          : null,
+                      icon: const Icon(Icons.task_alt),
+                    ),
+                  ]),
+                ),
+            ],
+            const Divider(),
+            Expanded(
+                child: ListView.builder(
+              itemCount: _conversations.length,
+              itemBuilder: (context, index) {
+                final item = _conversations[index];
+                final ticket = _tickets[item.userId];
+                return ListTile(
+                  title: Row(children: [
+                    Expanded(child: Text(item.customerName)),
+                    Tooltip(
+                      message: ticket == null
+                          ? 'No human-review ticket'
+                          : ticket.status == 'contacting'
+                              ? 'Human is contacting customer'
+                              : 'Start contacting; pauses AI for this customer',
+                      child: IconButton(
+                        visualDensity: VisualDensity.compact,
+                        onPressed: ticket != null && ticket.status == 'open'
+                            ? () => _markContacting(ticket)
+                            : null,
+                        icon: const Icon(Icons.support_agent, size: 19),
+                      ),
+                    ),
+                    Tooltip(
+                      message:
+                          'Contacted; AI waits for the next customer message',
+                      child: IconButton(
+                        visualDensity: VisualDensity.compact,
+                        onPressed: ticket?.status == 'contacting'
+                            ? () => _markContacted(ticket!)
+                            : null,
+                        icon: const Icon(Icons.task_alt, size: 19),
+                      ),
+                    ),
+                  ]),
+                  subtitle: Text(
+                      ticket == null
+                          ? (item.messages.isEmpty
+                              ? 'No messages'
+                              : item.messages.last.body)
+                          : '${ticket.status}: ${ticket.reason}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  onTap: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => _MessageDialog(
+                            conversation: item,
+                            database: _database,
+                            onReplyCompleted: _coordinator.refresh,
+                          )).then((_) => _refreshTickets()),
+                );
+              },
+            )),
+          ]),
+        ),
+        const VerticalDivider(width: 1),
+        Expanded(
+            child: Padding(
+          padding: const EdgeInsets.all(12),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(
+                _ocrInspection == null
+                    ? 'Accessibility diagnostics'
+                    : 'OCR diagnostics — ${_ocrInspection!.windowTitle}',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text(_ocrInspection == null
+                ? 'Use this output to map roles and paths from the installed JD 咚咚 build. Sending remains guarded by exact customer verification.'
+                : '${_ocrInspection!.observations.length} text regions • ${_ocrInspection!.imageWidth}×${_ocrInspection!.imageHeight}. Red boxes show Apple Vision observations.'),
+            const SizedBox(height: 8),
+            if (_ocrInspection != null) ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _diagnostics.startsWith('Saved') ||
+                          _diagnostics.contains('already saved') ||
+                          _diagnostics.startsWith('Sent')
+                      ? Colors.green.withValues(alpha: 0.10)
+                      : Colors.orange.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SelectableText(_diagnostics),
+              ),
+              const SizedBox(height: 8),
+            ],
+            Expanded(
+                child: _ocrInspection == null
+                    ? SingleChildScrollView(
+                        child: SelectableText(_diagnostics,
+                            style: const TextStyle(
+                                fontFamily: 'Menlo', fontSize: 11)))
+                    : _OcrDiagnosticView(inspection: _ocrInspection!)),
+          ]),
+        )),
+      ]),
+    );
+  }
+}
+
+class _OcrDiagnosticView extends StatelessWidget {
+  const _OcrDiagnosticView({required this.inspection});
+
+  final OcrInspection inspection;
+
+  @override
+  Widget build(BuildContext context) => Row(children: [
+        Expanded(
+          flex: 3,
+          child: InteractiveViewer(
+            minScale: 0.25,
+            maxScale: 5,
+            child: AspectRatio(
+              aspectRatio: inspection.imageWidth / inspection.imageHeight,
+              child: Stack(fit: StackFit.expand, children: [
+                Image.memory(inspection.image, fit: BoxFit.fill),
+                CustomPaint(painter: _OcrBoxPainter(inspection.observations)),
+              ]),
+            ),
+          ),
+        ),
+        const VerticalDivider(),
+        Expanded(
+          child: ListView.builder(
+            itemCount: inspection.observations.length,
+            itemBuilder: (context, index) {
+              final observation = inspection.observations[index];
+              return ListTile(
+                dense: true,
+                title: SelectableText(observation.text),
+                subtitle: Text(
+                    '${(observation.confidence * 100).toStringAsFixed(1)}% • x=${observation.x.toStringAsFixed(3)}, y=${observation.y.toStringAsFixed(3)}'),
+              );
+            },
+          ),
+        ),
+      ]);
+}
+
+class _OcrBoxPainter extends CustomPainter {
+  const _OcrBoxPainter(this.observations);
+
+  final List<OcrObservation> observations;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.redAccent
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (final observation in observations) {
+      canvas.drawRect(
+        Rect.fromLTWH(
+          observation.x * size.width,
+          observation.y * size.height,
+          observation.width * size.width,
+          observation.height * size.height,
+        ),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _OcrBoxPainter oldDelegate) =>
+      oldDelegate.observations != observations;
+}
+
+class _MessageDialog extends StatefulWidget {
+  const _MessageDialog({
+    required this.conversation,
+    required this.database,
+    required this.onReplyCompleted,
+  });
+
+  final ConversationSummary conversation;
+  final CaptureDatabase database;
+  final Future<void> Function() onReplyCompleted;
+
+  @override
+  State<_MessageDialog> createState() => _MessageDialogState();
+}
+
+class _MessageDialogState extends State<_MessageDialog> {
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.conversation.customerName),
+        content: SizedBox(
+          width: 620,
+          height: 560,
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            const Text('Captured and sent messages',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView(
+                children: widget.conversation.messages
+                    .map((message) => ListTile(
+                          dense: true,
+                          leading: Icon(message.direction == 'incoming'
+                              ? Icons.call_received
+                              : message.direction == 'outgoing'
+                                  ? Icons.call_made
+                                  : Icons.help_outline),
+                          title: Text(message.body),
+                          subtitle: Text(message.stableId),
+                        ))
+                    .toList(),
+              ),
+            ),
+            const Card(
+              child: Padding(
+                padding: EdgeInsets.all(10),
+                child: Text(
+                    'Replies are generated and sent automatically. Unsent drafts are not shown or written to conversation JSON.'),
+              ),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'))
+        ],
+      );
+}

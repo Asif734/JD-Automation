@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>JD Seller RAG Tester</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, system-ui, sans-serif; background:#f4f6f8; color:#18202a }
+    * { box-sizing:border-box }
+    body { margin:0; padding:24px }
+    main { max-width:900px; margin:auto; display:grid; gap:16px }
+    section { background:white; border:1px solid #dfe4ea; border-radius:12px; padding:16px; box-shadow:0 2px 8px #17202a0d }
+    h1 { margin:0 0 4px; font-size:24px }
+    .muted { color:#667085; margin:0 }
+    .settings { display:grid; grid-template-columns:repeat(3,1fr); gap:10px }
+    label { display:grid; gap:5px; font-size:13px; color:#475467 }
+    input, select, textarea, button { font:inherit }
+    input, select, textarea { width:100%; border:1px solid #cbd2da; border-radius:8px; padding:9px; background:white }
+    #chat { min-height:300px; max-height:54vh; overflow:auto; display:flex; flex-direction:column; gap:10px }
+    .message { max-width:78%; padding:10px 12px; border-radius:12px; white-space:pre-wrap; line-height:1.45 }
+    .message img, .message video { display:block; max-width:100%; max-height:300px; margin-top:8px; border-radius:8px }
+    .incoming { align-self:flex-end; background:#1769e0; color:white }
+    .outgoing { align-self:flex-start; background:#eef1f5 }
+    .meta { font-size:12px; color:#667085; margin-top:4px }
+    .composer { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end }
+    textarea { min-height:76px; resize:vertical }
+    button { border:0; border-radius:8px; padding:10px 16px; cursor:pointer; background:#1769e0; color:white }
+    button.secondary { background:#e8edf3; color:#283442 }
+    button:disabled { opacity:.55; cursor:wait }
+    .actions { display:flex; gap:8px; justify-content:space-between; align-items:center }
+    details pre { overflow:auto; background:#101828; color:#d1fadf; padding:12px; border-radius:8px; font-size:12px }
+    .error { color:#b42318 }
+    #pending { margin:8px 0; font-size:13px; color:#475467 }
+    @media (max-width:650px) { body{padding:10px}.settings{grid-template-columns:1fr}.message{max-width:92%} }
+  </style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>JD Seller RAG Tester</h1>
+    <p class="muted">Local test UI. Production replies are text-only and sent by the verified desktop controller.</p>
+  </section>
+
+  <section class="settings">
+    <label>Conversation ID
+      <input id="conversation" value="web-test-001">
+    </label>
+    <label>Product line (optional)
+      <input id="productLine" placeholder="e.g. attendance_machine">
+    </label>
+    <label>Model (optional)
+      <input id="productModel" placeholder="e.g. TD630G">
+    </label>
+  </section>
+
+  <section id="chat" aria-live="polite"></section>
+
+  <section>
+    <div class="composer">
+      <label>Customer message
+        <textarea id="message" placeholder="Type a customer message…"></textarea>
+      </label>
+      <button id="send">Generate draft</button>
+    </div>
+    <label>Customer images or videos
+      <input id="files" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/webm" multiple>
+    </label>
+    <div id="pending"></div>
+    <p id="status" class="muted"></p>
+    <div class="actions">
+      <button id="clear" class="secondary">New conversation</button>
+      <span class="muted">Enter to send · Shift+Enter for a new line</span>
+    </div>
+    <details>
+      <summary>Last raw API response</summary>
+      <pre id="raw">No response yet.</pre>
+    </details>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let messages = JSON.parse(localStorage.getItem('ragTesterMessages') || '[]');
+
+  function save() { localStorage.setItem('ragTesterMessages', JSON.stringify(messages.slice(-20))); }
+  function render() {
+    $('chat').innerHTML = '';
+    for (const item of messages) {
+      const wrap = document.createElement('div');
+      wrap.className = `message ${item.direction}`;
+      wrap.textContent = item.body;
+      for (const media of item.attachments || []) {
+        const element = document.createElement(media.kind === 'video' ? 'video' : 'img');
+        element.src = media.url;
+        element.alt = media.caption || media.filename;
+        if (media.kind === 'video') element.controls = true;
+        wrap.appendChild(element);
+      }
+      $('chat').appendChild(wrap);
+    }
+    $('chat').scrollTop = $('chat').scrollHeight;
+  }
+
+  async function send() {
+    const selectedFiles = [...$('files').files];
+    const customerMessage = $('message').value.trim() || (selectedFiles.length ? '请查看附件。' : '');
+    if (!customerMessage) return;
+    const history = messages.slice(-20).map(({direction, body}) => ({direction, body}));
+    const line = $('productLine').value.trim();
+    const model = $('productModel').value.trim();
+    $('send').disabled = true;
+    $('status').className = 'muted';
+    $('status').textContent = selectedFiles.length ? 'Uploading media…' : 'Generating…';
+    try {
+      const uploaded = [];
+      for (const file of selectedFiles) {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('conversation_id', $('conversation').value.trim());
+        form.append('caption', file.name);
+        const uploadResponse = await fetch('/v1/media/upload', {method:'POST', body:form});
+        const media = await uploadResponse.json();
+        if (!uploadResponse.ok) throw new Error(media.detail || `Upload failed: ${file.name}`);
+        uploaded.push(media);
+      }
+      const payload = {
+      conversation_id: $('conversation').value.trim() || null,
+      customer_message: customerMessage,
+      platform: 'unknown',
+      product: line || model ? { line: line || null, model: model || null } : null,
+      messages: history,
+      attachments: uploaded.map(media => ({media_id:media.media_id, caption:media.caption}))
+      };
+      messages.push({direction:'incoming', body:customerMessage, attachments:uploaded});
+      save(); render();
+      $('message').value = '';
+      $('files').value = '';
+      $('pending').textContent = '';
+      $('status').textContent = 'Generating…';
+      const response = await fetch('/v1/replies/draft', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+      });
+      const data = await response.json();
+      $('raw').textContent = JSON.stringify(data, null, 2);
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      const attachments = (data.attachments || []).map(item => ({...item, url:`/v1/media/${item.media_id}`}));
+      messages.push({direction:'outgoing', body:data.reply, attachments});
+      save(); render();
+      $('status').textContent = `${data.decision} · confidence ${data.confidence} · risk ${data.risk_level}`;
+    } catch (error) {
+      $('status').className = 'error';
+      $('status').textContent = error.message;
+    } finally {
+      $('send').disabled = false;
+      $('message').focus();
+    }
+  }
+
+  $('send').addEventListener('click', send);
+  $('files').addEventListener('change', () => {
+    const files = [...$('files').files];
+    $('pending').textContent = files.length ? `${files.length} attachment(s): ${files.map(file => file.name).join(', ')}` : '';
+  });
+  $('message').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
+  });
+  $('clear').addEventListener('click', () => {
+    messages = []; save(); render();
+    $('conversation').value = `web-test-${Date.now()}`;
+    $('raw').textContent = 'No response yet.';
+    $('status').textContent = '';
+  });
+  render();
+</script>
+</body>
+</html>
