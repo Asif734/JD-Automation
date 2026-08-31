@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'backend/rag_backend_client.dart';
 import 'capture/capture_coordinator.dart';
 import 'capture/ocr_capture_extractor.dart';
+import 'capture/ocr_image_candidate_selector.dart';
 import 'codex/codex_reply_service.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
@@ -465,7 +466,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       return extraction.capture;
     }
     final capturedMedia = <CapturedMessage>[];
-    var imageCandidates = _incomingImageCandidates(
+    var imageCandidates = const OcrImageCandidateSelector().select(
       inspection,
       customer,
       allowUnlabeledLatestImage: allowUnlabeledLatestImage,
