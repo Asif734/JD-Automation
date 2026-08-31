@@ -22,7 +22,7 @@ void main() {
   tearDown(() => root.delete(recursive: true));
 
   test('uses ephemeral read-only execution and structured output', () {
-    expect(service.timeout, const Duration(seconds: 90));
+    expect(service.timeout, const Duration(seconds: 140));
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],
@@ -89,6 +89,42 @@ void main() {
     }''');
 
     expect(draftRequiresHumanReview(draft), isFalse);
+  });
+
+  test('recognizes only explicit requests for a human agent', () {
+    expect(explicitlyRequestsHumanAgent('Please connect me to a human agent.'),
+        isTrue);
+    expect(explicitlyRequestsHumanAgent('我要转人工客服'), isTrue);
+    expect(explicitlyRequestsHumanAgent('macOs 26.6.2'), isFalse);
+    expect(
+        explicitlyRequestsHumanAgent('Does TP732 work with my Mac?'), isFalse);
+  });
+
+  test('technical uncertainty cannot create human review without a request',
+      () {
+    final draft = service.parseResponse('''{
+      "reply":"This requires confirmation from our technical team.",
+      "decision":"human_review_required",
+      "confidence":0.7,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[{"type":"route_human","description":"Confirm compatibility."}],
+      "risk_level":"high",
+      "risk_triggers":["unknown macOS compatibility"],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":true,
+      "reason":"Technical confirmation required"
+    }''');
+
+    final guarded =
+        service.enforceExplicitHumanReviewPolicy(draft, 'macOs 26.6.2');
+
+    expect(draftRequiresHumanReview(guarded), isFalse);
+    expect(guarded.decision, 'draft');
+    expect(guarded.riskLevel, 'low');
   });
 
   test('builds a useful human-review reason when model reason is null', () {

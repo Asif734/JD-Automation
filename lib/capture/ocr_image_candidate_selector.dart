@@ -24,6 +24,7 @@ class OcrImageCandidateSelector {
           index + 1 < senderLabels.length ? senderLabels[index + 1].y : .90;
       final matches = inspection.visualRegions
           .where(_validGeometry)
+          .where((region) => !_isTextDense(region, inspection.observations))
           .where((region) =>
               label.y <= region.y &&
               region.y - label.y <= .13 &&
@@ -37,6 +38,7 @@ class OcrImageCandidateSelector {
     if (selected.isEmpty && allowUnlabeledLatestImage && senderLabels.isEmpty) {
       final unlabeled = inspection.visualRegions
           .where(_validGeometry)
+          .where((region) => !_isTextDense(region, inspection.observations))
           .where((region) =>
               region.x >= .20 &&
               region.x < .50 &&
@@ -76,6 +78,25 @@ class OcrImageCandidateSelector {
       region.height >= .065 &&
       region.width <= .48 &&
       region.height <= .76;
+
+  bool _isTextDense(OcrVisualRegion region, List<OcrObservation> observations) {
+    final contained = observations.where((text) {
+      final centerX = text.x + text.width / 2;
+      final centerY = text.y + text.height / 2;
+      return centerX >= region.x &&
+          centerX <= region.x + region.width &&
+          centerY >= region.y &&
+          centerY <= region.y + region.height;
+    }).toList(growable: false);
+    if (contained.length < 2) return false;
+    final characters = contained.fold<int>(
+        0, (total, item) => total + item.text.replaceAll(' ', '').length);
+    if (characters < 20) return false;
+    final textArea = contained.fold<double>(
+        0, (total, item) => total + item.width * item.height);
+    final regionArea = region.width * region.height;
+    return regionArea > 0 && textArea / regionArea >= .12;
+  }
 
   bool _isCustomer(String value, String customer) {
     final raw = value.toLowerCase().trim();

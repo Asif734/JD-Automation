@@ -23,6 +23,8 @@ class OcrCaptureExtractor {
     final customerId = suppliedCustomer != null && suppliedCustomer.isNotEmpty
         ? suppliedCustomer
         : _customerId(observations);
+    final transferNoticeKey = _transferNoticeKey(observations, customerId);
+    final transferNoticeVisible = transferNoticeKey != null;
     if (customerId == null) {
       return const OcrExtractionAttempt(
           reason: 'No unambiguous full customer ID was found.');
@@ -48,7 +50,10 @@ class OcrCaptureExtractor {
     if (messageLabels.isEmpty) {
       return OcrExtractionAttempt(
           reason: 'Customer $customerId was identified, but no matching '
-              'message sender label was visible in the chat area.');
+              'message sender label was visible in the chat area.',
+          customerId: customerId,
+          transferNoticeVisible: transferNoticeVisible,
+          transferNoticeKey: transferNoticeKey);
     }
     final incomingLabels = messageLabels
         .where((label) => label.direction == 'incoming')
@@ -78,20 +83,14 @@ class OcrCaptureExtractor {
           return false;
         }
         if (item.x < 0.20 || item.x >= 0.64) return false;
-        if ((item.x - currentSender.x).abs() > 0.10) return false;
         return !_isMetadata(text, customerId);
       }).toList()
         ..sort((left, right) {
-          final byY = left.y.compareTo(right.y);
+          final byY = _verticalCenter(left).compareTo(_verticalCenter(right));
           return byY != 0 ? byY : left.x.compareTo(right.x);
         });
       if (bodies.isEmpty) continue;
-      final firstY = bodies.first.y;
-      final body = bodies
-          .where((item) => (item.y - firstY).abs() < 0.018)
-          .map((item) => item.text.trim())
-          .join(' ')
-          .trim();
+      final body = _assembleBubbleText(bodies);
       if (body.isEmpty) continue;
       final timestamp = _timestamp.firstMatch(currentSender.text)?.group(0) ??
           observations
@@ -110,6 +109,7 @@ class OcrCaptureExtractor {
         sender: label.direction == 'incoming'
             ? customerId
             : currentSender.text.trim(),
+        sentAt: _parseTimestamp(timestamp, inspection.capturedAt),
         axPath: 'ocr:active-conversation',
       ));
       if (label.direction == 'incoming') latestBodyObservation = bodies.first;
@@ -119,7 +119,9 @@ class OcrCaptureExtractor {
           reason: 'Customer $customerId was identified, but no message '
               'body was recognized beneath the visible sender labels.',
           customerId: customerId,
-          copyTarget: fallbackCopyTarget);
+          copyTarget: fallbackCopyTarget,
+          transferNoticeVisible: transferNoticeVisible,
+          transferNoticeKey: transferNoticeKey);
     }
     final latestBody = latestBodyObservation;
     final latestIncomingSender =
@@ -149,7 +151,86 @@ class OcrCaptureExtractor {
         capturedAt: inspection.capturedAt,
         messages: capturedMessages,
       ),
+      transferNoticeVisible: transferNoticeVisible,
+      transferNoticeKey: transferNoticeKey,
     );
+  }
+
+  String _assembleBubbleText(List<OcrObservation> observations) {
+    final lines = <List<OcrObservation>>[];
+    for (final observation in observations) {
+      final center = _verticalCenter(observation);
+      List<OcrObservation>? matchingLine;
+      for (final line in lines.reversed) {
+        final lineCenter =
+            line.map(_verticalCenter).reduce((left, right) => left + right) /
+                line.length;
+        final tolerance = <double>[
+          0.010,
+          observation.height * 0.55,
+          ...line.map((item) => item.height * 0.55),
+        ].reduce((left, right) => left > right ? left : right);
+        if ((center - lineCenter).abs() <= tolerance) {
+          matchingLine = line;
+          break;
+        }
+        if (center > lineCenter + 0.035) break;
+      }
+      (matchingLine ?? (lines..add(<OcrObservation>[])).last).add(observation);
+    }
+
+    lines.sort((left, right) =>
+        _verticalCenter(left.first).compareTo(_verticalCenter(right.first)));
+    final textLines = <String>[];
+    double? previousCenter;
+    double previousHeight = 0;
+    for (final line in lines) {
+      line.sort((left, right) => left.x.compareTo(right.x));
+      final center =
+          line.map(_verticalCenter).reduce((a, b) => a + b) / line.length;
+      final height = line
+          .map((item) => item.height)
+          .reduce((left, right) => left > right ? left : right);
+      // A large gap after reconstructed text normally means Vision has moved
+      // beyond the bubble into reactions or composer controls.
+      if (previousCenter != null &&
+          center - previousCenter >
+              (previousHeight * 2.5).clamp(0.040, 0.065)) {
+        break;
+      }
+      final text = line.map((item) => item.text.trim()).join(' ').trim();
+      if (text.isNotEmpty) textLines.add(text);
+      previousCenter = center;
+      previousHeight = height;
+    }
+    return textLines.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
+  double _verticalCenter(OcrObservation observation) =>
+      observation.y + observation.height / 2;
+
+  String? _transferNoticeKey(
+      List<OcrObservation> observations, String? customerId) {
+    for (final observation in observations) {
+      final compact = observation.text.replaceAll(RegExp(r'\s+'), '');
+      final colleagueTransfer = RegExp(r'(您的)?同事.+将客户').hasMatch(compact);
+      final jdTransferSummary =
+          RegExp(r'用户诉求[:：]?(?:要求|催促)?转接').hasMatch(compact);
+      if (!colleagueTransfer && !jdTransferSummary) continue;
+      final customerPrefix = customerId == null
+          ? null
+          : customerId.substring(
+              0, customerId.length < 10 ? customerId.length : 10);
+      if (!jdTransferSummary &&
+          customerPrefix != null &&
+          !compact.contains(customerPrefix)) {
+        continue;
+      }
+      final verticalBucket = (observation.y * 1000).round();
+      final identity = '$customerId\u001f$verticalBucket\u001f$compact';
+      return sha256.convert(utf8.encode(identity)).toString();
+    }
+    return null;
   }
 
   String? _customerId(List<OcrObservation> observations) {
@@ -200,6 +281,9 @@ class OcrCaptureExtractor {
   bool _isMetadata(String value, String customerId) {
     final lower = value.toLowerCase();
     return _sameIdentity(value, customerId) ||
+        RegExp(r'(您的)?同事.*将客户')
+            .hasMatch(value.replaceAll(RegExp(r'\s+'), '')) ||
+        value.contains('转接给您') ||
         _timestamp.hasMatch(value) ||
         _sidebarRecency.hasMatch(value.trim()) ||
         lower.contains('已读') ||
@@ -236,6 +320,41 @@ class OcrCaptureExtractor {
         .join(':');
   }
 
+  DateTime? _parseTimestamp(String? value, DateTime capturedAt) {
+    if (value == null) return null;
+    final numbers = RegExp(r'\d+')
+        .allMatches(value)
+        .map((match) => int.parse(match.group(0)!))
+        .toList(growable: false);
+    if (numbers.length < 2) return null;
+    final localCapture = capturedAt.toLocal();
+    late DateTime result;
+    if (numbers.length >= 5 && numbers.first >= 2000) {
+      result = DateTime(
+        numbers[0],
+        numbers[1],
+        numbers[2],
+        numbers[3],
+        numbers[4],
+        numbers.length >= 6 ? numbers[5] : 0,
+      );
+    } else {
+      result = DateTime(
+        localCapture.year,
+        localCapture.month,
+        localCapture.day,
+        numbers[0],
+        numbers[1],
+        numbers.length >= 3 ? numbers[2] : 0,
+      );
+      // A scan just after midnight can still show a message from yesterday.
+      if (result.difference(localCapture) > const Duration(hours: 1)) {
+        result = result.subtract(const Duration(days: 1));
+      }
+    }
+    return result;
+  }
+
   static final _accountId = RegExp(r'^[A-Za-z][A-Za-z0-9_.-]{3,63}$');
   static final _timestamp = RegExp(
       r'(?:20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+)?\d{1,2}:\d{2}(?::\d{2})?');
@@ -264,12 +383,16 @@ class OcrExtractionAttempt {
     this.capture,
     this.customerId,
     this.copyTarget,
+    this.transferNoticeVisible = false,
+    this.transferNoticeKey,
   });
 
   final String reason;
   final CapturedConversation? capture;
   final String? customerId;
   final OcrCopyTarget? copyTarget;
+  final bool transferNoticeVisible;
+  final String? transferNoticeKey;
 }
 
 class OcrCopyTarget {

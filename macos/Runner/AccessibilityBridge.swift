@@ -171,6 +171,13 @@ final class QianniuOCRInspector {
     request.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
     request.usesLanguageCorrection = true
     request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+    // A mixed Chinese/English pass can omit a short wrapped English line in
+    // JD chat bubbles. Run a second independent English pass without language
+    // correction and spatially merge its missing observations below.
+    let englishRequest = VNRecognizeTextRequest()
+    englishRequest.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
+    englishRequest.usesLanguageCorrection = false
+    englishRequest.recognitionLanguages = ["en-US"]
     let rectangles = VNDetectRectanglesRequest()
     rectangles.maximumObservations = 24
     rectangles.minimumSize = 0.06
@@ -178,14 +185,52 @@ final class QianniuOCRInspector {
     rectangles.maximumAspectRatio = 4.0
     rectangles.quadratureTolerance = 18
     try VNImageRequestHandler(cgImage: image, orientation: .up)
-      .perform([request, rectangles])
+      .perform([request, englishRequest, rectangles])
 
-    let observations = (request.results ?? []).compactMap { observation -> [String: Any]? in
-      guard let candidate = observation.topCandidates(1).first else { return nil }
-      let box = observation.boundingBox
+    struct RecognizedLine {
+      let text: String
+      let confidence: Float
+      let box: CGRect
+    }
+    func lines(from results: [VNRecognizedTextObservation]?) -> [RecognizedLine] {
+      (results ?? []).compactMap { observation in
+        guard let candidate = observation.topCandidates(1).first else { return nil }
+        return RecognizedLine(
+          text: candidate.string,
+          confidence: candidate.confidence,
+          box: observation.boundingBox)
+      }
+    }
+    func sameVisualLine(_ left: CGRect, _ right: CGRect) -> Bool {
+      let intersection = left.intersection(right)
+      guard !intersection.isNull else { return false }
+      let smallerArea = min(left.width * left.height, right.width * right.height)
+      return smallerArea > 0 && intersection.width * intersection.height / smallerArea >= 0.45
+    }
+
+    var mergedLines = lines(from: request.results)
+    for fallback in lines(from: englishRequest.results) {
+      if let index = mergedLines.firstIndex(where: { sameVisualLine($0.box, fallback.box) }) {
+        let current = mergedLines[index]
+        // Prefer the result containing more useful characters. This repairs
+        // clipped mixed-language readings while keeping the primary result
+        // when both passes recognized the same line equally well.
+        let currentLength = current.text.replacingOccurrences(of: " ", with: "").count
+        let fallbackLength = fallback.text.replacingOccurrences(of: " ", with: "").count
+        if fallbackLength > currentLength ||
+            (fallbackLength == currentLength && fallback.confidence > current.confidence) {
+          mergedLines[index] = fallback
+        }
+      } else {
+        mergedLines.append(fallback)
+      }
+    }
+
+    let observations = mergedLines.map { line -> [String: Any] in
+      let box = line.box
       return [
-        "text": candidate.string,
-        "confidence": Double(candidate.confidence),
+        "text": line.text,
+        "confidence": Double(line.confidence),
         // Vision uses a bottom-left origin. Flutter's overlay uses top-left.
         "x": Double(box.minX),
         "y": Double(1 - box.maxY),

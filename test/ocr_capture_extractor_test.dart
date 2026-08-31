@@ -5,6 +5,74 @@ import 'package:jd_automation/capture/ocr_capture_extractor.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('detects a JD colleague transfer notice as a system event', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: '您的同事格志打印机艳艳将客户jd_41aeec7741d05转接给您!',
+            confidence: 0.99,
+            x: 0.30,
+            y: 0.40,
+            width: 0.30,
+            height: 0.03),
+        OcrObservation(
+            text: 'jd_41aeec7741d05 14:13:01',
+            confidence: 0.99,
+            x: 0.25,
+            y: 0.25,
+            width: 0.15,
+            height: 0.03),
+        OcrObservation(
+            text: 'hello',
+            confidence: 0.99,
+            x: 0.25,
+            y: 0.29,
+            width: 0.08,
+            height: 0.03),
+      ],
+    );
+
+    final result = const OcrCaptureExtractor().analyze(inspection);
+
+    expect(result.transferNoticeVisible, isTrue);
+    expect(result.capture!.messages.single.body, 'hello');
+  });
+
+  test('detects the JD session-summary transfer format', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: '用户诉求：催促转接',
+            confidence: 0.99,
+            x: 0.30,
+            y: 0.40,
+            width: 0.20,
+            height: 0.03),
+      ],
+    );
+
+    final result = const OcrCaptureExtractor().analyze(inspection);
+
+    expect(result.transferNoticeVisible, isTrue);
+    expect(result.capture, isNull);
+  });
+
   test('extracts latest incoming message for full customer identity', () {
     final inspection = OcrInspection(
       image: Uint8List(0),
@@ -72,6 +140,40 @@ void main() {
     expect(capture!.customerExternalId, 'stoneshishininger');
     expect(capture.messages.map((message) => message.body), ['3', 'hi']);
     expect(capture.messages.last.stableId, startsWith('ocr:'));
+    expect(capture.messages.last.sentAt, DateTime(2026, 8, 25, 9, 40, 20));
+  });
+
+  test('preserves a time-only JD bubble timestamp on the capture date', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 8, 31, 18, 18, 46),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 18:18:16',
+            confidence: 1,
+            x: .22,
+            y: .30,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'not finding the machine',
+            confidence: 1,
+            x: .23,
+            y: .34,
+            width: .18,
+            height: .02),
+      ],
+    );
+
+    final message =
+        const OcrCaptureExtractor().extract(inspection)!.messages.single;
+    expect(message.sentAt, DateTime(2026, 8, 31, 18, 18, 16));
   });
 
   test('refuses a scan without a full customer identity', () {
@@ -355,6 +457,222 @@ void main() {
     expect(capture, isNotNull);
     expect(capture!.messages.last.direction, 'incoming');
     expect(capture.messages.last.body, 'we are done for now');
+  });
+
+  test('reconstructs every line of a multiline customer bubble', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 16:35:47',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'what is the model no of your face',
+            confidence: 1,
+            x: .22,
+            y: .44,
+            width: .25,
+            height: .02),
+        OcrObservation(
+            text: 'attendance machine?',
+            confidence: 1,
+            x: .22,
+            y: .47,
+            width: .14,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture!.messages.single.body,
+        'what is the model no of your face attendance machine?');
+  });
+
+  test('concatenates the exact wrapped TP32 customer message', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime(2026, 8, 31, 18, 46, 1),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 18:45:59',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'i am not able to setup tp32 printer to',
+            confidence: 1,
+            x: .23,
+            y: .44,
+            width: .28,
+            height: .02),
+        OcrObservation(
+            text: 'my phone. check this',
+            confidence: 1,
+            x: .23,
+            y: .47,
+            width: .14,
+            height: .02),
+      ],
+    );
+
+    final message =
+        const OcrCaptureExtractor().extract(inspection)!.messages.single;
+    expect(message.body,
+        'i am not able to setup tp32 printer to my phone. check this');
+    expect(message.sentAt, DateTime(2026, 8, 31, 18, 45, 59));
+  });
+
+  test('reconstructs multiline text even when sender and bubble x differ', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 17:52:59',
+            confidence: 1,
+            x: .21,
+            y: .38,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'i am not able to connect attendance',
+            confidence: 1,
+            x: .34,
+            y: .42,
+            width: .25,
+            height: .02),
+        OcrObservation(
+            text: 'machine with the grozzie app. can',
+            confidence: 1,
+            x: .34,
+            y: .45,
+            width: .24,
+            height: .02),
+        OcrObservation(
+            text: 'you tell me, how i can i do that?',
+            confidence: 1,
+            x: .34,
+            y: .48,
+            width: .22,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture!.messages.single.body,
+        'i am not able to connect attendance machine with the grozzie app. can you tell me, how i can i do that?');
+  });
+
+  test('detects a clipped colleague transfer banner and excludes it as chat',
+      () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 17:52:00',
+            confidence: 1,
+            x: .21,
+            y: .30,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: '您的同事格志打印机艳艳将客户jd_41aeec7741',
+            confidence: 1,
+            x: .30,
+            y: .34,
+            width: .30,
+            height: .02),
+      ],
+    );
+
+    final result = const OcrCaptureExtractor().analyze(inspection);
+
+    expect(result.transferNoticeVisible, isTrue);
+    expect(result.capture, isNull);
+  });
+
+  test('orders same-line OCR words left to right despite y jitter', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 16:36:09',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'real',
+            confidence: 1,
+            x: .28,
+            y: .443,
+            width: .03,
+            height: .02),
+        OcrObservation(
+            text: 'do you',
+            confidence: 1,
+            x: .22,
+            y: .446,
+            width: .05,
+            height: .02),
+        OcrObservation(
+            text: 'have face attendance',
+            confidence: 1,
+            x: .32,
+            y: .441,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'machine?',
+            confidence: 1,
+            x: .22,
+            y: .475,
+            width: .07,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture!.messages.single.body,
+        'do you real have face attendance machine?');
   });
 
   test('fingerprint tolerates OCR whitespace variation', () {

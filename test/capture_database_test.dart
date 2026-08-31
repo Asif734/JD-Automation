@@ -266,6 +266,132 @@ void main() {
     expect(document?['messages'], hasLength(2));
   });
 
+  test('upgrades a clipped incoming bubble without replying twice', () async {
+    final root = await Directory.systemTemp.createTemp('ocr_upgrade_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final firstTime = DateTime.utc(2026, 8, 31, 8, 35, 47);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: firstTime,
+      messages: const [
+        CapturedMessage(
+          stableId: 'ocr:partial',
+          direction: 'incoming',
+          body: 'what is the model no of your face',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const replyJson =
+        '{"reply":"Let me help.","decision":"draft","confidence":0.9,'
+        '"risk_level":"low","model":"test","used_record_ids":[],'
+        '"actions":[],"attachments":[]}';
+    await database.saveDraft(
+        pending.id,
+        const AiDraft(
+            reply: 'Let me help.',
+            decision: 'draft',
+            confidence: 0.9,
+            riskLevel: 'low',
+            model: 'test',
+            usedRecordIds: [],
+            actions: [],
+            attachments: [],
+            rawJson: replyJson));
+    await database.markReplySent(userId: 'buyer', reply: 'Let me help.');
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: firstTime.add(const Duration(seconds: 15)),
+      messages: const [
+        CapturedMessage(
+          stableId: 'ocr:complete',
+          direction: 'incoming',
+          body: 'what is the model no of your face attendance machine?',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(await database.hasPendingUnanswered('buyer'), isFalse);
+    final document = await (await database.history).read('buyer');
+    final messages = document!['messages'] as List<Object?>;
+    expect(messages, hasLength(2));
+    expect((messages.first as Map<String, dynamic>)['body'],
+        'what is the model no of your face attendance machine?');
+  });
+
+  test('suppresses a middle fragment of an already sent reply', () async {
+    final root = await Directory.systemTemp.createTemp('ocr_reply_fragment_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: DateTime.fromMillisecondsSinceEpoch(1),
+      messages: const [
+        CapturedMessage(
+          stableId: 'incoming',
+          direction: 'incoming',
+          body: 'Are you a real person?',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const fullReply =
+        "I'm a virtual customer-service assistant, so I don't have a real face.";
+    const replyJson =
+        '{"reply":"I\u0027m a virtual customer-service assistant, so I don\u0027t have a real face.","decision":"draft","confidence":0.9,'
+        '"risk_level":"low","model":"test","used_record_ids":[],'
+        '"actions":[],"attachments":[]}';
+    await database.saveDraft(
+        pending.id,
+        const AiDraft(
+            reply: fullReply,
+            decision: 'draft',
+            confidence: 0.9,
+            riskLevel: 'low',
+            model: 'test',
+            usedRecordIds: [],
+            actions: [],
+            attachments: [],
+            rawJson: replyJson));
+    await database.markReplySent(userId: 'buyer', reply: fullReply);
+
+    final changed = await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: DateTime.fromMillisecondsSinceEpoch(2),
+      messages: const [
+        CapturedMessage(
+          stableId: 'outgoing-fragment',
+          direction: 'outgoing',
+          body: 'virtual customer-service assistant',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(changed, 0);
+    final document = await (await database.history).read('buyer');
+    expect(document!['messages'], hasLength(2));
+  });
+
   test('requeues an unanswered saved message but not an answered one',
       () async {
     final root = await Directory.systemTemp.createTemp('draft_recovery_test_');
@@ -374,5 +500,128 @@ void main() {
     });
     expect(await database.hasPendingUnanswered('answered-user'), isFalse);
     expect(await database.conversations(), isEmpty);
+  });
+
+  test('same JD timestamp suppresses partial OCR re-reads', () async {
+    final root = await Directory.systemTemp.createTemp('bubble_time_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final sentAt = DateTime(2026, 8, 31, 18, 18, 16);
+    CapturedConversation capture(String id, String body, DateTime capturedAt) =>
+        CapturedConversation(
+          stableKey: 'customer:timestamp',
+          customerName: 'jd_test',
+          customerExternalId: 'jd_test',
+          capturedAt: capturedAt,
+          messages: [
+            CapturedMessage(
+              stableId: id,
+              direction: 'incoming',
+              body: body,
+              sentAt: sentAt,
+              axPath: 'ocr:test',
+            ),
+          ],
+        );
+
+    await database
+        .saveCapture(capture('ocr:first', 'not finding the machine', sentAt));
+    await database.saveCapture(capture('ocr:partial', 'am not finding',
+        sentAt.add(const Duration(seconds: 30))));
+
+    final history = await database.history;
+    final document = await history.read('jd_test');
+    final messages = document!['messages'] as List<Object?>;
+    expect(messages, hasLength(1));
+    expect((messages.single as Map<String, dynamic>)['body'],
+        'not finding the machine');
+  });
+
+  test('exact production sequence keeps one incoming and one outgoing',
+      () async {
+    final root =
+        await Directory.systemTemp.createTemp('exact_jd_sequence_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final history = await database.history;
+    final incomingTime = DateTime(2026, 8, 31, 18, 18, 16);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:exact',
+      customerName: 'jd_41aeec7741d05',
+      customerExternalId: 'jd_41aeec7741d05',
+      capturedAt: incomingTime,
+      messages: [
+        CapturedMessage(
+          stableId: 'ocr:original',
+          direction: 'incoming',
+          body: 'not finding the machine',
+          sender: 'jd_41aeec7741d05',
+          sentAt: incomingTime,
+          axPath: 'ocr:test',
+        ),
+      ],
+    ));
+    const reply =
+        'Please make sure your phone’s Bluetooth and location are turned on and that the app has permission to use both, then search again.';
+    await history.appendSentReply(
+      userId: 'jd_41aeec7741d05',
+      displayName: 'jd_41aeec7741d05',
+      stableKey: 'customer:exact',
+      draft: const AiDraft(
+        reply: reply,
+        decision: 'ask_clarification',
+        confidence: .97,
+        riskLevel: 'medium',
+        model: 'gpt-5.6-sol',
+        usedRecordIds: [],
+        actions: [],
+        attachments: [],
+        rawJson:
+            '{"reply":"test","decision":"ask_clarification","confidence":0.97,"risk_level":"medium","model":"gpt-5.6-sol","used_record_ids":[],"actions":[],"attachments":[]}',
+      ),
+    );
+    final documentBefore = await history.read('jd_41aeec7741d05');
+    final generated = (documentBefore!['messages'] as List<Object?>)
+        .whereType<Map<String, dynamic>>()
+        .last;
+    final generatedTime = DateTime.parse(generated['sent_at'] as String);
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:exact',
+      customerName: 'jd_41aeec7741d05',
+      customerExternalId: 'jd_41aeec7741d05',
+      capturedAt: generatedTime.add(const Duration(seconds: 15)),
+      messages: [
+        CapturedMessage(
+          stableId: 'ocr:partial-incoming',
+          direction: 'incoming',
+          body: 'am not finding',
+          sender: 'jd_41aeec7741d05',
+          sentAt: incomingTime,
+          axPath: 'ocr:test',
+        ),
+        CapturedMessage(
+          stableId: 'ocr:partial-outgoing',
+          direction: 'outgoing',
+          body: "Please make sure your phone's",
+          sender: '18:18:31 格志打印机小甘',
+          sentAt: generatedTime.subtract(const Duration(seconds: 1)),
+          axPath: 'ocr:test',
+        ),
+      ],
+    ));
+
+    final document = await history.read('jd_41aeec7741d05');
+    final messages = document!['messages'] as List<Object?>;
+    expect(messages, hasLength(2));
+    expect((messages.first as Map<String, dynamic>)['body'],
+        'not finding the machine');
+    expect((messages.last as Map<String, dynamic>)['body'], reply);
   });
 }

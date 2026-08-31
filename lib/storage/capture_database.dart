@@ -36,7 +36,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 5,
+        version: 6,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -78,6 +78,7 @@ class CaptureDatabase {
     await _createPendingQueue(db);
     await _createHumanReview(db);
     await _createGeneratedDrafts(db);
+    await _createTransferWelcomes(db);
   }
 
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -87,6 +88,66 @@ class CaptureDatabase {
     }
     if (oldVersion < 4) await _createHumanReview(db);
     if (oldVersion < 5) await _createGeneratedDrafts(db);
+    if (oldVersion < 6) await _createTransferWelcomes(db);
+  }
+
+  Future<void> _createTransferWelcomes(Database db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS transfer_welcomes (
+      user_id TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY(user_id, event_key)
+    )''');
+  }
+
+  Future<bool> hasTransferWelcome(
+      {required String userId, required String eventKey}) async {
+    final db = await database;
+    final rows = await db.query('transfer_welcomes',
+        columns: ['user_id'],
+        where: 'user_id = ? AND event_key = ?',
+        whereArgs: [userId, eventKey],
+        limit: 1);
+    return rows.isNotEmpty;
+  }
+
+  Future<void> recordTransferWelcome(
+      {required String userId, required String eventKey}) async {
+    final db = await database;
+    await db.insert(
+        'transfer_welcomes',
+        {
+          'user_id': userId,
+          'event_key': eventKey,
+          'created_at_ms': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<void> appendAutomatedNoticeSent(
+      {required String userId, required String reply}) async {
+    final raw = <String, Object?>{
+      'reply': reply,
+      'decision': 'draft',
+      'confidence': 1.0,
+      'used_record_ids': <String>[],
+      'required_slots': <String>[],
+      'actions': <Object?>[],
+      'risk_level': 'low',
+      'risk_triggers': <String>[],
+      'auto_send_allowed': false,
+      'model': 'jd-transfer-welcome-v1',
+      'attachments': <Object?>[],
+      'image_descriptions': <Object?>[],
+      'human_review_required': false,
+      'reason': null,
+    };
+    await (await history).appendSentReply(
+      userId: userId,
+      displayName: userId,
+      stableKey: userId,
+      draft: AiDraft.fromJson(raw, mediaBaseUrl: Uri()),
+    );
   }
 
   Future<void> _createGeneratedDrafts(Database db) async {

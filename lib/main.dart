@@ -242,6 +242,12 @@ class _CaptureHomeState extends State<CaptureHome> {
               rows.any((row) => row.customer == activeCustomer) &&
               !await _database.isHumanContacting(activeCustomer)) {
             final extraction = const OcrCaptureExtractor().analyze(inspection);
+            if (extraction.transferNoticeVisible) {
+              await _sendTransferWelcomeOnce(
+                  activeCustomer,
+                  extraction.transferNoticeKey ??
+                      'visible-transfer-${inspection.capturedAt.day}');
+            }
             final capture = await _captureWithVisibleMedia(
                 inspection, extraction,
                 // Passive polling may save newly recognized text, but it must
@@ -291,6 +297,10 @@ class _CaptureHomeState extends State<CaptureHome> {
               .timeout(_captureOperationTimeout);
           if (mounted) setState(() => _ocrInspection = inspection);
           final extraction = const OcrCaptureExtractor().analyze(inspection);
+          if (extraction.transferNoticeVisible) {
+            await _sendTransferWelcomeOnce(customer,
+                extraction.transferNoticeKey ?? row.unreadEvidence.toString());
+          }
           final capture = await _captureWithVisibleMedia(inspection, extraction,
                   allowUnlabeledLatestImage: row.unread)
               .timeout(_captureOperationTimeout);
@@ -350,6 +360,31 @@ class _CaptureHomeState extends State<CaptureHome> {
       '${value.hour.toString().padLeft(2, '0')}:'
       '${value.minute.toString().padLeft(2, '0')}:'
       '${value.second.toString().padLeft(2, '0')}';
+
+  Future<bool> _sendTransferWelcomeOnce(String userId, String eventKey) async {
+    if (await _database.hasTransferWelcome(userId: userId, eventKey: eventKey))
+      return false;
+    const welcome =
+        'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
+    if (mounted) setState(() => _sending = true);
+    try {
+      await _adapter.sendDraftOnce(
+        expectedCustomer: userId,
+        reply: welcome,
+        mediaPaths: const [],
+      );
+      await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
+      await _database.recordTransferWelcome(userId: userId, eventKey: eventKey);
+      _handledUnreadEvidence[userId] = int.tryParse(eventKey) ?? 0;
+      if (mounted) {
+        setState(() => _diagnostics =
+            'Detected a JD transfer and sent one welcome message to $userId.');
+      }
+      return true;
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
 
   Future<void> _runDraftWorker() async {
     if (_draftWorkerRunning) return;
@@ -490,8 +525,22 @@ class _CaptureHomeState extends State<CaptureHome> {
     // opens JD's modal image viewer. Only the newest candidate can create work.
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
+    var rejectedAsText = 0;
     for (final region in imageCandidates) {
       try {
+        final classification = await _adapter.classifyMessageAt(
+          expectedCustomer: customer,
+          windowId: inspection.windowId,
+          x: region.x + region.width / 2,
+          y: region.y + region.height / 2,
+        );
+        // Vision rectangles are only candidates. Clipboard classification is
+        // the semantic gate: unknown/text regions must never reach Codex as
+        // customer images.
+        if (classification.kind != 'image') {
+          rejectedAsText++;
+          continue;
+        }
         final visible = await _adapter.captureImageRegion(
           expectedCustomer: customer,
           windowId: inspection.windowId,
@@ -515,7 +564,8 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     _visibleMediaTrace = 'screenshot-first image candidates='
         '${imageCandidates.length}, captured=${capturedMedia.length}, '
-        'failures=$failures; JD image viewer was not opened';
+        'rejected_as_text=$rejectedAsText, failures=$failures; '
+        'JD image viewer was not opened';
     if (capturedMedia.isEmpty) return extraction.capture;
     final uniqueMedia = <String, CapturedMessage>{
       for (final message in capturedMedia) message.stableId: message,

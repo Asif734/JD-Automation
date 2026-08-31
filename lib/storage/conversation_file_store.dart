@@ -47,6 +47,70 @@ class ConversationFileStore {
           if (!knownIds.add(message.stableId)) continue;
           if (message.direction == 'incoming') {
             final canonical = _ocrCanonical(message.body);
+            final sameBubbleIndex = messages.lastIndexWhere((item) =>
+                item['direction'] == 'incoming' &&
+                (item['source'] == 'jd_automation' ||
+                    item['source'] == 'qianniu_capture') &&
+                _sameBubbleTime(item['sent_at'], message.sentAt));
+            if (sameBubbleIndex >= 0) {
+              final existing = messages[sameBubbleIndex];
+              final existingBody = existing['body']?.toString() ?? '';
+              if (_ocrCanonical(message.body).length >
+                  _ocrCanonical(existingBody).length) {
+                final oldId = existing['id']?.toString();
+                if (oldId != null) knownIds.remove(oldId);
+                existing
+                  ..['id'] = message.stableId
+                  ..['body'] = message.body
+                  ..['sender'] = message.sender
+                  ..['sent_at'] = message.sentAt?.toUtc().toIso8601String()
+                  ..['captured_at'] =
+                      capture.capturedAt.toUtc().toIso8601String();
+                knownIds.add(message.stableId);
+                inserted++;
+              }
+              continue;
+            }
+            final upgradeIndex = messages.lastIndexWhere((item) {
+              if (item['direction'] != 'incoming' ||
+                  (item['source'] != 'jd_automation' &&
+                      item['source'] != 'qianniu_capture')) {
+                return false;
+              }
+              final capturedAt =
+                  DateTime.tryParse(item['captured_at']?.toString() ?? '');
+              if (capturedAt == null ||
+                  capture.capturedAt.difference(capturedAt).abs() >
+                      const Duration(minutes: 2)) {
+                return false;
+              }
+              return _isMoreCompleteVariant(
+                  item['body']?.toString() ?? '', message.body);
+            });
+            if (upgradeIndex >= 0) {
+              final existing = messages[upgradeIndex];
+              final existingCanonical =
+                  _ocrCanonical(existing['body']?.toString() ?? '');
+              if (canonical.length > existingCanonical.length) {
+                final oldId = existing['id']?.toString();
+                if (oldId != null) knownIds.remove(oldId);
+                existing
+                  ..['id'] = message.stableId
+                  ..['body'] = message.body
+                  ..['sender'] = message.sender
+                  ..['captured_at'] =
+                      capture.capturedAt.toUtc().toIso8601String();
+                knownIds.add(message.stableId);
+                inserted++;
+                final alreadyAnswered = messages
+                    .skip(upgradeIndex + 1)
+                    .any((item) => item['direction'] == 'outgoing');
+                if (!alreadyAnswered) {
+                  insertedIncomingIds.add(message.stableId);
+                }
+              }
+              continue;
+            }
             final variants = knownIncomingVariants[canonical];
             // A different OCR spelling of the same canonical text is an old
             // visible bubble being re-read. An exact repeated customer message
@@ -78,7 +142,8 @@ class ConversationFileStore {
                 .where((item) =>
                     item['direction'] == 'outgoing' &&
                     item['source'] == 'generated_reply' &&
-                    _sameReply(item['body']?.toString() ?? '', message.body))
+                    (_sameReply(item['body']?.toString() ?? '', message.body) ||
+                        _sameBubbleTime(item['sent_at'], message.sentAt)))
                 .firstOrNull;
             if (matchingDraft != null) {
               if (matchingDraft['delivery_status'] != 'sent') {
@@ -359,6 +424,29 @@ class ConversationFileStore {
     return true;
   }
 
+  bool _isMoreCompleteVariant(String existing, String observed) {
+    final left = _ocrCanonical(existing);
+    final right = _ocrCanonical(observed);
+    if (left.isEmpty || right.isEmpty || left == right) return false;
+    final shorter = left.length < right.length ? left : right;
+    final longer = left.length < right.length ? right : left;
+    if (shorter.length >= 8 && longer.contains(shorter)) return true;
+
+    Set<String> words(String value) => RegExp(r'[a-z0-9]+|[\u3400-\u9fff]')
+        .allMatches(value.toLowerCase())
+        .map((match) => match.group(0)!)
+        .toSet();
+    final leftWords = words(existing);
+    final rightWords = words(observed);
+    final smaller =
+        leftWords.length < rightWords.length ? leftWords : rightWords;
+    final larger =
+        leftWords.length < rightWords.length ? rightWords : leftWords;
+    return smaller.length >= 3 &&
+        larger.length > smaller.length &&
+        larger.containsAll(smaller);
+  }
+
   bool _sameReply(String generated, String observed) {
     final left = _ocrCanonical(generated);
     final right = _ocrCanonical(observed);
@@ -366,7 +454,15 @@ class ConversationFileStore {
     if (left == right) return true;
     final shorter = left.length < right.length ? left : right;
     final longer = left.length < right.length ? right : left;
-    return shorter.length >= 30 && longer.startsWith(shorter);
+    return shorter.length >= 15 && longer.contains(shorter);
+  }
+
+  bool _sameBubbleTime(Object? storedValue, DateTime? observed) {
+    if (observed == null) return false;
+    final stored = DateTime.tryParse(storedValue?.toString() ?? '');
+    if (stored == null) return false;
+    return stored.toUtc().difference(observed.toUtc()).abs() <=
+        const Duration(seconds: 3);
   }
 
   Future<Map<String, Object?>> _readOrCreate({
