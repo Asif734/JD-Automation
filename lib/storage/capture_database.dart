@@ -47,28 +47,18 @@ class CaptureDatabase {
       _legacyDraftsPurged = true;
     }
     if (!_reviewControlsSynced) {
-      final open = await database.query('human_review_tickets',
-          columns: ['user_id'], where: "status = 'open'");
+      // `human_review_open` was used by older builds to pause AI as soon as a
+      // ticket was created. Open tickets are now informational: AI remains
+      // active until an operator explicitly clicks Contacting.
       final now = DateTime.now().millisecondsSinceEpoch;
-      for (final row in open) {
-        final userId = row['user_id']! as String;
-        final current = await database.query('conversation_control',
-            columns: ['state'],
-            where: 'user_id = ?',
-            whereArgs: [userId],
-            limit: 1);
-        if (current.isNotEmpty &&
-            current.first['state'] == 'human_contacting') {
-          continue;
-        }
-        await database.rawInsert('''INSERT INTO conversation_control(
-          user_id,state,resume_after_message_id,updated_at_ms)
-          VALUES(?,'human_review_open',NULL,?) ON CONFLICT(user_id) DO UPDATE SET
-          state='human_review_open',resume_after_message_id=NULL,
-          updated_at_ms=excluded.updated_at_ms''', [userId, now]);
-        await database.delete('pending_customers',
-            where: 'user_id = ?', whereArgs: [userId]);
-      }
+      await database.update(
+          'conversation_control',
+          {
+            'state': 'ai_active',
+            'resume_after_message_id': null,
+            'updated_at_ms': now,
+          },
+          where: "state = 'human_review_open'");
       _reviewControlsSynced = true;
     }
     return database;
@@ -254,8 +244,7 @@ class CaptureDatabase {
         where: 'user_id = ?', whereArgs: [userId], limit: 1);
     if (controls.isNotEmpty) {
       final control = controls.first;
-      if (control['state'] == 'human_review_open' ||
-          control['state'] == 'human_contacting') {
+      if (control['state'] == 'human_contacting') {
         return result.changed;
       }
       if (control['state'] == 'waiting_for_customer') {
@@ -535,13 +524,13 @@ class CaptureDatabase {
           'created_at_ms': now,
           'updated_at_ms': now,
         });
+        // An open ticket is visible to operators but does not transfer control.
+        // Only markTicketContacting pauses generation and automatic sending.
         await txn.rawInsert('''INSERT INTO conversation_control(
           user_id,state,resume_after_message_id,updated_at_ms)
-          VALUES(?,'human_review_open',NULL,?) ON CONFLICT(user_id) DO UPDATE SET
-          state='human_review_open',resume_after_message_id=NULL,
+          VALUES(?,'ai_active',NULL,?) ON CONFLICT(user_id) DO UPDATE SET
+          state='ai_active',resume_after_message_id=NULL,
           updated_at_ms=excluded.updated_at_ms''', [userId, now]);
-        await txn.delete('pending_customers',
-            where: 'user_id = ?', whereArgs: [userId]);
       });
     }
     return (await humanReviewTickets())

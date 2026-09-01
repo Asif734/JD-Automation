@@ -139,10 +139,10 @@ void main() {
         reason: 'Refund requires a human');
     expect(ticket.status, 'open');
     expect(await database.isHumanContacting('test-buyer'), isFalse);
-    expect(await database.hasPendingUnanswered('test-buyer'), isFalse);
+    expect(await database.hasPendingUnanswered('test-buyer'), isTrue);
 
-    // An open review ticket pauses Codex immediately. Follow-up customer
-    // messages are retained for the human but cannot create another reply.
+    // An open ticket is informational. Codex keeps processing follow-up
+    // messages until an operator explicitly starts contacting the customer.
     await database.saveCapture(CapturedConversation(
       stableKey: 'customer:test-buyer',
       customerName: 'test-buyer',
@@ -156,7 +156,7 @@ void main() {
             axPath: 'ocr'),
       ],
     ));
-    expect(await database.conversations(), isEmpty);
+    expect((await database.conversations()).single.userId, 'test-buyer');
 
     await database.markTicketContacting(ticket.id);
     expect(await database.isHumanContacting('test-buyer'), isTrue);
