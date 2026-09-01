@@ -100,6 +100,56 @@ void main() {
         explicitlyRequestsHumanAgent('Does TP732 work with my Mac?'), isFalse);
   });
 
+  test('recognizes product catalog intent across follow-up context', () {
+    expect(
+        hasProductCatalogIntent(
+            'I need to buy an attendance machine. Which model should we buy?'),
+        isTrue);
+    expect(
+        hasProductCatalogIntent(
+            'What attendance machine products do you have?'),
+        isTrue);
+    expect(
+        hasProductCatalogIntent(
+            'We need paper card attendance for 4,000 employees.'),
+        isFalse);
+  });
+
+  test('counts clarification slots across the current topic only', () {
+    Map<String, dynamic> generated(String decision, List<String> slots) => {
+          'direction': 'outgoing',
+          'source': 'generated_reply',
+          'reply_metadata': {
+            'decision': decision,
+            'raw_response': {
+              'decision': decision,
+              'required_slots': slots,
+            },
+          },
+        };
+
+    final messages = <Map<String, dynamic>>[
+      generated('ask_clarification', ['old question']),
+      generated('draft', []),
+      generated('ask_clarification', [
+        'number_of_employees',
+        'preferred_attendance_method',
+      ]),
+      {
+        'direction': 'outgoing',
+        'source': 'jd_automation',
+        'body': 'OCR copy must not count',
+      },
+      {
+        'direction': 'incoming',
+        'source': 'jd_automation',
+        'body': 'paper card',
+      },
+    ];
+
+    expect(clarificationQuestionsUsed(messages), 2);
+  });
+
   test('technical uncertainty cannot create human review without a request',
       () {
     final draft = service.parseResponse('''{
@@ -184,6 +234,23 @@ void main() {
     expect(records, isNotEmpty);
     expect(records.first['id'], 'global_refund_return_high_risk');
     expect(records.first, isNot(contains('keywords')));
+  });
+
+  test('retrieves an available attendance product for a buying conversation',
+      () async {
+    final projectRoot = Directory.current;
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final records = await retriever.retrieve(
+      'I need to buy an attendance machine. Which model should we buy? '
+      'Paper card, 4,000 employees, one site.',
+      limit: 5,
+    );
+
+    expect(
+        records.any(
+            (record) => record['id'] == 'attendance_product_selling_points'),
+        isTrue);
   });
 
   test('retrieves verified media paths linked by selected cards', () async {

@@ -41,6 +41,51 @@ bool explicitlyRequestsHumanAgent(String text) {
       .hasMatch(normalized);
 }
 
+bool hasProductCatalogIntent(String text) {
+  final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+  final asksAboutProducts = RegExp(
+          r'\b(what|which) products?\b|\b(what|which) models?\b|\bproducts? (?:do you have|do you sell|are available)\b|\b(recommend|suggest|should (?:i|we) buy|want to buy|need to buy)\b|有什么产品|有哪些产品|有什么型号|有哪些型号|推荐|建议|哪款|买哪|选哪|想买|需要买')
+      .hasMatch(normalized);
+  final productContext = RegExp(
+          r'\b(product|model|printer|attendance machine|card machine|paper card)\b|产品|型号|打印机|考勤机|打卡机|纸卡')
+      .hasMatch(normalized);
+  return asksAboutProducts && productContext;
+}
+
+/// Counts clarification items already asked by generated replies in the
+/// current topic. OCR copies of sent messages are ignored. A normal generated
+/// answer starts a fresh topic budget.
+int clarificationQuestionsUsed(List<Map<String, dynamic>> messages) {
+  var used = 0;
+  for (final message in messages) {
+    if (message['direction'] != 'outgoing' ||
+        message['source'] != 'generated_reply') {
+      continue;
+    }
+    final metadata = message['reply_metadata'];
+    if (metadata is! Map<String, dynamic>) continue;
+    final rawResponse = metadata['raw_response'];
+    final decision = (rawResponse is Map<String, dynamic>
+            ? rawResponse['decision']
+            : metadata['decision'])
+        ?.toString();
+    if (decision != 'ask_clarification') {
+      used = 0;
+      continue;
+    }
+    final requiredSlots = rawResponse is Map<String, dynamic>
+        ? rawResponse['required_slots']
+        : null;
+    final slotCount = requiredSlots is List
+        ? requiredSlots
+            .where((item) => item.toString().trim().isNotEmpty)
+            .length
+        : 0;
+    used += slotCount > 0 ? slotCount : 1;
+  }
+  return used;
+}
+
 String draftHumanReviewReason(AiDraft draft) {
   Map<String, dynamic> raw = const {};
   try {
@@ -145,6 +190,9 @@ class CodexReplyService {
     final recent = rawMessages.length <= 5
         ? rawMessages
         : rawMessages.sublist(rawMessages.length - 5);
+    final retrievalWindow = rawMessages.length <= 15
+        ? rawMessages
+        : rawMessages.sublist(rawMessages.length - 15);
     if (!recent.any((message) => message['direction'] == 'incoming')) {
       throw const CodexReplyException(
           'No incoming customer message is available.');
@@ -161,6 +209,13 @@ class CodexReplyService {
         .map((message) => message['body']?.toString() ?? '')
         .firstWhere((body) => body.isNotEmpty, orElse: () => '');
     final productPhotoRequested = isProductPhotoRequest(latestCustomerText);
+    final productContext = retrievalWindow
+        .map((message) => message['body']?.toString() ?? '')
+        .where((body) => body.isNotEmpty)
+        .join('\n');
+    final productCatalogRequested = hasProductCatalogIntent(productContext);
+    final clarificationCount = clarificationQuestionsUsed(rawMessages);
+    final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
     final images = <String>{};
     for (final message in currentCustomerTurn.reversed) {
       for (final media in (message['media'] as List<Object?>? ?? const [])) {
@@ -186,7 +241,7 @@ class CodexReplyService {
     // Retrieval must retain established product/model/media intent. Short
     // follow-ups such as "both" or "send the comparison photo" are otherwise
     // meaningless when searched without the supplied five-message window.
-    final customerQuery = recent
+    final customerQuery = retrievalWindow
         .map((message) => message['body']?.toString() ?? '')
         .where((body) =>
             body.isNotEmpty && !body.startsWith('[Customer sent an image'))
@@ -214,10 +269,19 @@ class CodexReplyService {
       'approved_knowledge_media': knowledgeMedia,
       'attached_image_paths': images.toList(growable: false),
       'image_analysis_required': images.isNotEmpty,
+      'product_catalog_requested': productCatalogRequested,
+      'clarification_questions_already_asked': clarificationCount,
+      'clarification_questions_remaining': clarificationBudget,
       'requirements': [
         'Be polite, concise, and answer the latest message in the customer’s language.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Do not invent product specifications, availability, or policies.',
+        if (clarificationBudget > 0)
+          'You may ask at most $clarificationBudget more decisive clarification question(s) for this topic.',
+        if (clarificationBudget == 0)
+          'The two-question clarification limit is exhausted. Do not ask another question. Give the best useful answer or next step from known context and state any necessary assumption briefly.',
+        if (productCatalogRequested)
+          'The customer is asking about products. Briefly list the relevant products or models explicitly present in retrieved_knowledge_records. Do not choose or recommend one, do not discuss undocumented capacity, and do not merely repeat the customer requirements. Include the supporting knowledge record IDs in used_record_ids.',
         if (images.isNotEmpty)
           'Inspect attached customer images and use only clearly visible evidence.',
         if (images.isNotEmpty)

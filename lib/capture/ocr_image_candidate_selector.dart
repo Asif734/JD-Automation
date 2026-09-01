@@ -40,7 +40,7 @@ class OcrImageCandidateSelector {
           .where(_validGeometry)
           .where((region) => !_isTextDense(region, inspection.observations))
           .where((region) =>
-              region.x >= .20 &&
+              region.x >= .15 &&
               region.x < .50 &&
               region.x + region.width <= .64 &&
               region.width >= .12 &&
@@ -70,8 +70,8 @@ class OcrImageCandidateSelector {
   }
 
   bool _validGeometry(OcrVisualRegion region) =>
-      region.x >= .20 &&
-      region.x + region.width <= .76 &&
+      region.x >= .15 &&
+      region.x + region.width <= .68 &&
       region.y >= .14 &&
       region.y + region.height <= .90 &&
       region.width >= .035 &&

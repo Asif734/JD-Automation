@@ -12,6 +12,13 @@ import '../platform/macos_capture_adapter.dart';
 class OcrCaptureExtractor {
   const OcrCaptureExtractor();
 
+  // JD indents wrapped bubble lines independently. In particular, a short
+  // final line can start to the left of the longer line above it. Treat the
+  // whole center conversation column as message content; sender labels, not
+  // per-line x alignment, define where a message starts and ends.
+  static const double _chatBodyLeft = 0.15;
+  static const double _chatBodyRight = 0.66;
+
   CapturedConversation? extract(OcrInspection inspection) =>
       analyze(inspection).capture;
 
@@ -58,6 +65,8 @@ class OcrCaptureExtractor {
     final incomingLabels = messageLabels
         .where((label) => label.direction == 'incoming')
         .toList(growable: false);
+    final latestVisibleSenderIsIncoming =
+        messageLabels.last.direction == 'incoming';
     final sender = incomingLabels.isEmpty
         ? messageLabels.last.observation
         : incomingLabels.last.observation;
@@ -68,6 +77,7 @@ class OcrCaptureExtractor {
 
     final capturedMessages = <CapturedMessage>[];
     OcrObservation? latestBodyObservation;
+    var latestIncomingHasText = false;
     for (var index = 0; index < messageLabels.length; index++) {
       final label = messageLabels[index];
       final currentSender = label.observation;
@@ -82,7 +92,8 @@ class OcrCaptureExtractor {
         if (item.y <= currentSender.y + 0.006 || item.y >= bottom) {
           return false;
         }
-        if (item.x < 0.20 || item.x >= 0.64) return false;
+        final centerX = item.x + item.width / 2;
+        if (centerX < _chatBodyLeft || centerX >= _chatBodyRight) return false;
         return !_isMetadata(text, customerId);
       }).toList()
         ..sort((left, right) {
@@ -113,6 +124,10 @@ class OcrCaptureExtractor {
         axPath: 'ocr:active-conversation',
       ));
       if (label.direction == 'incoming') latestBodyObservation = bodies.first;
+      if (label.direction == 'incoming' &&
+          identical(currentSender, incomingLabels.last.observation)) {
+        latestIncomingHasText = true;
+      }
     }
     if (capturedMessages.isEmpty) {
       return OcrExtractionAttempt(
@@ -121,7 +136,8 @@ class OcrCaptureExtractor {
           customerId: customerId,
           copyTarget: fallbackCopyTarget,
           transferNoticeVisible: transferNoticeVisible,
-          transferNoticeKey: transferNoticeKey);
+          transferNoticeKey: transferNoticeKey,
+          latestVisibleSenderIsIncoming: latestVisibleSenderIsIncoming);
     }
     final latestBody = latestBodyObservation;
     final latestIncomingSender =
@@ -153,6 +169,8 @@ class OcrCaptureExtractor {
       ),
       transferNoticeVisible: transferNoticeVisible,
       transferNoticeKey: transferNoticeKey,
+      latestIncomingHasText: latestIncomingHasText,
+      latestVisibleSenderIsIncoming: latestVisibleSenderIsIncoming,
     );
   }
 
@@ -182,28 +200,33 @@ class OcrCaptureExtractor {
     lines.sort((left, right) =>
         _verticalCenter(left.first).compareTo(_verticalCenter(right.first)));
     final textLines = <String>[];
-    double? previousCenter;
-    double previousHeight = 0;
     for (final line in lines) {
       line.sort((left, right) => left.x.compareTo(right.x));
-      final center =
-          line.map(_verticalCenter).reduce((a, b) => a + b) / line.length;
-      final height = line
-          .map((item) => item.height)
-          .reduce((left, right) => left > right ? left : right);
-      // A large gap after reconstructed text normally means Vision has moved
-      // beyond the bubble into reactions or composer controls.
-      if (previousCenter != null &&
-          center - previousCenter >
-              (previousHeight * 2.5).clamp(0.040, 0.065)) {
-        break;
-      }
+      // The sender labels and verified chat-area cutoff already bound this
+      // message. Never stop on vertical gaps: Paddle may return words or
+      // wrapped fragments with unexpectedly separated boxes, and every box
+      // inside the sender-bounded region belongs to the same visible turn.
       final text = line.map((item) => item.text.trim()).join(' ').trim();
       if (text.isNotEmpty) textLines.add(text);
-      previousCenter = center;
-      previousHeight = height;
     }
-    return textLines.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final combined = textLines.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    // Apple Vision occasionally emits a standalone uppercase `D` at the end
+    // of a JD bubble, sometimes followed by a misread image/control glyph such
+    // as `回`. Keep model suffixes such as `M880D`: only a whitespace-bounded
+    // standalone D at the end is an artifact.
+    final cleaned = combined
+        .replaceFirstMapped(
+            RegExp(r'(^|[\s，。！？；：,.!?;:])D(?:\s*[◎◉○口回□▣])*\s*$'),
+            (match) => match.group(1)?.trim() ?? '')
+        .replaceFirst(RegExp(r'(?:^|\s)C30\s*$'), '')
+        .trim();
+    // JD image thumbnails and adjacent status controls are sometimes read as
+    // tiny strings such as `◎ 回`, `g 回`, or `•`. These contain no customer
+    // language and must leave the newest turn image-only.
+    if (RegExp(r'^(?:[gG]\s*)?[◎◉○口回□▣•·.\s]+$').hasMatch(cleaned)) {
+      return '';
+    }
+    return cleaned;
   }
 
   double _verticalCenter(OcrObservation observation) =>
@@ -217,10 +240,8 @@ class OcrCaptureExtractor {
       final jdTransferSummary =
           RegExp(r'用户诉求[:：]?(?:要求|催促)?转接').hasMatch(compact);
       if (!colleagueTransfer && !jdTransferSummary) continue;
-      final customerPrefix = customerId == null
-          ? null
-          : customerId.substring(
-              0, customerId.length < 10 ? customerId.length : 10);
+      final customerPrefix = customerId?.substring(
+          0, customerId.length < 10 ? customerId.length : 10);
       if (!jdTransferSummary &&
           customerPrefix != null &&
           !compact.contains(customerPrefix)) {
@@ -385,6 +406,8 @@ class OcrExtractionAttempt {
     this.copyTarget,
     this.transferNoticeVisible = false,
     this.transferNoticeKey,
+    this.latestIncomingHasText = false,
+    this.latestVisibleSenderIsIncoming = false,
   });
 
   final String reason;
@@ -393,6 +416,8 @@ class OcrExtractionAttempt {
   final OcrCopyTarget? copyTarget;
   final bool transferNoticeVisible;
   final String? transferNoticeKey;
+  final bool latestIncomingHasText;
+  final bool latestVisibleSenderIsIncoming;
 }
 
 class OcrCopyTarget {

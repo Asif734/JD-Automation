@@ -91,8 +91,37 @@ class LocalKnowledgeRetriever {
     if (_isMediaQuery(normalizedQuery) && _hasSupportedMedia(record)) {
       score += 20;
     }
+    if (_isProductCatalogQuery(normalizedQuery)) {
+      final intent = _normalize(record['intent']?.toString() ?? '');
+      final id = _normalize(record['id']?.toString() ?? '');
+      if (intent.contains('presale')) score += 18;
+      if (id.contains('selling_points') || id.contains('recommend')) {
+        score += 22;
+      }
+    }
     return score;
   }
+
+  bool _isProductCatalogQuery(String query) => const [
+        'recommend',
+        'suggest',
+        'whichmodel',
+        'whatmodel',
+        'shouldibuy',
+        'shouldwebuy',
+        'needtobuy',
+        'wanttobuy',
+        'whatproducts',
+        'whichproducts',
+        'whatmodels',
+        'whichmodels',
+        'doyouhave',
+        '推荐',
+        '建议',
+        '哪款',
+        '买哪',
+        '选哪',
+      ].any(query.contains);
 
   bool _isMediaQuery(String query) => const [
         'image',

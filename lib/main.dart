@@ -40,7 +40,9 @@ class CaptureHome extends StatefulWidget {
 }
 
 class _CaptureHomeState extends State<CaptureHome> {
-  static const _captureOperationTimeout = Duration(seconds: 12);
+  // The persistent PaddleOCR sidecar is fast after warm-up, but its first
+  // model initialization can take substantially longer than a native scan.
+  static const _captureOperationTimeout = Duration(seconds: 90);
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
@@ -64,6 +66,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   String? _activeDraftUser;
   final Map<String, int> _processingUnreadEvidence = {};
   final Map<String, int> _handledUnreadEvidence = {};
+  final Set<String> _visibleTransferWelcomes = {};
   String _visibleMediaTrace = 'visible image candidates=0, saved=0';
 
   @override
@@ -229,9 +232,8 @@ class _CaptureHomeState extends State<CaptureHome> {
           final reception = windows.firstWhere(
               (window) => window.title.contains('咚咚融合工作台'),
               orElse: () => windows.first);
-          final inspection = await _adapter
-              .inspectOcr(windowId: reception.windowId)
-              .timeout(_captureOperationTimeout);
+          final inspection =
+              await _inspectStableConversation(reception.windowId);
           if (mounted) setState(() => _ocrInspection = inspection);
           // JD does not expose an unread flag for the active sidebar row.
           // Poll the already-open chat independently; durable message IDs
@@ -243,10 +245,14 @@ class _CaptureHomeState extends State<CaptureHome> {
               !await _database.isHumanContacting(activeCustomer)) {
             final extraction = const OcrCaptureExtractor().analyze(inspection);
             if (extraction.transferNoticeVisible) {
-              await _sendTransferWelcomeOnce(
-                  activeCustomer,
-                  extraction.transferNoticeKey ??
-                      'visible-transfer-${inspection.capturedAt.day}');
+              if (_visibleTransferWelcomes.add(activeCustomer)) {
+                await _sendTransferWelcomeOnce(
+                    activeCustomer,
+                    extraction.transferNoticeKey ??
+                        'visible-transfer-${inspection.capturedAt.day}');
+              }
+            } else {
+              _visibleTransferWelcomes.remove(activeCustomer);
             }
             final capture = await _captureWithVisibleMedia(
                 inspection, extraction,
@@ -292,14 +298,19 @@ class _CaptureHomeState extends State<CaptureHome> {
           await _adapter
               .openConversation(customer, allowActivation: false)
               .timeout(_captureOperationTimeout);
-          final inspection = await _adapter
-              .inspectOcr(windowId: reception.windowId)
-              .timeout(_captureOperationTimeout);
+          final inspection =
+              await _inspectStableConversation(reception.windowId);
           if (mounted) setState(() => _ocrInspection = inspection);
           final extraction = const OcrCaptureExtractor().analyze(inspection);
           if (extraction.transferNoticeVisible) {
-            await _sendTransferWelcomeOnce(customer,
-                extraction.transferNoticeKey ?? row.unreadEvidence.toString());
+            if (_visibleTransferWelcomes.add(customer)) {
+              await _sendTransferWelcomeOnce(
+                  customer,
+                  extraction.transferNoticeKey ??
+                      row.unreadEvidence.toString());
+            }
+          } else {
+            _visibleTransferWelcomes.remove(customer);
           }
           final capture = await _captureWithVisibleMedia(inspection, extraction,
                   allowUnlabeledLatestImage: row.unread)
@@ -356,14 +367,26 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
   }
 
+  /// Let a newly selected JD conversation settle, then perform one enlarged
+  /// PaddleOCR pass. The sidecar already recognizes the complete conversation
+  /// crop; doing the same expensive inference twice doubled response latency.
+  Future<OcrInspection> _inspectStableConversation(int windowId) async {
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    return _adapter
+        .inspectOcr(windowId: windowId)
+        .timeout(_captureOperationTimeout);
+  }
+
   String _formatClock(DateTime value) =>
       '${value.hour.toString().padLeft(2, '0')}:'
       '${value.minute.toString().padLeft(2, '0')}:'
       '${value.second.toString().padLeft(2, '0')}';
 
   Future<bool> _sendTransferWelcomeOnce(String userId, String eventKey) async {
-    if (await _database.hasTransferWelcome(userId: userId, eventKey: eventKey))
+    if (!await _database.reserveTransferWelcome(
+        userId: userId, eventKey: eventKey)) {
       return false;
+    }
     const welcome =
         'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
     if (mounted) setState(() => _sending = true);
@@ -374,7 +397,6 @@ class _CaptureHomeState extends State<CaptureHome> {
         mediaPaths: const [],
       );
       await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
-      await _database.recordTransferWelcome(userId: userId, eventKey: eventKey);
       _handledUnreadEvidence[userId] = int.tryParse(eventKey) ?? 0;
       if (mounted) {
         setState(() => _diagnostics =
@@ -500,13 +522,30 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (customer == null || inspection.windowId == 0) {
       return extraction.capture;
     }
+    final textCapture = extraction.capture;
+
+    // A sender-bounded OCR body is already definitive text evidence. Saving
+    // it must not depend on clicking the bubble and copying from JD: passive
+    // monitoring intentionally leaves JD in the background, where clipboard
+    // classification returns `unavailable` and previously discarded valid
+    // Apple Vision text. This also prevents the cursor jumping on every scan.
+    if (extraction.latestIncomingHasText) {
+      _visibleMediaTrace =
+          'strict routing: verified incoming OCR text -> saved directly';
+      return textCapture;
+    }
+    if (!extraction.latestVisibleSenderIsIncoming) {
+      _visibleMediaTrace =
+          'strict routing: newest visible sender is not the customer';
+      return textCapture;
+    }
     final capturedMedia = <CapturedMessage>[];
     var imageCandidates = const OcrImageCandidateSelector().select(
       inspection,
       customer,
       allowUnlabeledLatestImage: allowUnlabeledLatestImage,
     );
-    final visibleMessages = extraction.capture?.messages ?? const [];
+    final visibleMessages = textCapture?.messages ?? const [];
     final latestVisible = visibleMessages.isEmpty ? null : visibleMessages.last;
     if (latestVisible?.direction == 'outgoing') {
       imageCandidates = imageCandidates.where((region) {
@@ -525,22 +564,8 @@ class _CaptureHomeState extends State<CaptureHome> {
     // opens JD's modal image viewer. Only the newest candidate can create work.
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
-    var rejectedAsText = 0;
     for (final region in imageCandidates) {
       try {
-        final classification = await _adapter.classifyMessageAt(
-          expectedCustomer: customer,
-          windowId: inspection.windowId,
-          x: region.x + region.width / 2,
-          y: region.y + region.height / 2,
-        );
-        // Vision rectangles are only candidates. Clipboard classification is
-        // the semantic gate: unknown/text regions must never reach Codex as
-        // customer images.
-        if (classification.kind != 'image') {
-          rejectedAsText++;
-          continue;
-        }
         final visible = await _adapter.captureImageRegion(
           expectedCustomer: customer,
           windowId: inspection.windowId,
@@ -562,21 +587,21 @@ class _CaptureHomeState extends State<CaptureHome> {
         // text already extracted from the visible conversation.
       }
     }
-    _visibleMediaTrace = 'screenshot-first image candidates='
+    _visibleMediaTrace = 'strict routing: image -> screenshot; candidates='
         '${imageCandidates.length}, captured=${capturedMedia.length}, '
-        'rejected_as_text=$rejectedAsText, failures=$failures; '
+        'failures=$failures; '
         'JD image viewer was not opened';
-    if (capturedMedia.isEmpty) return extraction.capture;
+    if (capturedMedia.isEmpty) return textCapture;
     final uniqueMedia = <String, CapturedMessage>{
       for (final message in capturedMedia) message.stableId: message,
     }.values.toList(growable: false);
     return CapturedConversation(
-      stableKey: extraction.capture?.stableKey ??
+      stableKey: textCapture?.stableKey ??
           'customer:${sha256.convert(utf8.encode(customer))}',
       customerName: customer,
       customerExternalId: customer,
       capturedAt: inspection.capturedAt,
-      messages: [...?extraction.capture?.messages, ...uniqueMedia],
+      messages: [...?textCapture?.messages, ...uniqueMedia],
     );
   }
 
@@ -585,6 +610,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     VisibleImagePayload image, {
     bool viewportFallback = false,
     bool originalDownload = false,
+    bool clipboardCopy = false,
   }) async {
     final bytes = image.bytes!;
     final fingerprint = image.visualFingerprint ?? '';
@@ -607,126 +633,36 @@ class _CaptureHomeState extends State<CaptureHome> {
     return CapturedMessage(
       stableId: 'visible-image:$digest',
       direction: 'incoming',
-      body: originalDownload
-          ? '[Customer sent an image; original downloaded]'
-          : '[Customer sent an image; visible portion captured]',
+      body: clipboardCopy
+          ? '[Customer sent an image; copied from JD]'
+          : originalDownload
+              ? '[Customer sent an image; original downloaded]'
+              : '[Customer sent an image; visible portion captured]',
       sender: customer,
-      axPath: viewportFallback
-          ? 'ocr:visible-chat-viewport-fallback'
-          : 'ocr:visible-image-region',
+      axPath: clipboardCopy
+          ? 'ocr:jd-clipboard-image'
+          : viewportFallback
+              ? 'ocr:visible-chat-viewport-fallback'
+              : 'ocr:visible-image-region',
       media: [
         CapturedMedia(
           type: 'image',
           path: path,
           mimeType: image.mimeType,
           originalName: originalName,
-          captureSource: originalDownload
-              ? 'jd_image_viewer_download'
-              : viewportFallback
-                  ? 'verified_chat_viewport_fallback'
-                  : 'verified_window_crop',
-          isPartial: !originalDownload,
+          captureSource: clipboardCopy
+              ? 'jd_clipboard_copy'
+              : originalDownload
+                  ? 'jd_image_viewer_download'
+                  : viewportFallback
+                      ? 'verified_chat_viewport_fallback'
+                      : 'verified_window_crop',
+          isPartial: !originalDownload && !clipboardCopy,
           description: 'Pending Codex visual analysis.',
           visualFingerprint: fingerprint,
         ),
       ],
     );
-  }
-
-  List<OcrVisualRegion> _incomingImageCandidates(
-    OcrInspection inspection,
-    String customer, {
-    bool allowUnlabeledLatestImage = false,
-  }) {
-    bool isCustomer(String value) {
-      final raw = value.toLowerCase().trim();
-      final expected = customer.toLowerCase();
-      if (raw == expected) return true;
-      if (raw.startsWith(expected)) {
-        final suffix = raw.substring(expected.length).trim();
-        if (suffix.isEmpty || RegExp(r'\d{1,2}:\d{2}').hasMatch(suffix)) {
-          return true;
-        }
-      }
-      final visiblePrefix = raw
-          .replaceAll('...', '')
-          .replaceAll('…', '')
-          .replaceAll(RegExp(r'\s+'), '');
-      return visiblePrefix.length >= 6 && expected.startsWith(visiblePrefix);
-    }
-
-    final customerLabels = inspection.observations
-        .where((item) => isCustomer(item.text))
-        .toList(growable: false);
-    bool validGeometry(OcrVisualRegion region) {
-      if (region.x < .20 || region.x + region.width > .76) return false;
-      if (region.y < .14 || region.y + region.height > .90) return false;
-      if (region.width < .035 || region.height < .065) return false;
-      // Portrait customer photos commonly occupy almost half of the visible
-      // chat height. The previous .40 cap rejected those exact image bubbles.
-      if (region.width > .48 || region.height > .76) return false;
-      return true;
-    }
-
-    // Vision often returns the full photo plus several rectangles inside it.
-    // Associate regions with the explicit buyer label above them and retain
-    // only the largest rectangle for each label. An image whose buyer label is
-    // offscreen is deliberately deferred until a later scan can prove its
-    // direction; a partial viewport crop must not be treated as a new photo.
-    final selected = <OcrVisualRegion>[];
-    for (final label in customerLabels) {
-      final matches = inspection.visualRegions
-          .where(validGeometry)
-          .where((region) => label.y <= region.y && region.y - label.y <= .13)
-          .toList()
-        ..sort((left, right) =>
-            (right.width * right.height).compareTo(left.width * left.height));
-      if (matches.isNotEmpty) selected.add(matches.first);
-    }
-    if (selected.isEmpty && allowUnlabeledLatestImage) {
-      // An image-only unread message often has its sender label just above the
-      // visible viewport. AX has already verified the active customer and the
-      // sidebar has independently verified that this row is unread. In that
-      // narrow case, accept only the largest substantial left-side rectangle
-      // inside the chat column; right-side customer panels remain excluded.
-      final unlabeled = inspection.visualRegions
-          .where(validGeometry)
-          .where((region) =>
-              region.x >= .20 &&
-              region.x < .50 &&
-              region.x + region.width <= .64 &&
-              region.width >= .12 &&
-              region.width <= .38 &&
-              region.height >= .12)
-          .toList();
-      // Vision also reports QR codes, labels and controls inside the photo.
-      // Drop rectangles contained by a meaningfully larger candidate so the
-      // outer message image defines where capture starts and ends.
-      final outer = unlabeled.where((candidate) {
-        return !unlabeled.any((container) {
-          if (identical(candidate, container)) return false;
-          const tolerance = .008;
-          return container.x <= candidate.x + tolerance &&
-              container.y <= candidate.y + tolerance &&
-              container.x + container.width >=
-                  candidate.x + candidate.width - tolerance &&
-              container.y + container.height >=
-                  candidate.y + candidate.height - tolerance &&
-              container.width * container.height >
-                  candidate.width * candidate.height * 1.25;
-        });
-      }).toList()
-        ..sort((left, right) {
-          final byBottom =
-              (right.y + right.height).compareTo(left.y + left.height);
-          if (byBottom != 0) return byBottom;
-          return (right.width * right.height)
-              .compareTo(left.width * left.height);
-        });
-      if (outer.isNotEmpty) selected.add(outer.first);
-    }
-    selected.sort((left, right) => right.y.compareTo(left.y));
-    return selected;
   }
 
   Future<void> _loadDemoData() async {
@@ -880,6 +816,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     _autoCaptureTimer?.cancel();
     _updateSubscription?.cancel();
     _diagnosticSubscription?.cancel();
+    _adapter.close();
     _backend.close();
     _database.close();
     super.dispose();
@@ -1079,7 +1016,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             const SizedBox(height: 8),
             Text(_ocrInspection == null
                 ? 'Use this output to map roles and paths from the installed JD 咚咚 build. Sending remains guarded by exact customer verification.'
-                : '${_ocrInspection!.observations.length} text regions • ${_ocrInspection!.imageWidth}×${_ocrInspection!.imageHeight}. Red boxes show Apple Vision observations.'),
+                : '${_ocrInspection!.observations.length} ${_ocrInspection!.ocrEngine == 'apple_vision' ? 'Apple Vision' : 'PaddleOCR'} text regions • ${_ocrInspection!.imageWidth}×${_ocrInspection!.imageHeight}. Red boxes show ${_ocrInspection!.ocrEngine == 'apple_vision' ? 'Apple Vision' : 'PaddleOCR'} observations.'),
             const SizedBox(height: 8),
             if (_ocrInspection != null) ...[
               Container(

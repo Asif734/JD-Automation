@@ -4,16 +4,21 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import '../domain/capture_models.dart';
+import '../ocr/paddle_ocr_service.dart';
 import 'capture_adapter.dart';
 
 class MacOSCaptureAdapter implements CaptureAdapter {
-  MacOSCaptureAdapter({MethodChannel? channel})
-      : _channel = channel ?? const MethodChannel(_channelName) {
+  MacOSCaptureAdapter({MethodChannel? channel, PaddleOcrService? paddleOcr})
+      : _channel = channel ?? const MethodChannel(_channelName),
+        _paddleOcr = paddleOcr ?? PaddleOcrService() {
     _channel.setMethodCallHandler(_onNativeCall);
   }
 
   static const _channelName = 'com.grozziie.jdAutomation/accessibility';
+  static const _ocrEngine =
+      String.fromEnvironment('JD_OCR_ENGINE', defaultValue: 'paddleocr');
   final MethodChannel _channel;
+  final PaddleOcrService _paddleOcr;
   final _captures = StreamController<CapturedConversation>.broadcast();
   final _diagnostics = StreamController<Map<String, Object?>>.broadcast();
 
@@ -22,6 +27,12 @@ class MacOSCaptureAdapter implements CaptureAdapter {
 
   @override
   Stream<Map<String, Object?>> get diagnostics => _diagnostics.stream;
+
+  Future<void> close() async {
+    await _paddleOcr.close();
+    await _captures.close();
+    await _diagnostics.close();
+  }
 
   Future<void> _onNativeCall(MethodCall call) async {
     final arguments = (call.arguments as Map<Object?, Object?>?) ?? const {};
@@ -57,6 +68,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     final value = await _mapCall('inspectOCR', <String, Object?>{
       'windowId': windowId,
       'recognitionLevel': fast ? 'fast' : 'accurate',
+      'ocrEngine': _ocrEngine,
     });
     if (value['error'] case final String code) {
       throw PlatformException(
@@ -64,7 +76,22 @@ class MacOSCaptureAdapter implements CaptureAdapter {
         message: value['message'] as String? ?? 'OCR inspection failed.',
       );
     }
-    return OcrInspection.fromMap(value);
+    if (_ocrEngine == 'apple_vision') {
+      return OcrInspection.fromMap(value);
+    }
+    final paddle = await _paddleOcr.recognize(
+      value['pngBase64'] as String? ?? '',
+      imageWidth: (value['imageWidth'] as num?)?.toInt() ?? 0,
+      imageHeight: (value['imageHeight'] as num?)?.toInt() ?? 0,
+    );
+    return OcrInspection.fromMap({
+      ...value,
+      'observations': paddle.observations,
+      'visualRegions': paddle.visualRegions,
+      'recognizedText':
+          paddle.observations.map((item) => item['text']).join('\n'),
+      'ocrEngine': 'paddleocr',
+    });
   }
 
   Future<Map<String, Object?>> sendDraftOnce({
@@ -124,6 +151,9 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return MessageClassification(
       kind: value['kind']?.toString() ?? 'unknown',
       visualFingerprint: value['visualFingerprint']?.toString(),
+      image: value['kind']?.toString() == 'image'
+          ? VisibleImagePayload.fromMap(value)
+          : null,
     );
   }
 
@@ -224,10 +254,15 @@ class MacOSCaptureAdapter implements CaptureAdapter {
 }
 
 class MessageClassification {
-  const MessageClassification({required this.kind, this.visualFingerprint});
+  const MessageClassification({
+    required this.kind,
+    this.visualFingerprint,
+    this.image,
+  });
 
   final String kind;
   final String? visualFingerprint;
+  final VisibleImagePayload? image;
 }
 
 class OcrWindowInfo {
@@ -321,6 +356,7 @@ class OcrInspection {
     this.visualRegions = const [],
     this.windowId = 0,
     this.activeCustomerId,
+    this.ocrEngine = 'unknown',
   });
 
   factory OcrInspection.fromMap(Map<String, Object?> value) {
@@ -337,6 +373,7 @@ class OcrInspection {
           (value['capturedAtMs'] as num?)?.toInt() ?? 0),
       activeCustomerId: value['activeCustomerId'] as String?,
       windowId: (value['windowId'] as num?)?.toInt() ?? 0,
+      ocrEngine: value['ocrEngine'] as String? ?? 'unknown',
       observations: rawObservations
           .whereType<Map<Object?, Object?>>()
           .map(OcrObservation.fromMap)
@@ -358,6 +395,7 @@ class OcrInspection {
   final DateTime capturedAt;
   final int windowId;
   final String? activeCustomerId;
+  final String ocrEngine;
 }
 
 class OcrVisualRegion {

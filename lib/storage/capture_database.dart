@@ -124,6 +124,40 @@ class CaptureDatabase {
         conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  /// Atomically reserves a transfer welcome before the send click.
+  ///
+  /// The exact durable event key prevents a retry after an unconfirmed click.
+  /// The UI layer separately suppresses repeated OCR variants while the same
+  /// banner remains visible, without blocking a genuinely new transfer.
+  Future<bool> reserveTransferWelcome({
+    required String userId,
+    required String eventKey,
+    DateTime? now,
+  }) async {
+    final db = await database;
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    return db.transaction((txn) async {
+      final existing = await txn.query(
+        'transfer_welcomes',
+        columns: ['user_id'],
+        where: 'user_id = ? AND event_key = ?',
+        whereArgs: [userId, eventKey],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) return false;
+      await txn.insert(
+        'transfer_welcomes',
+        {
+          'user_id': userId,
+          'event_key': eventKey,
+          'created_at_ms': timestamp,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      return true;
+    });
+  }
+
   Future<void> appendAutomatedNoticeSent(
       {required String userId, required String reply}) async {
     final raw = <String, Object?>{

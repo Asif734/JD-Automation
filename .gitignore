@@ -22,6 +22,8 @@ Thumbs.db
 .pub-cache/
 .pub/
 build/
+dist/
+*.spec
 coverage/
 doc/api/
 *.dill
@@ -47,6 +49,8 @@ __pycache__/
 htmlcov/
 venv/
 .venv/
+.paddleocr-venv/
+.paddlex-cache/
 env/
 
 # Local application state and customer data

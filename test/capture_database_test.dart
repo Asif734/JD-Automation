@@ -5,6 +5,33 @@ import 'package:jd_automation/domain/capture_models.dart';
 import 'package:jd_automation/storage/capture_database.dart';
 
 void main() {
+  test('transfer welcome reservation rejects the same exact event', () async {
+    final root = await Directory.systemTemp.createTemp('welcome_guard_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final now = DateTime(2026, 9, 1, 14);
+
+    expect(
+        await database.reserveTransferWelcome(
+            userId: 'jd_test', eventKey: 'ocr-shape-a', now: now),
+        isTrue);
+    expect(
+        await database.reserveTransferWelcome(
+            userId: 'jd_test',
+            eventKey: 'ocr-shape-a',
+            now: now.add(const Duration(seconds: 30))),
+        isFalse);
+    expect(
+        await database.reserveTransferWelcome(
+            userId: 'jd_test',
+            eventKey: 'new-transfer',
+            now: now.add(const Duration(seconds: 31))),
+        isTrue);
+  });
+
   test('demo data uses JSON history and SQLite only as pending queue',
       () async {
     final root = await Directory.systemTemp.createTemp('jd_automation_test_');

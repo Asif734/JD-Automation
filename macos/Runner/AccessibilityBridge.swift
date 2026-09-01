@@ -41,6 +41,7 @@ final class AccessibilityBridge {
       ocrInspector.inspect(
         windowID: requestedWindowID,
         recognitionLevel: args?["recognitionLevel"] as? String ?? "accurate",
+        ocrEngine: args?["ocrEngine"] as? String ?? "paddleocr",
         completion: result)
     case "captureImageRegion":
       let args = call.arguments as? [String: Any]
@@ -126,12 +127,15 @@ final class QianniuOCRInspector {
     return windows(pid: pid).map(\.payload)
   }
 
-  func inspect(windowID: CGWindowID?, recognitionLevel: String, completion: @escaping FlutterResult) {
+  func inspect(windowID: CGWindowID?, recognitionLevel: String, ocrEngine: String, completion: @escaping FlutterResult) {
     queue.async { [weak self] in
       guard let self else { return }
       let response: [String: Any]
       do {
-        response = try self.captureAndRecognize(windowID: windowID, recognitionLevel: recognitionLevel)
+        response = try self.captureAndRecognize(
+          windowID: windowID,
+          recognitionLevel: recognitionLevel,
+          ocrEngine: ocrEngine)
       } catch let error as OCRInspectorError {
         response = error.payload
       } catch {
@@ -141,7 +145,7 @@ final class QianniuOCRInspector {
     }
   }
 
-  private func captureAndRecognize(windowID: CGWindowID?, recognitionLevel: String) throws -> [String: Any] {
+  private func captureAndRecognize(windowID: CGWindowID?, recognitionLevel: String, ocrEngine: String) throws -> [String: Any] {
     guard CGPreflightScreenCaptureAccess() else {
       throw OCRInspectorError(
         code: "screen_recording_not_allowed",
@@ -167,91 +171,114 @@ final class QianniuOCRInspector {
       throw OCRInspectorError(code: "window_capture_failed", message: "macOS could not capture the JD 咚咚 window.")
     }
 
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
-    request.usesLanguageCorrection = true
-    request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-    // A mixed Chinese/English pass can omit a short wrapped English line in
-    // JD chat bubbles. Run a second independent English pass without language
-    // correction and spatially merge its missing observations below.
-    let englishRequest = VNRecognizeTextRequest()
-    englishRequest.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
-    englishRequest.usesLanguageCorrection = false
-    englishRequest.recognitionLanguages = ["en-US"]
-    let rectangles = VNDetectRectanglesRequest()
-    rectangles.maximumObservations = 24
-    rectangles.minimumSize = 0.06
-    rectangles.minimumAspectRatio = 0.25
-    rectangles.maximumAspectRatio = 4.0
-    rectangles.quadratureTolerance = 18
-    try VNImageRequestHandler(cgImage: image, orientation: .up)
-      .perform([request, englishRequest, rectangles])
+    var observations: [[String: Any]] = []
+    var visualRegions: [[String: Any]] = []
+    if ocrEngine == "apple_vision" {
+      let request = VNRecognizeTextRequest()
+      request.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
+      request.usesLanguageCorrection = true
+      request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
 
-    struct RecognizedLine {
-      let text: String
-      let confidence: Float
-      let box: CGRect
-    }
-    func lines(from results: [VNRecognizedTextObservation]?) -> [RecognizedLine] {
-      (results ?? []).compactMap { observation in
-        guard let candidate = observation.topCandidates(1).first else { return nil }
-        return RecognizedLine(
-          text: candidate.string,
-          confidence: candidate.confidence,
-          box: observation.boundingBox)
+      // A second English pass recovers short wrapped lines that the mixed
+      // language pass can omit. The shared Dart extractor then joins every
+      // sender-bounded line using the recent workflow.
+      let englishRequest = VNRecognizeTextRequest()
+      englishRequest.recognitionLevel = request.recognitionLevel
+      englishRequest.usesLanguageCorrection = false
+      englishRequest.recognitionLanguages = ["en-US"]
+
+      // Use an independent Chinese pass so a short Chinese bubble cannot be
+      // reduced to a Latin placeholder such as `D` by the mixed pass.
+      let chineseRequest = VNRecognizeTextRequest()
+      chineseRequest.recognitionLevel = request.recognitionLevel
+      chineseRequest.usesLanguageCorrection = false
+      chineseRequest.recognitionLanguages = ["zh-Hans", "zh-Hant"]
+
+      let rectangles = VNDetectRectanglesRequest()
+      rectangles.maximumObservations = 24
+      rectangles.minimumSize = 0.06
+      rectangles.minimumAspectRatio = 0.25
+      rectangles.maximumAspectRatio = 4.0
+      rectangles.quadratureTolerance = 18
+      try VNImageRequestHandler(cgImage: image, orientation: .up)
+        .perform([request, englishRequest, chineseRequest, rectangles])
+
+      struct RecognizedLine {
+        let text: String
+        let confidence: Float
+        let box: CGRect
       }
-    }
-    func sameVisualLine(_ left: CGRect, _ right: CGRect) -> Bool {
-      let intersection = left.intersection(right)
-      guard !intersection.isNull else { return false }
-      let smallerArea = min(left.width * left.height, right.width * right.height)
-      return smallerArea > 0 && intersection.width * intersection.height / smallerArea >= 0.45
-    }
-
-    var mergedLines = lines(from: request.results)
-    for fallback in lines(from: englishRequest.results) {
-      if let index = mergedLines.firstIndex(where: { sameVisualLine($0.box, fallback.box) }) {
-        let current = mergedLines[index]
-        // Prefer the result containing more useful characters. This repairs
-        // clipped mixed-language readings while keeping the primary result
-        // when both passes recognized the same line equally well.
-        let currentLength = current.text.replacingOccurrences(of: " ", with: "").count
-        let fallbackLength = fallback.text.replacingOccurrences(of: " ", with: "").count
-        if fallbackLength > currentLength ||
-            (fallbackLength == currentLength && fallback.confidence > current.confidence) {
-          mergedLines[index] = fallback
+      func lines(from results: [VNRecognizedTextObservation]?) -> [RecognizedLine] {
+        (results ?? []).compactMap { observation in
+          guard let candidate = observation.topCandidates(1).first else { return nil }
+          return RecognizedLine(
+            text: candidate.string,
+            confidence: candidate.confidence,
+            box: observation.boundingBox)
         }
-      } else {
-        mergedLines.append(fallback)
       }
-    }
+      func sameVisualLine(_ left: CGRect, _ right: CGRect) -> Bool {
+        let intersection = left.intersection(right)
+        guard !intersection.isNull else { return false }
+        let smallerArea = min(left.width * left.height, right.width * right.height)
+        return smallerArea > 0 && intersection.width * intersection.height / smallerArea >= 0.45
+      }
 
-    let observations = mergedLines.map { line -> [String: Any] in
-      let box = line.box
-      return [
-        "text": line.text,
-        "confidence": Double(line.confidence),
-        // Vision uses a bottom-left origin. Flutter's overlay uses top-left.
-        "x": Double(box.minX),
-        "y": Double(1 - box.maxY),
-        "width": Double(box.width),
-        "height": Double(box.height),
-      ]
-    }.sorted {
-      let leftY = $0["y"] as? Double ?? 0
-      let rightY = $1["y"] as? Double ?? 0
-      if abs(leftY - rightY) > 0.01 { return leftY < rightY }
-      return ($0["x"] as? Double ?? 0) < ($1["x"] as? Double ?? 0)
-    }
-    let visualRegions = (rectangles.results ?? []).map { observation -> [String: Any] in
-      let box = observation.boundingBox
-      return [
-        "x": Double(box.minX),
-        "y": Double(1 - box.maxY),
-        "width": Double(box.width),
-        "height": Double(box.height),
-        "confidence": Double(observation.confidence),
-      ]
+      func containsHan(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+          (0x3400...0x9FFF).contains(Int(scalar.value))
+        }
+      }
+
+      var mergedLines = lines(from: request.results)
+      func merge(_ fallbackLines: [RecognizedLine]) {
+        for fallback in fallbackLines {
+          if let index = mergedLines.firstIndex(where: { sameVisualLine($0.box, fallback.box) }) {
+            let current = mergedLines[index]
+            let currentHasHan = containsHan(current.text)
+            let fallbackHasHan = containsHan(fallback.text)
+            let currentLength = current.text.replacingOccurrences(of: " ", with: "").count
+            let fallbackLength = fallback.text.replacingOccurrences(of: " ", with: "").count
+            if (fallbackHasHan && !currentHasHan) ||
+                (fallbackHasHan == currentHasHan &&
+                  (fallbackLength > currentLength ||
+                    (fallbackLength == currentLength && fallback.confidence > current.confidence))) {
+              mergedLines[index] = fallback
+            }
+          } else {
+            mergedLines.append(fallback)
+          }
+        }
+      }
+      merge(lines(from: englishRequest.results))
+      merge(lines(from: chineseRequest.results))
+
+      observations = mergedLines.map { line -> [String: Any] in
+        let box = line.box
+        return [
+          "text": line.text,
+          "confidence": Double(line.confidence),
+          "x": Double(box.minX),
+          "y": Double(1 - box.maxY),
+          "width": Double(box.width),
+          "height": Double(box.height),
+        ]
+      }.sorted {
+        let leftY = $0["y"] as? Double ?? 0
+        let rightY = $1["y"] as? Double ?? 0
+        if abs(leftY - rightY) > 0.01 { return leftY < rightY }
+        return ($0["x"] as? Double ?? 0) < ($1["x"] as? Double ?? 0)
+      }
+      visualRegions = (rectangles.results ?? []).map { observation -> [String: Any] in
+        let box = observation.boundingBox
+        return [
+          "x": Double(box.minX),
+          "y": Double(1 - box.maxY),
+          "width": Double(box.width),
+          "height": Double(box.height),
+          "confidence": Double(observation.confidence),
+        ]
+      }
     }
 
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
@@ -271,6 +298,7 @@ final class QianniuOCRInspector {
       "observations": observations,
       "visualRegions": visualRegions,
       "recognizedText": observations.compactMap { $0["text"] as? String }.joined(separator: "\n"),
+      "ocrEngine": ocrEngine,
       "activeCustomerId": customerIdentityProvider?() as Any,
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ]
@@ -549,9 +577,22 @@ final class QianniuAXCollector {
             normalizedY >= 0, normalizedY <= 1,
             activeCustomerIdentity() == expected,
             let pid = runningPID(),
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
-        finish(["kind": "unavailable", "reason": "qianniu_not_frontmost"])
+            let jdApp = NSRunningApplication(processIdentifier: pid) else {
+        finish(["kind": "unavailable", "reason": "qianniu_unavailable"])
         return
+      }
+      let previouslyFrontmost = NSWorkspace.shared.frontmostApplication
+      let activatedForImageCheck = previouslyFrontmost?.processIdentifier != pid
+      if activatedForImageCheck {
+        _ = jdApp.activate(options: [.activateIgnoringOtherApps])
+        usleep(300_000)
+      }
+      defer {
+        if activatedForImageCheck,
+           let previous = previouslyFrontmost,
+           !previous.isTerminated {
+          _ = previous.activate(options: [.activateIgnoringOtherApps])
+        }
       }
       guard let raw = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID)
               as? [[String: Any]],
@@ -578,6 +619,7 @@ final class QianniuAXCollector {
       ]
       let kind: String
       var visualFingerprint = ""
+      var copiedPNG: Data?
       if types.contains(where: { imageTypes.contains($0) }) {
         kind = "image"
         let imageData = pasteboard.data(forType: .png) ??
@@ -586,19 +628,32 @@ final class QianniuAXCollector {
         if let imageData, let image = NSImage(data: imageData),
            let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
           visualFingerprint = averageImageHash(cgImage)
+          copiedPNG = NSBitmapImageRep(cgImage: cgImage)
+            .representation(using: .png, properties: [:])
         } else if let fileURL = pasteboard.string(forType: .fileURL),
                   let url = URL(string: fileURL),
                   let image = NSImage(contentsOf: url),
                   let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
           visualFingerprint = averageImageHash(cgImage)
+          copiedPNG = NSBitmapImageRep(cgImage: cgImage)
+            .representation(using: .png, properties: [:])
         }
       } else if pasteboard.string(forType: .string) != nil {
         kind = "text"
       } else {
         kind = "unknown"
       }
-      finish(["kind": kind, "types": types.map(\.rawValue),
-              "visualFingerprint": visualFingerprint])
+      var payload: [String: Any] = [
+        "kind": kind,
+        "types": types.map(\.rawValue),
+        "visualFingerprint": visualFingerprint,
+      ]
+      if let copiedPNG {
+        payload["mimeType"] = "image/png"
+        payload["extension"] = "png"
+        payload["dataBase64"] = copiedPNG.base64EncodedString()
+      }
+      finish(payload)
     }
   }
 
