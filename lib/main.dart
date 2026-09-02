@@ -479,6 +479,12 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (await _database.isHumanContacting(userId)) return false;
     if (mounted) setState(() => _sending = true);
     try {
+      // Draft generation is independent from sidebar scanning. Another unread
+      // customer may have become visible while Codex was working, so reopen
+      // and verify the draft's exact customer immediately before sending.
+      await _adapter
+          .openConversation(userId, allowActivation: true)
+          .timeout(_captureOperationTimeout);
       final mediaPaths = draft.attachments
           .where((attachment) => attachment.url.scheme == 'file')
           .map((attachment) => attachment.url.toFilePath())

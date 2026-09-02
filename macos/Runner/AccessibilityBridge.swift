@@ -453,6 +453,44 @@ private func unreadRedPixels(frame: CGRect, windowBounds: CGRect,
   return max(count(in: topOrigin), count(in: flipped))
 }
 
+/// JD exposes each conversation as an untitled pressable AXGroup. Read the
+/// visible customer ID from that group's screenshot crop; the active header is
+/// still used independently after a click to verify the selected customer.
+private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
+                             image: CGImage) -> String? {
+  guard windowBounds.width > 0, windowBounds.height > 0 else { return nil }
+  let scaleX = CGFloat(image.width) / windowBounds.width
+  let scaleY = CGFloat(image.height) / windowBounds.height
+  let x = (frame.minX - windowBounds.minX) * scaleX
+  let y = (frame.minY - windowBounds.minY) * scaleY
+  let width = frame.width * scaleX
+  let height = frame.height * scaleY
+  let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+  let candidates = [
+    CGRect(x: x, y: y, width: width, height: height).integral.intersection(bounds),
+    CGRect(x: x, y: CGFloat(image.height) - y - height,
+           width: width, height: height).integral.intersection(bounds),
+  ]
+  let pattern = try? NSRegularExpression(pattern: #"jd_[A-Za-z0-9_-]{3,64}"#,
+                                          options: [.caseInsensitive])
+  for rect in candidates where rect.width >= 40 && rect.height >= 20 {
+    guard let crop = image.cropping(to: rect) else { continue }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["en-US"]
+    request.usesLanguageCorrection = false
+    try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
+    for observation in request.results ?? [] {
+      guard let text = observation.topCandidates(1).first?.string else { continue }
+      let range = NSRange(text.startIndex..<text.endIndex, in: text)
+      guard let match = pattern?.firstMatch(in: text, range: range),
+            let swiftRange = Range(match.range, in: text) else { continue }
+      return String(text[swiftRange]).lowercased()
+    }
+  }
+  return nil
+}
+
 private struct OCRInspectorError: Error {
   let code: String
   let message: String
@@ -1255,44 +1293,34 @@ final class QianniuAXCollector {
     guard let window = nodes.first(where: {
       $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
     }) else { return [] }
-    let groups = nodes.compactMap { node -> (String, CGRect)? in
+    guard let windowFrame = window.frame,
+          let evidence = unreadScreenshot(pid: pid) else { return [] }
+    let customerGroups = nodes.compactMap { node -> (String, CGRect)? in
       guard node.path.hasPrefix(window.path + "/"),
             node.role == kAXGroupRole as String,
             node.actions.contains(kAXPressAction as String),
-            let title = node.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-            !title.isEmpty, let frame = node.frame,
-            frame.width >= 100, frame.height >= 30 else { return nil }
-      return (title, frame)
-    }
-    let evidence = unreadScreenshot(pid: pid)
-    if let customer = activeCustomerIdentity() {
-      let activeFrame = groups.first(where: { title, _ in
-        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized == customer || normalized.hasPrefix(customer + " ")
-      })?.1
-      let redPixels = activeFrame.flatMap { frame in
-        evidence.map { unreadRedPixels(
-          frame: frame, windowBounds: $0.bounds, image: $0.image) }
-      } ?? 0
-      return [[
-        "customer": customer,
-        // JD does not expose unread state through AX, including for the active
-        // row. Use the same screenshot badge evidence as every other row.
-        "unread": redPixels >= 8,
-        "unreadEvidence": redPixels,
-        "evidenceAvailable": evidence != nil,
-      ]]
+            let frame = node.frame,
+            frame.minX >= windowFrame.minX,
+            frame.maxX <= windowFrame.minX + windowFrame.width * 0.35,
+            frame.minY >= windowFrame.minY + 180,
+            frame.maxY <= windowFrame.maxY - 30,
+            frame.width >= 140, frame.width <= 360,
+            frame.height >= 35, frame.height <= 100,
+            let customer = customerIDInRow(
+              frame: frame, windowBounds: evidence.bounds, image: evidence.image)
+      else { return nil }
+      return (customer, frame)
     }
     var seen = Set<String>()
-    let unique = groups.filter { seen.insert($0.0).inserted }
+    let unique = customerGroups.filter { seen.insert($0.0).inserted }
     return unique.map { customer, frame in
-      let redPixels = evidence.map { unreadRedPixels(
-        frame: frame, windowBounds: $0.bounds, image: $0.image) } ?? 0
+      let redPixels = unreadRedPixels(
+        frame: frame, windowBounds: evidence.bounds, image: evidence.image)
       return [
         "customer": customer,
         "unread": redPixels >= 8,
         "unreadEvidence": redPixels,
-        "evidenceAvailable": evidence != nil,
+        "evidenceAvailable": true,
       ]
     }
   }
@@ -1326,10 +1354,16 @@ final class QianniuAXCollector {
         finish(["opened": true, "customer": expected, "method": "already_active"])
         return
       }
-      let candidates = scoped.filter {
-        $0.role == kAXGroupRole as String && $0.title == expected &&
-          $0.actions.contains(kAXPressAction as String) &&
-          ($0.frame?.width ?? 0) >= 100 && ($0.frame?.height ?? 0) >= 30
+      let evidence = unreadScreenshot(pid: pid)
+      let candidates = scoped.filter { node in
+        guard node.role == kAXGroupRole as String,
+              node.actions.contains(kAXPressAction as String),
+              let frame = node.frame,
+              let evidence,
+              let customer = customerIDInRow(
+                frame: frame, windowBounds: evidence.bounds, image: evidence.image)
+        else { return false }
+        return customer.caseInsensitiveCompare(expected) == .orderedSame
       }
       guard let target = candidates.min(by: {
         ($0.frame?.minX ?? .greatestFiniteMagnitude) <
@@ -1385,13 +1419,18 @@ final class QianniuAXCollector {
       // Qianniu's embedded web view sometimes advertises AXPress but ignores it.
       // Fall back to one click on the already identity-matched sidebar row, then
       // verify the active customer again before OCR is allowed to continue.
-      guard allowActivation, let frame = target.frame else {
+      guard let frame = target.frame else {
         finish(["error": "conversation_verification_failed",
-                "message": "Qianniu ignored the background AXPress for \(expected); guarded foreground clicking is disabled for passive monitoring."])
+                "message": "Qianniu ignored AXPress for \(expected), and the verified sidebar row had no clickable frame."])
         return
       }
-      _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-      usleep(150_000)
+      // Reaching this point proves either activation was explicitly allowed or
+      // Qianniu was already frontmost. Passive monitoring may click a verified
+      // row only in the latter case; it still never steals focus.
+      if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+        usleep(150_000)
+      }
       let point = CGPoint(x: frame.midX, y: frame.midY)
       guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
                                mouseCursorPosition: point, mouseButton: .left),
