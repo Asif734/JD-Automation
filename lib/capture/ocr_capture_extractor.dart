@@ -103,6 +103,10 @@ class OcrCaptureExtractor {
       if (bodies.isEmpty) continue;
       final body = _assembleBubbleText(bodies);
       if (body.isEmpty) continue;
+      // The JD transfer summary can be visually merged into the last customer
+      // bubble by OCR. It is interface metadata, not a new customer request.
+      // The caller handles the transfer separately by sending one welcome.
+      if (transferNoticeVisible && _isTransferContextBody(body)) continue;
       final timestamp = _timestamp.firstMatch(currentSender.text)?.group(0) ??
           observations
               .where((item) =>
@@ -305,6 +309,9 @@ class OcrCaptureExtractor {
         RegExp(r'(您的)?同事.*将客户')
             .hasMatch(value.replaceAll(RegExp(r'\s+'), '')) ||
         value.contains('转接给您') ||
+        value.contains('上次会话小结') ||
+        RegExp(r'用户诉求[:：]?.*转接').hasMatch(value) ||
+        RegExp(r'^(商品sku|咨询轨迹|客服方案|承诺项)[:：]').hasMatch(value.trim()) ||
         _timestamp.hasMatch(value) ||
         _sidebarRecency.hasMatch(value.trim()) ||
         lower.contains('已读') ||
@@ -313,6 +320,11 @@ class OcrCaptureExtractor {
         lower.contains('加普威旗舰店') ||
         lower == '客服' ||
         lower == '营销';
+  }
+
+  bool _isTransferContextBody(String value) {
+    final compact = value.replaceAll(RegExp(r'\s+'), '');
+    return RegExp(r'(?:请你)?转给子账号|转接给您|上次会话小结|用户诉求[:：]?.*转接').hasMatch(compact);
   }
 
   bool _isSellerIdentity(String value) {

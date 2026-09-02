@@ -73,6 +73,54 @@ void main() {
     expect(result.capture, isNull);
   });
 
+  test('does not save a transfer summary merged into a customer bubble', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 16:57:00',
+            confidence: 1,
+            x: .22,
+            y: .30,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: '请你转给子账号小甘 Grozziie 您好老板',
+            confidence: 1,
+            x: .24,
+            y: .34,
+            width: .28,
+            height: .02),
+        OcrObservation(
+            text: '上次会话小结',
+            confidence: 1,
+            x: .25,
+            y: .38,
+            width: .12,
+            height: .02),
+        OcrObservation(
+            text: '用户诉求：催促转接',
+            confidence: 1,
+            x: .25,
+            y: .42,
+            width: .16,
+            height: .02),
+      ],
+    );
+
+    final result = const OcrCaptureExtractor().analyze(inspection);
+
+    expect(result.transferNoticeVisible, isTrue);
+    expect(result.capture, isNull);
+  });
+
   test('extracts latest incoming message for full customer identity', () {
     final inspection = OcrInspection(
       image: Uint8List(0),

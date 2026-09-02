@@ -52,6 +52,92 @@ bool hasProductCatalogIntent(String text) {
   return asksAboutProducts && productContext;
 }
 
+List<Map<String, dynamic>> latestCustomerTurn(
+    List<Map<String, dynamic>> messages) {
+  final reversed = <Map<String, dynamic>>[];
+  var foundIncoming = false;
+  for (final message in messages.reversed) {
+    final direction = message['direction']?.toString();
+    if (direction == 'incoming') {
+      foundIncoming = true;
+      reversed.add(message);
+      continue;
+    }
+    if (foundIncoming && direction == 'outgoing') break;
+  }
+  return reversed.reversed.toList(growable: false);
+}
+
+String buildTurnScopedRetrievalQuery(List<Map<String, dynamic>> messages) =>
+    latestCustomerTurn(messages)
+        .map((message) => message['body']?.toString().trim() ?? '')
+        .where((body) =>
+            body.isNotEmpty && !body.startsWith('[Customer sent an image'))
+        .join('\n');
+
+Set<String> explicitProductModels(String text) =>
+    RegExp(r'\b[a-z]{1,5}[\s-]?\d{2,5}[a-z]{0,3}\b', caseSensitive: false)
+        .allMatches(text)
+        .map((match) =>
+            match.group(0)!.toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
+        .toSet();
+
+bool resetsPreviousProductContext(
+    String latestText, String earlierCustomerText) {
+  final normalized = latestText.toLowerCase();
+  if (RegExp(
+          r'\b(not (?:this|that|the|an?)|different product|another product|other product|instead|actually)\b|不是|并非|不同的产品|另一个产品|其他产品|换(?:一个|款)')
+      .hasMatch(normalized)) {
+    return true;
+  }
+  final latestModels = explicitProductModels(latestText);
+  if (latestModels.isEmpty) return false;
+  final earlierModels = explicitProductModels(earlierCustomerText);
+  return earlierModels.isNotEmpty &&
+      latestModels.difference(earlierModels).isNotEmpty;
+}
+
+List<Map<String, Object?>> filterKnowledgeForLatestProduct(
+  List<Map<String, Object?>> records,
+  String latestText,
+) {
+  final normalized = latestText.toLowerCase();
+  final models = explicitProductModels(latestText);
+  final portablePrinter = RegExp(
+          r'\b(portable|thermal|label)\s*(?:printer)?\b|便携(?:式)?打印机|热敏打印机|标签打印机')
+      .hasMatch(normalized);
+  final rejectsAttendance =
+      RegExp(r'\bnot\b[^.!?]{0,30}\battendance\b|不是[^。！？]{0,20}(?:考勤机|打卡机)')
+          .hasMatch(normalized);
+  if (models.isEmpty && !portablePrinter && !rejectsAttendance) return records;
+
+  return records.where((record) {
+    final recordModels = (record['models'] as List<Object?>? ?? const [])
+        .map((value) =>
+            value.toString().toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
+        .where((value) => value.isNotEmpty)
+        .toSet();
+    if (models.isNotEmpty &&
+        recordModels.isNotEmpty &&
+        recordModels.intersection(models).isEmpty) {
+      return false;
+    }
+    if (portablePrinter || rejectsAttendance) {
+      final recordText = [
+        record['product_line'],
+        record['intent'],
+        record['issue'],
+        record['id'],
+        ...recordModels,
+      ].whereType<Object>().join(' ').toLowerCase();
+      if (RegExp(r'attendance|paper.?card|考勤|打卡|m880').hasMatch(recordText)) {
+        return false;
+      }
+    }
+    return true;
+  }).toList(growable: false);
+}
+
 /// Counts clarification items already asked by generated replies in the
 /// current topic. OCR copies of sent messages are ignored. A normal generated
 /// answer starts a fresh topic budget.
@@ -190,30 +276,29 @@ class CodexReplyService {
     final recent = rawMessages.length <= 5
         ? rawMessages
         : rawMessages.sublist(rawMessages.length - 5);
-    final retrievalWindow = rawMessages.length <= 15
-        ? rawMessages
-        : rawMessages.sublist(rawMessages.length - 15);
     if (!recent.any((message) => message['direction'] == 'incoming')) {
       throw const CodexReplyException(
           'No incoming customer message is available.');
     }
-    final currentCustomerTurn = <Map<String, dynamic>>[];
-    for (final message in recent.reversed) {
-      if (message['direction'] == 'outgoing') break;
-      if (message['direction'] == 'incoming') {
-        currentCustomerTurn.add(message);
-      }
-    }
-    final latestCustomerText = recent.reversed
-        .where((message) => message['direction'] == 'incoming')
-        .map((message) => message['body']?.toString() ?? '')
-        .firstWhere((body) => body.isNotEmpty, orElse: () => '');
+    final currentCustomerTurn = latestCustomerTurn(rawMessages);
+    final latestCustomerMessage = currentCustomerTurn.lastWhere(
+        (message) => (message['body']?.toString() ?? '').isNotEmpty,
+        orElse: () => currentCustomerTurn.last);
+    final latestCustomerText = latestCustomerMessage['body']?.toString() ?? '';
     final productPhotoRequested = isProductPhotoRequest(latestCustomerText);
-    final productContext = retrievalWindow
+    final currentTurnText = currentCustomerTurn
         .map((message) => message['body']?.toString() ?? '')
         .where((body) => body.isNotEmpty)
         .join('\n');
-    final productCatalogRequested = hasProductCatalogIntent(productContext);
+    final productCatalogRequested = hasProductCatalogIntent(currentTurnText);
+    final earlierCustomerText = rawMessages
+        .take(rawMessages.length - currentCustomerTurn.length)
+        .where((message) => message['direction'] == 'incoming')
+        .map((message) => message['body']?.toString() ?? '')
+        .where((body) => body.isNotEmpty)
+        .join('\n');
+    final productContextReset =
+        resetsPreviousProductContext(currentTurnText, earlierCustomerText);
     final clarificationCount = clarificationQuestionsUsed(rawMessages);
     final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
     final images = <String>{};
@@ -238,20 +323,17 @@ class CodexReplyService {
       if (fastReply != null) return fastReply;
     }
 
-    // Retrieval must retain established product/model/media intent. Short
-    // follow-ups such as "both" or "send the comparison photo" are otherwise
-    // meaningless when searched without the supplied five-message window.
-    final customerQuery = retrievalWindow
-        .map((message) => message['body']?.toString() ?? '')
-        .where((body) =>
-            body.isNotEmpty && !body.startsWith('[Customer sent an image'))
-        .join('\n');
+    // Retrieval is grounded only in the current customer turn. Generated
+    // replies must never feed their own product names back into future search.
+    final customerQuery = buildTurnScopedRetrievalQuery(rawMessages);
     final retriever = LocalKnowledgeRetriever(knowledgeDirectory);
-    final retrievedRecords = await retriever.retrieve(
+    final rawRetrievedRecords = await retriever.retrieve(
         customerQuery.isEmpty
             ? 'customer product image identification'
             : customerQuery,
         limit: 5);
+    final retrievedRecords =
+        filterKnowledgeForLatestProduct(rawRetrievedRecords, currentTurnText);
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
     const knowledgeMedia = <Map<String, Object?>>[];
@@ -260,11 +342,14 @@ class CodexReplyService {
       'task': 'Generate one review-only customer-service reply.',
       'knowledge_directory': knowledgeDirectory.absolute.path,
       'user_id': conversation.userId,
-      'latest_message': recent.last,
-      'previous_context': recent.length == 1
+      'latest_message': latestCustomerMessage,
+      'previous_context': productContextReset || recent.length == 1
           ? const <Object?>[]
           : recent.sublist(0, recent.length - 1),
-      'conversation': recent,
+      'conversation': productContextReset ? currentCustomerTurn : recent,
+      'product_context_reset': productContextReset,
+      'explicit_product_models':
+          explicitProductModels(currentTurnText).toList(growable: false),
       'retrieved_knowledge_records': retrievedRecords,
       'approved_knowledge_media': knowledgeMedia,
       'attached_image_paths': images.toList(growable: false),
@@ -276,6 +361,9 @@ class CodexReplyService {
         'Be polite, concise, and answer the latest message in the customer’s language.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Do not invent product specifications, availability, or policies.',
+        'Treat the latest customer-stated product or model as authoritative. Never continue referencing an older product after the customer corrects or changes it.',
+        if (productContextReset)
+          'The customer changed or corrected the product context. Ignore every older product and model; use only the current customer turn and matching retrieved records.',
         if (clarificationBudget > 0)
           'You may ask at most $clarificationBudget more decisive clarification question(s) for this topic.',
         if (clarificationBudget == 0)

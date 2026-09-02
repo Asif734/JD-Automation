@@ -226,6 +226,106 @@ void main() {
     expect(draft, isNull);
   });
 
+  test('routes a closing thank-you without retrieving old product context', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'I have an M880 attendance machine.'
+      },
+      <String, dynamic>{
+        'direction': 'outgoing',
+        'body': 'Here are the M880 instructions.'
+      },
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'great, love your support'
+      },
+    ]);
+
+    expect(draft, isNotNull);
+    expect(draft!.reply, "You're very welcome! I'm glad I could help.");
+    expect(draft.usedRecordIds, ['intent:thanks']);
+    expect(draft.reply, isNot(contains('M880')));
+  });
+
+  test('routes a transferred-account summary to the standard welcome', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': '请你转给子账号小甘 Grozziie 您好老板 上次会话小结 '
+            '用户诉求：催促转接 商品sku:10228712869040 咨询轨迹：查看72h内咨询轨迹',
+      },
+    ]);
+
+    expect(draft, isNotNull);
+    expect(draft!.reply, LocalReplyRouter.transferWelcome);
+    expect(draft.usedRecordIds, ['intent:transfer_welcome']);
+    expect(draft.reply, isNot(contains('人工')));
+    expect(draft.reply, isNot(contains('human')));
+  });
+
+  test('retrieval query contains only the current customer turn', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'I have an M880 attendance machine.'},
+      {
+        'direction': 'outgoing',
+        'body': 'Use these M880 attendance instructions.'
+      },
+      {
+        'direction': 'incoming',
+        'body': 'This is a portable printer, not an attendance machine.'
+      },
+      {'direction': 'incoming', 'body': 'The model is TP879.'},
+    ];
+
+    expect(buildTurnScopedRetrievalQuery(messages),
+        'This is a portable printer, not an attendance machine.\nThe model is TP879.');
+    expect(buildTurnScopedRetrievalQuery(messages), isNot(contains('M880')));
+  });
+
+  test('detects an explicit product correction and model replacement', () {
+    expect(
+        resetsPreviousProductContext(
+          'This is a portable printer, not an attendance machine. Model TP879.',
+          'The machine is M880.',
+        ),
+        isTrue);
+    expect(explicitProductModels('Model TP879.'), {'tp879'});
+  });
+
+  test('filters conflicting attendance knowledge after printer correction', () {
+    final filtered = filterKnowledgeForLatestProduct(
+      <Map<String, Object?>>[
+        {
+          'id': 'attendance_product_selling_points',
+          'product_line': 'attendance',
+          'models': ['M880', 'M880D'],
+          'issue': 'Paper-card attendance machine',
+        },
+        {
+          'id': 'portable_printer_tp879',
+          'product_line': 'portable printer',
+          'models': ['TP879'],
+          'issue': 'Open the paper cover',
+        },
+        {
+          'id': 'global_refund_return_high_risk',
+          'product_line': 'global',
+          'models': <String>[],
+          'issue': 'Refund policy',
+        },
+      ],
+      'This is a portable printer, not an attendance machine. Model TP879.',
+    );
+
+    expect(filtered.map((record) => record['id']),
+        ['portable_printer_tp879', 'global_refund_return_high_risk']);
+  });
+
+  test('catalog intent does not persist into a later courtesy turn', () {
+    expect(hasProductCatalogIntent('great, love your support'), isFalse);
+  });
+
   test('retrieves compact curated knowledge before Codex', () async {
     final projectRoot = Directory.current;
     final retriever = LocalKnowledgeRetriever(

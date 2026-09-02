@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 
-import 'backend/rag_backend_client.dart';
 import 'capture/capture_coordinator.dart';
 import 'capture/ocr_capture_extractor.dart';
 import 'capture/ocr_image_candidate_selector.dart';
@@ -26,8 +25,17 @@ class JdAutomationApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'JD Automation',
+        debugShowCheckedModeBanner: false,
         theme: ThemeData(
-            colorSchemeSeed: const Color(0xfff26b21), useMaterial3: true),
+          colorSchemeSeed: const Color(0xfff26b21),
+          useMaterial3: true,
+          scaffoldBackgroundColor: const Color(0xfffaf8f6),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+          ),
+        ),
         home: const CaptureHome(),
       );
 }
@@ -46,24 +54,22 @@ class _CaptureHomeState extends State<CaptureHome> {
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
-  late final RagBackendClient _backend;
   StreamSubscription? _updateSubscription;
   StreamSubscription? _diagnosticSubscription;
   List<ConversationSummary> _conversations = const [];
   Map<String, Object?> _status = const {};
   String _diagnostics = 'No AX inspection yet.';
   Object? _error;
-  BackendHealth? _backendHealth;
   Map<String, HumanReviewTicket> _tickets = const {};
   OcrInspection? _ocrInspection;
-  bool _ocrLoading = false;
   bool _sending = false;
   bool _autoCaptureRunning = false;
   bool _autoCaptureBusy = false;
   Timer? _autoCaptureTimer;
   final Set<String> _draftQueue = {};
-  bool _draftWorkerRunning = false;
-  String? _activeDraftUser;
+  static const int _maxConcurrentDraftWorkers = 4;
+  final Set<String> _activeDraftUsers = {};
+  Future<void> _sendTail = Future<void>.value();
   final Map<String, int> _processingUnreadEvidence = {};
   final Map<String, int> _handledUnreadEvidence = {};
   final Set<String> _visibleTransferWelcomes = {};
@@ -72,7 +78,6 @@ class _CaptureHomeState extends State<CaptureHome> {
   @override
   void initState() {
     super.initState();
-    _backend = RagBackendClient();
     if (Platform.isMacOS) {
       _adapter = MacOSCaptureAdapter();
       _database = CaptureDatabase();
@@ -89,17 +94,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             _diagnostics = const JsonEncoder.withIndent('  ').convert(value)),
       );
       _refreshStatus();
-      _refreshBackendHealth();
       _refreshTickets();
-    }
-  }
-
-  Future<void> _refreshBackendHealth() async {
-    try {
-      final health = await _backend.health();
-      if (mounted) setState(() => _backendHealth = health);
-    } catch (_) {
-      if (mounted) setState(() => _backendHealth = null);
     }
   }
 
@@ -219,7 +214,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           ? rows
               .where((row) =>
                   row.unread &&
-                  _activeDraftUser != row.customer &&
+                  !_activeDraftUsers.contains(row.customer) &&
                   !_draftQueue.contains(row.customer) &&
                   _handledUnreadEvidence[row.customer] != row.unreadEvidence)
               .toList(growable: false)
@@ -264,7 +259,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             }
             if (await _database.hasPendingUnanswered(activeCustomer)) {
               _draftQueue.add(activeCustomer);
-              unawaited(_runDraftWorker());
+              _runDraftWorkers();
             }
             if (insertedFromActiveChat > 0) await _coordinator.refresh();
           }
@@ -323,7 +318,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           // reaching Codex.
           if (await _database.hasPendingUnanswered(customer)) {
             _draftQueue.add(customer);
-            unawaited(_runDraftWorker());
+            _runDraftWorkers();
           }
 
           // Never scroll into history. Only the current bottom viewport may
@@ -408,25 +403,24 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
   }
 
-  Future<void> _runDraftWorker() async {
-    if (_draftWorkerRunning) return;
-    _draftWorkerRunning = true;
+  void _runDraftWorkers() {
+    while (_activeDraftUsers.length < _maxConcurrentDraftWorkers &&
+        _draftQueue.isNotEmpty) {
+      final userId = _draftQueue.first;
+      _draftQueue.remove(userId);
+      if (!_activeDraftUsers.add(userId)) continue;
+      unawaited(_runDraftWorker(userId));
+    }
+  }
+
+  Future<void> _runDraftWorker(String userId) async {
     try {
-      while (_draftQueue.isNotEmpty) {
-        final userId = _draftQueue.first;
-        _draftQueue.remove(userId);
-        _activeDraftUser = userId;
-        try {
-          await _processDraftUser(userId);
-        } finally {
-          if (_activeDraftUser == userId) _activeDraftUser = null;
-        }
-      }
+      await _processDraftUser(userId);
     } catch (error) {
       if (mounted) setState(() => _error = error);
     } finally {
-      _draftWorkerRunning = false;
-      if (_draftQueue.isNotEmpty) unawaited(_runDraftWorker());
+      _activeDraftUsers.remove(userId);
+      _runDraftWorkers();
     }
   }
 
@@ -476,6 +470,18 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<bool> _sendAutomatically(String userId, AiDraft draft) async {
+    final previousSend = _sendTail;
+    final releaseSend = Completer<void>();
+    _sendTail = releaseSend.future;
+    await previousSend;
+    try {
+      return await _sendAutomaticallyUnlocked(userId, draft);
+    } finally {
+      releaseSend.complete();
+    }
+  }
+
+  Future<bool> _sendAutomaticallyUnlocked(String userId, AiDraft draft) async {
     if (await _database.isHumanContacting(userId)) return false;
     if (mounted) setState(() => _sending = true);
     try {
@@ -671,23 +677,6 @@ class _CaptureHomeState extends State<CaptureHome> {
     );
   }
 
-  Future<void> _loadDemoData() async {
-    try {
-      await _database.seedDemoData();
-      await _coordinator.refresh();
-      final root = await _database.storageRoot;
-      if (mounted) {
-        setState(() {
-          _ocrInspection = null;
-          _diagnostics =
-              'Demo data created.\n\nJSON: ${root.path}/<user_id>.json\nMedia: ${root.path}/media/<user_id>/\nSQLite pending queue: ${root.path}/jd_automation.sqlite3';
-        });
-      }
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
-    }
-  }
-
   Future<void> _inspect() async {
     try {
       final result = await _adapter.inspectTree();
@@ -697,133 +686,12 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
   }
 
-  Future<void> _inspectOcr({bool chooseWindow = false}) async {
-    setState(() {
-      _ocrLoading = true;
-      _error = null;
-    });
-    try {
-      final windows = await _adapter.listOcrWindows();
-      if (windows.isEmpty) {
-        throw StateError(
-            'No visible JD 咚咚 windows found. Open the customer-service window and retry.');
-      }
-      // CGWindowList is ordered front-to-back. The Qianniu reception/message
-      // window floats in front of the main workbench, so it is the safe default.
-      final selected = chooseWindow && windows.length > 1
-          ? await _selectOcrWindow(windows)
-          : windows.first;
-      if (selected == null) return;
-      final inspection = await _adapter.inspectOcr(windowId: selected.windowId);
-      final extraction = const OcrCaptureExtractor().analyze(inspection);
-      final capture = await _captureWithVisibleMedia(
-        inspection,
-        extraction,
-        allowUnlabeledLatestImage: true,
-      );
-      var outcome = 'OCR did not save a message: ${extraction.reason}; '
-          '$_visibleMediaTrace.';
-      if (capture != null) {
-        final inserted = await _database.saveCapture(capture);
-        await _coordinator.refresh();
-        final userId = capture.customerExternalId ?? capture.customerName;
-        final unanswered = await _database.hasPendingUnanswered(userId);
-        if (!unanswered) {
-          outcome = 'OCR completed. The latest message for '
-              '${capture.customerName} is not awaiting a reply. '
-              '${inserted == 0 ? 'No duplicate was added.' : 'Newly observed seller activity was saved without generating a draft.'}';
-        } else {
-          final pending = await _database.conversations();
-          final conversation =
-              pending.firstWhere((item) => item.userId == userId);
-          final service = await CodexReplyService.discover(_database);
-          final draft = await service.generate(
-              conversation: conversation, database: _database);
-          final saved = await _database.saveDraft(conversation.id, draft);
-          if (saved == 0 || await _database.isHumanContacting(userId)) {
-            outcome =
-                'The reply became ineligible while it was generating. Nothing was sent.';
-            if (mounted) {
-              setState(() {
-                _ocrInspection = inspection;
-                _diagnostics = outcome;
-              });
-            }
-            return;
-          }
-          final needsHuman = draftRequiresHumanReview(draft);
-          if (needsHuman) {
-            await _database.createHumanReviewTicket(
-              userId: capture.customerName,
-              customerRequest: capture.messages.last.body,
-              reason: draftHumanReviewReason(draft),
-            );
-            await _refreshTickets();
-            if (draft.attachments.isEmpty) {
-              final sent = await _sendAutomatically(userId, draft);
-              outcome = sent
-                  ? 'Created an open human-review ticket and automatically sent the Codex acknowledgement. AI remains active until Contacting is clicked.'
-                  : 'The ticket remains open, but Contacting was clicked before the acknowledgement could be sent.';
-            } else {
-              outcome =
-                  'Created the human-review ticket, but its reply includes media and could not be auto-sent safely.';
-            }
-          } else {
-            final sent = await _sendAutomatically(userId, draft);
-            outcome = sent
-                ? 'Saved the customer message and automatically sent a verified ${draft.model} reply to ${capture.customerName}.'
-                : 'Human takeover started before sending. Nothing was sent.';
-          }
-          await _coordinator.refresh();
-        }
-      }
-      if (mounted) {
-        setState(() {
-          _ocrInspection = inspection;
-          _diagnostics = outcome;
-        });
-      }
-    } on PlatformException catch (error) {
-      if (error.code == 'screen_recording_not_allowed') {
-        await _adapter.requestScreenRecording();
-      }
-      if (mounted) setState(() => _error = error);
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
-    } finally {
-      if (mounted) setState(() => _ocrLoading = false);
-    }
-  }
-
-  Future<OcrWindowInfo?> _selectOcrWindow(List<OcrWindowInfo> windows) async {
-    return showDialog<OcrWindowInfo>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('Select JD 咚咚 window to scan'),
-        children: [
-          for (final window in windows)
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, window),
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.chat_outlined),
-                title: Text(
-                    window.title.isEmpty ? 'Untitled JD window' : window.title),
-                subtitle: Text(window.description),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   @override
   void dispose() {
     _autoCaptureTimer?.cancel();
     _updateSubscription?.cancel();
     _diagnosticSubscription?.cancel();
     _adapter.close();
-    _backend.close();
     _database.close();
     super.dispose();
   }
@@ -838,55 +706,52 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     return Scaffold(
       appBar: AppBar(
-        title: const Text('JD Automation'),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Center(
-              child: Tooltip(
-                message: _backendHealth == null
-                    ? 'Backend unavailable'
-                    : '${_backendHealth!.records} knowledge records • ${_backendHealth!.model}',
-                child: Chip(
-                  avatar: Icon(Icons.circle,
-                      size: 11,
-                      color: _backendHealth?.available == true
-                          ? Colors.green
-                          : Colors.red),
-                  label: Text(_backendHealth?.available == true
-                      ? 'AI backend ready'
-                      : 'AI backend offline'),
-                ),
-              ),
+        toolbarHeight: 68,
+        titleSpacing: 20,
+        title: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              radius: 18,
+              child: Icon(Icons.support_agent_rounded, size: 21),
             ),
-          ),
-          TextButton(
-              onPressed: _refreshStatus, child: const Text('Refresh status')),
-          TextButton(onPressed: _inspect, child: const Text('Inspect AX tree')),
-          TextButton.icon(
-            onPressed: _ocrLoading ? null : () => _inspectOcr(),
-            icon: _ocrLoading
-                ? const SizedBox.square(
-                    dimension: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.document_scanner_outlined),
-            label: Text(_ocrLoading ? 'Scanning…' : 'Inspect OCR'),
+            SizedBox(width: 12),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('JD Automation',
+                    style:
+                        TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
+                Text('Customer communication console',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        color: Colors.black54)),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh connection status',
+            onPressed: _refreshStatus,
+            icon: const Icon(Icons.refresh_rounded),
           ),
           IconButton(
-            tooltip: 'Choose a different JD window',
-            onPressed:
-                _ocrLoading ? null : () => _inspectOcr(chooseWindow: true),
-            icon: const Icon(Icons.filter_none),
+            tooltip: 'Accessibility diagnostics',
+            onPressed: _inspect,
+            icon: const Icon(Icons.troubleshoot_rounded),
           ),
-          TextButton(
-            onPressed: _loadDemoData,
-            child: const Text('Load demo'),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: _start,
+            icon: Icon(_autoCaptureRunning
+                ? Icons.stop_circle_outlined
+                : Icons.play_circle_outline_rounded),
+            label: Text(
+                _autoCaptureRunning ? 'Stop automation' : 'Start automation'),
           ),
-          FilledButton(
-              onPressed: _start,
-              child:
-                  Text(_autoCaptureRunning ? 'Stop capture' : 'Start capture')),
-          const SizedBox(width: 12),
+          const SizedBox(width: 20),
         ],
       ),
       body: Row(children: [
@@ -895,9 +760,59 @@ class _CaptureHomeState extends State<CaptureHome> {
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(
-                  'PID: ${_status['pid'] ?? 'not running'}  •  Accessibility: ${_status['trusted'] == true ? 'allowed' : 'not allowed'}'),
+              padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _status['trusted'] == true
+                      ? Colors.green.withValues(alpha: 0.08)
+                      : Theme.of(context)
+                          .colorScheme
+                          .errorContainer
+                          .withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: _status['trusted'] == true
+                        ? Colors.green.withValues(alpha: 0.25)
+                        : Theme.of(context).colorScheme.error.withValues(
+                              alpha: 0.20,
+                            ),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      _status['trusted'] == true
+                          ? Icons.check_circle_rounded
+                          : Icons.error_outline_rounded,
+                      color: _status['trusted'] == true
+                          ? Colors.green.shade700
+                          : Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _status['trusted'] == true
+                                ? 'JD connection ready'
+                                : 'Access required',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _status['trusted'] == true
+                                ? 'Automation can monitor conversations'
+                                : 'Allow Accessibility to begin monitoring',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
             if (_status['trusted'] != true)
               Padding(
@@ -916,10 +831,18 @@ class _CaptureHomeState extends State<CaptureHome> {
                   child: Text('Error: $_error',
                       style: const TextStyle(color: Colors.red))),
             const Divider(),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(12, 4, 12, 4),
-              child: Text('Human review',
-                  style: TextStyle(fontWeight: FontWeight.w700)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text('Human review',
+                        style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                  if (_tickets.isNotEmpty)
+                    Badge(label: Text('${_tickets.length}')),
+                ],
+              ),
             ),
             if (_tickets.isEmpty)
               const Padding(
