@@ -394,6 +394,16 @@ class CaptureDatabase {
     return true;
   }
 
+  Future<String?> pendingMessageId(String userId) async {
+    final db = await database;
+    final rows = await db.query('pending_customers',
+        columns: ['newest_message_id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+        limit: 1);
+    return rows.isEmpty ? null : rows.first['newest_message_id']?.toString();
+  }
+
   /// Saves an unsent Codex suggestion in transient SQLite, then removes the
   /// user from the generation queue. JSON is unchanged until an actual send.
   Future<int> saveDraft(int pendingId, AiDraft draft) async {
@@ -423,6 +433,45 @@ class CaptureDatabase {
   }
 
   Future<StoredDraft?> latestDraft(int pendingId) async => null;
+
+  /// Returns the oldest generated reply only when no earlier customer is
+  /// still waiting for generation. This preserves first-arrival delivery
+  /// order while allowing later Codex jobs to finish in parallel.
+  Future<QueuedDelivery?> nextReadyDelivery() async {
+    final db = await database;
+    final pending = await db.query('pending_customers',
+        columns: ['id'], orderBy: 'id ASC', limit: 1);
+    final generated =
+        await db.query('generated_drafts', orderBy: 'pending_id ASC', limit: 1);
+    if (generated.isEmpty) return null;
+    final row = generated.first;
+    final pendingId = row['pending_id']! as int;
+    if (pending.isNotEmpty && (pending.first['id']! as int) < pendingId) {
+      return null;
+    }
+    final raw = jsonDecode(row['raw_json']! as String) as Map<String, dynamic>;
+    return QueuedDelivery(
+      pendingId: pendingId,
+      userId: row['user_id']! as String,
+      draft: AiDraft.fromJson(raw, mediaBaseUrl: Uri()),
+    );
+  }
+
+  /// Removes an unrecoverable queue item so it cannot permanently block every
+  /// later customer. Durable captured conversation history is preserved.
+  Future<void> abandonPendingCustomer(String userId) async {
+    final db = await database;
+    await db
+        .delete('pending_customers', where: 'user_id = ?', whereArgs: [userId]);
+  }
+
+  /// Automatic sends are never retried after an uncertain click. Discarding
+  /// the transient draft advances FIFO delivery without altering JSON history.
+  Future<void> discardGeneratedDraft(String userId) async {
+    final db = await database;
+    await db
+        .delete('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+  }
 
   Future<List<HumanReviewTicket>> humanReviewTickets() async {
     final db = await database;
@@ -708,6 +757,18 @@ class CaptureDatabase {
     final support = await getApplicationSupportDirectory();
     return Directory(p.join(support.path, 'data'));
   }
+}
+
+class QueuedDelivery {
+  const QueuedDelivery({
+    required this.pendingId,
+    required this.userId,
+    required this.draft,
+  });
+
+  final int pendingId;
+  final String userId;
+  final AiDraft draft;
 }
 
 extension<T> on Iterable<T> {

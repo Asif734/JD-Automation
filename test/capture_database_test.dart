@@ -111,6 +111,140 @@ void main() {
         'sent');
   });
 
+  test('parallel generation preserves first-arrival delivery order', () async {
+    final root = await Directory.systemTemp.createTemp('fifo_delivery_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    CapturedConversation capture(String user, int sequence) =>
+        CapturedConversation(
+          stableKey: 'customer:$user',
+          customerName: user,
+          customerExternalId: user,
+          capturedAt: DateTime.fromMillisecondsSinceEpoch(sequence),
+          messages: [
+            CapturedMessage(
+              stableId: '$user-message',
+              direction: 'incoming',
+              body: 'Message from $user',
+              axPath: 'test',
+            ),
+          ],
+        );
+
+    AiDraft draft(String user) => AiDraft(
+          reply: 'Reply to $user',
+          decision: 'draft',
+          confidence: 1,
+          riskLevel: 'low',
+          model: 'test',
+          usedRecordIds: const [],
+          actions: const [],
+          attachments: const [],
+          rawJson:
+              '{"reply":"Reply to $user","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+        );
+
+    await database.saveCapture(capture('customer-a', 1));
+    await database.saveCapture(capture('customer-b', 2));
+    final pending = await database.conversations();
+    final first = pending.firstWhere((item) => item.userId == 'customer-a');
+    final second = pending.firstWhere((item) => item.userId == 'customer-b');
+
+    // B finishes generation first, but it cannot pass A in the send queue.
+    await database.saveDraft(second.id, draft('customer-b'));
+    expect(await database.nextReadyDelivery(), isNull);
+
+    await database.saveDraft(first.id, draft('customer-a'));
+    final deliveryA = await database.nextReadyDelivery();
+    expect(deliveryA?.userId, 'customer-a');
+    await database.markReplySent(
+        userId: deliveryA!.userId, reply: deliveryA.draft.reply);
+
+    final deliveryB = await database.nextReadyDelivery();
+    expect(deliveryB?.userId, 'customer-b');
+  });
+
+  test('failed earlier generation can be skipped without blocking FIFO',
+      () async {
+    final root = await Directory.systemTemp.createTemp('fifo_failure_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    CapturedConversation capture(String user, int sequence) =>
+        CapturedConversation(
+          stableKey: 'customer:$user',
+          customerName: user,
+          customerExternalId: user,
+          capturedAt: DateTime.fromMillisecondsSinceEpoch(sequence),
+          messages: [
+            CapturedMessage(
+                stableId: '$user-message',
+                direction: 'incoming',
+                body: user,
+                axPath: 'test'),
+          ],
+        );
+    const secondDraft = AiDraft(
+      reply: 'Reply B',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"Reply B","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+
+    await database.saveCapture(capture('customer-a', 1));
+    await database.saveCapture(capture('customer-b', 2));
+    final pending = await database.conversations();
+    final second = pending.firstWhere((item) => item.userId == 'customer-b');
+    await database.saveDraft(second.id, secondDraft);
+    expect(await database.nextReadyDelivery(), isNull);
+
+    await database.abandonPendingCustomer('customer-a');
+    expect((await database.nextReadyDelivery())?.userId, 'customer-b');
+  });
+
+  test('pending message identity changes when a later burst line arrives',
+      () async {
+    final root = await Directory.systemTemp.createTemp('burst_guard_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    CapturedConversation capture(String id, String body, int time) =>
+        CapturedConversation(
+          stableKey: 'customer:burst',
+          customerName: 'burst',
+          customerExternalId: 'burst',
+          capturedAt: DateTime.fromMillisecondsSinceEpoch(time),
+          messages: [
+            CapturedMessage(
+                stableId: id,
+                direction: 'incoming',
+                body: body,
+                axPath: 'test'),
+          ],
+        );
+
+    await database.saveCapture(capture('line-1', 'android', 1));
+    expect(await database.pendingMessageId('burst'), 'line-1');
+
+    await database.saveCapture(capture('line-2', 'over wifi', 2));
+    expect(await database.pendingMessageId('burst'), 'line-2');
+  });
+
   test('human contacting pauses AI and contacted resumes only on next message',
       () async {
     final root = await Directory.systemTemp.createTemp('ticket_state_test_');

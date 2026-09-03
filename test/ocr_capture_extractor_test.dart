@@ -728,7 +728,7 @@ void main() {
     }
   });
 
-  test('removes standalone terminal C30 from Chinese Apple Vision text', () {
+  test('removes every C30 artifact and its trailing control glyph', () {
     final inspection = OcrInspection(
       image: Uint8List(0),
       imageWidth: 2550,
@@ -746,14 +746,14 @@ void main() {
             width: .18,
             height: .02),
         OcrObservation(
-            text: '接下来我们要做的就是将 Grozzie 应用程序与打印机连接起来。',
+            text: '接下来我们 C30 要做的就是将 Grozzie 应用程序与打印机连接起来。',
             confidence: 1,
             x: .22,
             y: .44,
             width: .32,
             height: .02),
         OcrObservation(
-            text: 'C30',
+            text: 'C30 回',
             confidence: .8,
             x: .54,
             y: .44,

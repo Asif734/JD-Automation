@@ -51,6 +51,8 @@ class _CaptureHomeState extends State<CaptureHome> {
   // The persistent PaddleOCR sidecar is fast after warm-up, but its first
   // model initialization can take substantially longer than a native scan.
   static const _captureOperationTimeout = Duration(seconds: 90);
+  static const _scanInterval = Duration(seconds: 2);
+  static const _customerBurstDebounce = Duration(seconds: 3);
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
@@ -62,14 +64,16 @@ class _CaptureHomeState extends State<CaptureHome> {
   Object? _error;
   Map<String, HumanReviewTicket> _tickets = const {};
   OcrInspection? _ocrInspection;
-  bool _sending = false;
   bool _autoCaptureRunning = false;
   bool _autoCaptureBusy = false;
   Timer? _autoCaptureTimer;
+  final Map<String, Timer> _draftDebounceTimers = {};
   final Set<String> _draftQueue = {};
   static const int _maxConcurrentDraftWorkers = 4;
   final Set<String> _activeDraftUsers = {};
-  Future<void> _sendTail = Future<void>.value();
+  Future<void> _jdUiTail = Future<void>.value();
+  bool _deliveryWorkerRunning = false;
+  bool _deliveryRequested = false;
   final Map<String, int> _processingUnreadEvidence = {};
   final Map<String, int> _handledUnreadEvidence = {};
   final Set<String> _visibleTransferWelcomes = {};
@@ -124,6 +128,8 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   Future<void> _markContacting(HumanReviewTicket ticket) async {
     try {
+      _draftDebounceTimers.remove(ticket.conversationId)?.cancel();
+      _draftQueue.remove(ticket.conversationId);
       await _database.markTicketContacting(ticket.id);
       await _coordinator.refresh();
       await _refreshTickets();
@@ -175,16 +181,45 @@ class _CaptureHomeState extends State<CaptureHome> {
       _autoCaptureRunning = true;
       _error = null;
       _diagnostics =
-          'Automatic OCR capture started. Unread rows will be checked every 15 seconds.';
+          'Automatic OCR capture started. The sidebar is checked every 2 seconds; each customer message burst waits for 3 quiet seconds.';
     });
-    _autoCaptureTimer = Timer.periodic(
-        const Duration(seconds: 15), (_) => unawaited(_runAutoCaptureCycle()));
+    _autoCaptureTimer =
+        Timer.periodic(_scanInterval, (_) => unawaited(_runAutoCaptureCycle()));
+    unawaited(_recoverAutomationQueues());
     unawaited(_runAutoCaptureCycle());
   }
 
+  Future<void> _recoverAutomationQueues() async {
+    final pending = await _database.conversations();
+    for (final conversation in pending) {
+      _scheduleDraftGeneration(conversation.userId, newEvidence: true);
+    }
+    _requestDelivery();
+  }
+
+  void _scheduleDraftGeneration(String userId, {required bool newEvidence}) {
+    final existing = _draftDebounceTimers[userId];
+    if (!newEvidence && existing?.isActive == true) return;
+    if (newEvidence) existing?.cancel();
+    if (!newEvidence && _activeDraftUsers.contains(userId)) return;
+    _draftDebounceTimers[userId] = Timer(_customerBurstDebounce, () async {
+      _draftDebounceTimers.remove(userId);
+      if (!await _database.hasPendingUnanswered(userId) ||
+          await _database.isHumanContacting(userId)) {
+        return;
+      }
+      _draftQueue.add(userId);
+      _runDraftWorkers();
+    });
+  }
+
   Future<void> _runAutoCaptureCycle() async {
-    if (!_autoCaptureRunning || _autoCaptureBusy || _sending) return;
+    if (!_autoCaptureRunning || _autoCaptureBusy) return;
     _autoCaptureBusy = true;
+    final previousUiOperation = _jdUiTail;
+    final releaseUiOperation = Completer<void>();
+    _jdUiTail = releaseUiOperation.future;
+    await previousUiOperation;
     final scanStartedAt = DateTime.now();
     if (mounted) {
       setState(() {
@@ -214,8 +249,8 @@ class _CaptureHomeState extends State<CaptureHome> {
           ? rows
               .where((row) =>
                   row.unread &&
-                  !_activeDraftUsers.contains(row.customer) &&
-                  !_draftQueue.contains(row.customer) &&
+                  _processingUnreadEvidence[row.customer] !=
+                      row.unreadEvidence &&
                   _handledUnreadEvidence[row.customer] != row.unreadEvidence)
               .toList(growable: false)
           : const <QianniuConversationRow>[];
@@ -258,8 +293,8 @@ class _CaptureHomeState extends State<CaptureHome> {
               insertedFromActiveChat = await _database.saveCapture(capture);
             }
             if (await _database.hasPendingUnanswered(activeCustomer)) {
-              _draftQueue.add(activeCustomer);
-              _runDraftWorkers();
+              _scheduleDraftGeneration(activeCustomer,
+                  newEvidence: insertedFromActiveChat > 0);
             }
             if (insertedFromActiveChat > 0) await _coordinator.refresh();
           }
@@ -288,7 +323,6 @@ class _CaptureHomeState extends State<CaptureHome> {
         // Human takeover is scoped to one customer. Keep monitoring every
         // other row while leaving this customer's Qianniu chat untouched.
         if (await _database.isHumanContacting(customer)) continue;
-        _processingUnreadEvidence[customer] = row.unreadEvidence;
         try {
           await _adapter
               .openConversation(customer, allowActivation: false)
@@ -310,15 +344,20 @@ class _CaptureHomeState extends State<CaptureHome> {
           final capture = await _captureWithVisibleMedia(inspection, extraction,
                   allowUnlabeledLatestImage: row.unread)
               .timeout(_captureOperationTimeout);
+          var insertedForCustomer = 0;
           if (capture != null) {
-            insertedTotal += await _database.saveCapture(capture);
+            insertedForCustomer = await _database.saveCapture(capture);
+            insertedTotal += insertedForCustomer;
+          }
+          if (capture != null || extraction.transferNoticeVisible) {
+            _processingUnreadEvidence[customer] = row.unreadEvidence;
           }
           // Queue the durable current message immediately. Optional history
           // scrolling must never prevent an already-saved customer turn from
           // reaching Codex.
           if (await _database.hasPendingUnanswered(customer)) {
-            _draftQueue.add(customer);
-            _runDraftWorkers();
+            _scheduleDraftGeneration(customer,
+                newEvidence: insertedForCustomer > 0);
           }
 
           // Never scroll into history. Only the current bottom viewport may
@@ -358,7 +397,9 @@ class _CaptureHomeState extends State<CaptureHome> {
     } catch (error) {
       if (mounted) setState(() => _error = error);
     } finally {
+      releaseUiOperation.complete();
       _autoCaptureBusy = false;
+      _requestDelivery();
     }
   }
 
@@ -384,31 +425,33 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     const welcome =
         'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
-    if (mounted) setState(() => _sending = true);
-    try {
-      await _adapter.sendDraftOnce(
-        expectedCustomer: userId,
-        reply: welcome,
-        mediaPaths: const [],
-      );
-      await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
-      _handledUnreadEvidence[userId] = int.tryParse(eventKey) ?? 0;
-      if (mounted) {
-        setState(() => _diagnostics =
-            'Detected a JD transfer and sent one welcome message to $userId.');
-      }
-      return true;
-    } finally {
-      if (mounted) setState(() => _sending = false);
+    await _adapter.sendDraftOnce(
+      expectedCustomer: userId,
+      reply: welcome,
+      mediaPaths: const [],
+    );
+    await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
+    _handledUnreadEvidence[userId] = int.tryParse(eventKey) ?? 0;
+    if (mounted) {
+      setState(() => _diagnostics =
+          'Detected a JD transfer and sent one welcome message to $userId.');
     }
+    return true;
   }
 
   void _runDraftWorkers() {
     while (_activeDraftUsers.length < _maxConcurrentDraftWorkers &&
         _draftQueue.isNotEmpty) {
-      final userId = _draftQueue.first;
+      String? userId;
+      for (final candidate in _draftQueue) {
+        if (!_activeDraftUsers.contains(candidate)) {
+          userId = candidate;
+          break;
+        }
+      }
+      if (userId == null) break;
       _draftQueue.remove(userId);
-      if (!_activeDraftUsers.add(userId)) continue;
+      _activeDraftUsers.add(userId);
       unawaited(_runDraftWorker(userId));
     }
   }
@@ -417,10 +460,12 @@ class _CaptureHomeState extends State<CaptureHome> {
     try {
       await _processDraftUser(userId);
     } catch (error) {
+      await _database.abandonPendingCustomer(userId);
       if (mounted) setState(() => _error = error);
     } finally {
       _activeDraftUsers.remove(userId);
       _runDraftWorkers();
+      _requestDelivery();
     }
   }
 
@@ -432,9 +477,17 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (matches.isEmpty) return;
     if (!await _database.hasPendingUnanswered(userId)) return;
     final conversation = matches.first;
+    final messageIdAtGenerationStart = await _database.pendingMessageId(userId);
+    if (messageIdAtGenerationStart == null) return;
     final service = await CodexReplyService.discover(_database);
     final draft =
         await service.generate(conversation: conversation, database: _database);
+    // More lines arrived during generation. The customer's debounce timer
+    // owns the newer burst, so this stale result must never be saved or sent.
+    if (await _database.pendingMessageId(userId) !=
+        messageIdAtGenerationStart) {
+      return;
+    }
     final saved = await _database.saveDraft(conversation.id, draft);
     // Contacting or a manually observed seller reply may remove the queue
     // while Codex is generating. Never send a result from that stale turn.
@@ -453,37 +506,62 @@ class _CaptureHomeState extends State<CaptureHome> {
         reason: draftHumanReviewReason(draft),
       );
       await _refreshTickets();
-      if (draft.attachments.isEmpty) {
-        final sent = await _sendAutomatically(userId, draft);
-        if (mounted && sent) {
-          setState(() => _diagnostics =
-              'Created an open human-review ticket and automatically sent the Codex acknowledgement to $userId. AI remains active until Contacting is clicked.');
-        }
-      } else if (mounted) {
+      if (draft.attachments.isNotEmpty && mounted) {
         setState(() => _diagnostics =
             'Human-review acknowledgement for $userId unexpectedly contained media and was not sent.');
       }
-    } else {
-      await _sendAutomatically(userId, draft);
     }
     await _coordinator.refresh();
+    _requestDelivery();
   }
 
-  Future<bool> _sendAutomatically(String userId, AiDraft draft) async {
-    final previousSend = _sendTail;
-    final releaseSend = Completer<void>();
-    _sendTail = releaseSend.future;
-    await previousSend;
+  void _requestDelivery() {
+    _deliveryRequested = true;
+    if (_deliveryWorkerRunning) return;
+    _deliveryWorkerRunning = true;
+    unawaited(_runDeliveryWorker());
+  }
+
+  Future<void> _runDeliveryWorker() async {
     try {
-      return await _sendAutomaticallyUnlocked(userId, draft);
+      do {
+        _deliveryRequested = false;
+        while (true) {
+          final delivery = await _database.nextReadyDelivery();
+          if (delivery == null) break;
+          try {
+            await _withJdUiOperation(() =>
+                _sendAutomaticallyUnlocked(delivery.userId, delivery.draft));
+          } catch (error) {
+            // A send click is never retried because delivery may have occurred
+            // even when JD failed to confirm it. Advance FIFO and surface the
+            // failure for an operator instead of blocking later customers.
+            await _database.discardGeneratedDraft(delivery.userId);
+            if (mounted) setState(() => _error = error);
+          }
+          await _coordinator.refresh();
+        }
+      } while (_deliveryRequested);
     } finally {
-      releaseSend.complete();
+      _deliveryWorkerRunning = false;
+      if (_deliveryRequested) _requestDelivery();
+    }
+  }
+
+  Future<T> _withJdUiOperation<T>(Future<T> Function() operation) async {
+    final previous = _jdUiTail;
+    final release = Completer<void>();
+    _jdUiTail = release.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release.complete();
     }
   }
 
   Future<bool> _sendAutomaticallyUnlocked(String userId, AiDraft draft) async {
     if (await _database.isHumanContacting(userId)) return false;
-    if (mounted) setState(() => _sending = true);
     try {
       // Draft generation is independent from sidebar scanning. Another unread
       // customer may have become visible while Codex was working, so reopen
@@ -520,8 +598,6 @@ class _CaptureHomeState extends State<CaptureHome> {
             'Automatic send to $userId failed. It was not retried to avoid duplicate delivery.');
       }
       rethrow;
-    } finally {
-      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -689,6 +765,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   @override
   void dispose() {
     _autoCaptureTimer?.cancel();
+    for (final timer in _draftDebounceTimers.values) {
+      timer.cancel();
+    }
     _updateSubscription?.cancel();
     _diagnosticSubscription?.cancel();
     _adapter.close();

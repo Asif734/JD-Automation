@@ -222,7 +222,13 @@ class OcrCaptureExtractor {
         .replaceFirstMapped(
             RegExp(r'(^|[\s，。！？；：,.!?;:])D(?:\s*[◎◉○口回□▣])*\s*$'),
             (match) => match.group(1)?.trim() ?? '')
-        .replaceFirst(RegExp(r'(?:^|\s)C30\s*$'), '')
+        // `C30` is a recurring JD/Apple Vision control artifact. It is never
+        // customer content in this integration, so remove every occurrence,
+        // including a control glyph Vision may append to it.
+        .replaceAll(RegExp(r'C30(?:\s*[◎◉○口回□▣])?', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAllMapped(RegExp(r'([\u3400-\u9fff])\s+([\u3400-\u9fff])'),
+            (match) => '${match.group(1)}${match.group(2)}')
         .trim();
     // JD image thumbnails and adjacent status controls are sometimes read as
     // tiny strings such as `◎ 回`, `g 回`, or `•`. These contain no customer
