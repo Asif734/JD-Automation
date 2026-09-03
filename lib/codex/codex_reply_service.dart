@@ -415,11 +415,19 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         throw const CodexReplyException(
             'Codex completed without writing its structured response.');
       }
-      final draft = parseResponse(
-        await output.readAsString(),
-        approvedAttachments: knowledgeMedia,
-        approvedImagePaths: images,
-      );
+      final AiDraft draft;
+      try {
+        draft = parseResponse(
+          await output.readAsString(),
+          approvedAttachments: knowledgeMedia,
+          approvedImagePaths: images,
+        );
+      } on CodexReplyException {
+        // A completed process can still produce malformed or unusably short
+        // output. Never send that output (for example, a lone "1"); use the
+        // same safe response used when the generation deadline is exceeded.
+        return _deadlineFallback(recent, hasImage: images.isNotEmpty);
+      }
       final reviewGuardedDraft = enforceExplicitHumanReviewPolicy(
         draft,
         latestCustomerText,
@@ -554,6 +562,10 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
     final confidence = decoded['confidence'];
     if (reply is! String || reply.trim().isEmpty) {
       throw const CodexReplyException('Codex returned an empty reply.');
+    }
+    if (reply.trim().runes.length < 2) {
+      throw const CodexReplyException(
+          'Codex returned an unusably short reply.');
     }
     if (confidence is! num || confidence < 0 || confidence > 1) {
       throw const CodexReplyException('Codex returned invalid confidence.');

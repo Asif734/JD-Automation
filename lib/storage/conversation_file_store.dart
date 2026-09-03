@@ -51,7 +51,9 @@ class ConversationFileStore {
                 item['direction'] == 'incoming' &&
                 (item['source'] == 'jd_automation' ||
                     item['source'] == 'qianniu_capture') &&
-                _sameBubbleTime(item['sent_at'], message.sentAt));
+                _sameIncomingBubbleTime(item['sent_at'], message.sentAt) &&
+                _sameBubbleContent(
+                    item['body']?.toString() ?? '', message.body));
             if (sameBubbleIndex >= 0) {
               final existing = messages[sameBubbleIndex];
               final existingBody = existing['body']?.toString() ?? '';
@@ -463,6 +465,42 @@ class ConversationFileStore {
     if (stored == null) return false;
     return stored.toUtc().difference(observed.toUtc()).abs() <=
         const Duration(seconds: 3);
+  }
+
+  /// A close timestamp alone does not identify a chat bubble: customers often
+  /// send several separate messages within three seconds. Only coalesce close
+  /// observations when OCR is re-reading the same text or a partial/expanded
+  /// version of that text.
+  bool _sameBubbleContent(String stored, String observed) {
+    final left = _ocrCanonical(stored);
+    final right = _ocrCanonical(observed);
+    if (left.isEmpty || right.isEmpty) return false;
+    if (left == right) return true;
+    final shorter = left.length < right.length ? left : right;
+    final longer = left.length < right.length ? right : left;
+    if (shorter.length >= 3 && longer.contains(shorter)) return true;
+
+    Set<String> tokens(String value) => RegExp(r'[a-z0-9]+|[\u3400-\u9fff]')
+        .allMatches(value.toLowerCase())
+        .map((match) => match.group(0)!)
+        .toSet();
+    final leftTokens = tokens(stored);
+    final rightTokens = tokens(observed);
+    final smallerTokens =
+        leftTokens.length < rightTokens.length ? leftTokens : rightTokens;
+    if (smallerTokens.length < 2) return false;
+    final overlap = leftTokens.intersection(rightTokens).length;
+    return overlap >= 2 && overlap / smallerTokens.length >= 0.66;
+  }
+
+  bool _sameIncomingBubbleTime(Object? storedValue, DateTime? observed) {
+    if (observed == null) return false;
+    final stored = DateTime.tryParse(storedValue?.toString() ?? '');
+    if (stored == null) return false;
+    // JD timestamps identify the bubble to the second. Nearby timestamps are
+    // commonly separate rapid messages and must remain separate.
+    return stored.toUtc().millisecondsSinceEpoch ==
+        observed.toUtc().millisecondsSinceEpoch;
   }
 
   Future<Map<String, Object?>> _readOrCreate({

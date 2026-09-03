@@ -70,6 +70,16 @@ void main() {
         throwsA(isA<CodexReplyException>()));
   });
 
+  test('rejects a one-character reply before it can be sent', () {
+    const response = '''{
+      "reply": "1",
+      "confidence": 0.8,
+      "auto_send_allowed": false
+    }''';
+    expect(() => service.parseResponse(response),
+        throwsA(isA<CodexReplyException>()));
+  });
+
   test('routine clarification cannot raise human review from conflicting flag',
       () {
     final draft = service.parseResponse('''{
