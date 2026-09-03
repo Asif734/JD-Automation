@@ -4,21 +4,16 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import '../domain/capture_models.dart';
-import '../ocr/paddle_ocr_service.dart';
 import 'capture_adapter.dart';
 
 class MacOSCaptureAdapter implements CaptureAdapter {
-  MacOSCaptureAdapter({MethodChannel? channel, PaddleOcrService? paddleOcr})
-      : _channel = channel ?? const MethodChannel(_channelName),
-        _paddleOcr = paddleOcr ?? PaddleOcrService() {
+  MacOSCaptureAdapter({MethodChannel? channel})
+      : _channel = channel ?? const MethodChannel(_channelName) {
     _channel.setMethodCallHandler(_onNativeCall);
   }
 
   static const _channelName = 'com.grozziie.jdAutomation/accessibility';
-  static const _ocrEngine =
-      String.fromEnvironment('JD_OCR_ENGINE', defaultValue: 'paddleocr');
   final MethodChannel _channel;
-  final PaddleOcrService _paddleOcr;
   final _captures = StreamController<CapturedConversation>.broadcast();
   final _diagnostics = StreamController<Map<String, Object?>>.broadcast();
 
@@ -29,7 +24,6 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   Stream<Map<String, Object?>> get diagnostics => _diagnostics.stream;
 
   Future<void> close() async {
-    await _paddleOcr.close();
     await _captures.close();
     await _diagnostics.close();
   }
@@ -68,7 +62,6 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     final value = await _mapCall('inspectOCR', <String, Object?>{
       'windowId': windowId,
       'recognitionLevel': fast ? 'fast' : 'accurate',
-      'ocrEngine': _ocrEngine,
     });
     if (value['error'] case final String code) {
       throw PlatformException(
@@ -76,22 +69,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
         message: value['message'] as String? ?? 'OCR inspection failed.',
       );
     }
-    if (_ocrEngine == 'apple_vision') {
-      return OcrInspection.fromMap(value);
-    }
-    final paddle = await _paddleOcr.recognize(
-      value['pngBase64'] as String? ?? '',
-      imageWidth: (value['imageWidth'] as num?)?.toInt() ?? 0,
-      imageHeight: (value['imageHeight'] as num?)?.toInt() ?? 0,
-    );
-    return OcrInspection.fromMap({
-      ...value,
-      'observations': paddle.observations,
-      'visualRegions': paddle.visualRegions,
-      'recognizedText':
-          paddle.observations.map((item) => item['text']).join('\n'),
-      'ocrEngine': 'paddleocr',
-    });
+    return OcrInspection.fromMap(value);
   }
 
   Future<Map<String, Object?>> sendDraftOnce({

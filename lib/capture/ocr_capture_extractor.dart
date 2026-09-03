@@ -207,7 +207,7 @@ class OcrCaptureExtractor {
     for (final line in lines) {
       line.sort((left, right) => left.x.compareTo(right.x));
       // The sender labels and verified chat-area cutoff already bound this
-      // message. Never stop on vertical gaps: Paddle may return words or
+      // message. Never stop on vertical gaps: OCR may return words or
       // wrapped fragments with unexpectedly separated boxes, and every box
       // inside the sender-bounded region belongs to the same visible turn.
       final text = line.map((item) => item.text.trim()).join(' ').trim();

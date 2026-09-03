@@ -49,8 +49,6 @@ __pycache__/
 htmlcov/
 venv/
 .venv/
-.paddleocr-venv/
-.paddlex-cache/
 env/
 
 # Local application state and customer data

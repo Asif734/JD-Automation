@@ -772,7 +772,7 @@ void main() {
     expect(body, '接下来我们要做的就是将 Grozzie 应用程序与打印机连接起来。');
   });
 
-  test('keeps a three-line purchase request with Paddle-sized line gaps', () {
+  test('keeps a three-line purchase request with separated OCR line gaps', () {
     final inspection = OcrInspection(
       image: Uint8List(0),
       imageWidth: 2550,
@@ -819,7 +819,7 @@ void main() {
         'i am doing well too. i need to buy an attendance machine. what do you suggest?');
   });
 
-  test('joins every Paddle box in a sender-bounded TP732 message', () {
+  test('joins every OCR box in a sender-bounded TP732 message', () {
     final inspection = OcrInspection(
       image: Uint8List(0),
       imageWidth: 2550,

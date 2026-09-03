@@ -22,7 +22,7 @@ void main() {
   tearDown(() => root.delete(recursive: true));
 
   test('uses ephemeral read-only execution and structured output', () {
-    expect(service.timeout, const Duration(seconds: 140));
+    expect(service.timeout, const Duration(seconds: 40));
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],

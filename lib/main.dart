@@ -48,8 +48,7 @@ class CaptureHome extends StatefulWidget {
 }
 
 class _CaptureHomeState extends State<CaptureHome> {
-  // The persistent PaddleOCR sidecar is fast after warm-up, but its first
-  // model initialization can take substantially longer than a native scan.
+  // Covers native window capture, Apple Vision recognition, and JD UI delays.
   static const _captureOperationTimeout = Duration(seconds: 90);
   static const _scanInterval = Duration(seconds: 2);
   static const _customerBurstDebounce = Duration(seconds: 3);
@@ -392,7 +391,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     } on TimeoutException {
       if (mounted) {
         setState(() => _diagnostics =
-            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next fixed 15-second check will retry.');
+            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next 2-second sidebar check will retry.');
       }
     } catch (error) {
       if (mounted) setState(() => _error = error);
@@ -403,9 +402,8 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
   }
 
-  /// Let a newly selected JD conversation settle, then perform one enlarged
-  /// PaddleOCR pass. The sidecar already recognizes the complete conversation
-  /// crop; doing the same expensive inference twice doubled response latency.
+  /// Let a newly selected JD conversation settle, then perform one Apple
+  /// Vision pass over the complete visible conversation.
   Future<OcrInspection> _inspectStableConversation(int windowId) async {
     await Future<void>.delayed(const Duration(milliseconds: 500));
     return _adapter
@@ -444,6 +442,9 @@ class _CaptureHomeState extends State<CaptureHome> {
         _draftQueue.isNotEmpty) {
       String? userId;
       for (final candidate in _draftQueue) {
+        // One customer owns at most one active Codex process. A later turn
+        // from that customer remains queued until the current process exits,
+        // while up to four different customers may generate in parallel.
         if (!_activeDraftUsers.contains(candidate)) {
           userId = candidate;
           break;
@@ -1024,7 +1025,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             const SizedBox(height: 8),
             Text(_ocrInspection == null
                 ? 'Use this output to map roles and paths from the installed JD 咚咚 build. Sending remains guarded by exact customer verification.'
-                : '${_ocrInspection!.observations.length} ${_ocrInspection!.ocrEngine == 'apple_vision' ? 'Apple Vision' : 'PaddleOCR'} text regions • ${_ocrInspection!.imageWidth}×${_ocrInspection!.imageHeight}. Red boxes show ${_ocrInspection!.ocrEngine == 'apple_vision' ? 'Apple Vision' : 'PaddleOCR'} observations.'),
+                : '${_ocrInspection!.observations.length} Apple Vision text regions • ${_ocrInspection!.imageWidth}×${_ocrInspection!.imageHeight}. Red boxes show Apple Vision observations.'),
             const SizedBox(height: 8),
             if (_ocrInspection != null) ...[
               Container(

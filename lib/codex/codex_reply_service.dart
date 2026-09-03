@@ -211,7 +211,7 @@ class CodexReplyService {
     required this.knowledgeDirectory,
     required this.outputSchema,
     this.model = 'gpt-5.6-sol',
-    this.timeout = const Duration(seconds: 140),
+    this.timeout = const Duration(seconds: 40),
     this.enforceProductPhotoReviewPolicy = false,
   });
 

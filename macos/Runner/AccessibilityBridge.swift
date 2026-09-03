@@ -41,7 +41,6 @@ final class AccessibilityBridge {
       ocrInspector.inspect(
         windowID: requestedWindowID,
         recognitionLevel: args?["recognitionLevel"] as? String ?? "accurate",
-        ocrEngine: args?["ocrEngine"] as? String ?? "paddleocr",
         completion: result)
     case "captureImageRegion":
       let args = call.arguments as? [String: Any]
@@ -127,15 +126,14 @@ final class QianniuOCRInspector {
     return windows(pid: pid).map(\.payload)
   }
 
-  func inspect(windowID: CGWindowID?, recognitionLevel: String, ocrEngine: String, completion: @escaping FlutterResult) {
+  func inspect(windowID: CGWindowID?, recognitionLevel: String, completion: @escaping FlutterResult) {
     queue.async { [weak self] in
       guard let self else { return }
       let response: [String: Any]
       do {
         response = try self.captureAndRecognize(
           windowID: windowID,
-          recognitionLevel: recognitionLevel,
-          ocrEngine: ocrEngine)
+          recognitionLevel: recognitionLevel)
       } catch let error as OCRInspectorError {
         response = error.payload
       } catch {
@@ -145,7 +143,7 @@ final class QianniuOCRInspector {
     }
   }
 
-  private func captureAndRecognize(windowID: CGWindowID?, recognitionLevel: String, ocrEngine: String) throws -> [String: Any] {
+  private func captureAndRecognize(windowID: CGWindowID?, recognitionLevel: String) throws -> [String: Any] {
     guard CGPreflightScreenCaptureAccess() else {
       throw OCRInspectorError(
         code: "screen_recording_not_allowed",
@@ -173,8 +171,7 @@ final class QianniuOCRInspector {
 
     var observations: [[String: Any]] = []
     var visualRegions: [[String: Any]] = []
-    if ocrEngine == "apple_vision" {
-      let request = VNRecognizeTextRequest()
+    let request = VNRecognizeTextRequest()
       request.recognitionLevel = recognitionLevel == "fast" ? .fast : .accurate
       request.usesLanguageCorrection = true
       request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
@@ -269,7 +266,7 @@ final class QianniuOCRInspector {
         if abs(leftY - rightY) > 0.01 { return leftY < rightY }
         return ($0["x"] as? Double ?? 0) < ($1["x"] as? Double ?? 0)
       }
-      visualRegions = (rectangles.results ?? []).map { observation -> [String: Any] in
+    visualRegions = (rectangles.results ?? []).map { observation -> [String: Any] in
         let box = observation.boundingBox
         return [
           "x": Double(box.minX),
@@ -278,7 +275,6 @@ final class QianniuOCRInspector {
           "height": Double(box.height),
           "confidence": Double(observation.confidence),
         ]
-      }
     }
 
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
@@ -298,7 +294,7 @@ final class QianniuOCRInspector {
       "observations": observations,
       "visualRegions": visualRegions,
       "recognizedText": observations.compactMap { $0["text"] as? String }.joined(separator: "\n"),
-      "ocrEngine": ocrEngine,
+      "ocrEngine": "apple_vision",
       "activeCustomerId": customerIdentityProvider?() as Any,
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ]
