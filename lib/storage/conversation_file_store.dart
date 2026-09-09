@@ -42,6 +42,8 @@ class ConversationFileStore {
         }
         var inserted = 0;
         final insertedIncomingIds = <String>[];
+        final insertedOutgoingIds = <String>[];
+        String? lastInsertedDirection;
         for (var index = 0; index < capture.messages.length; index++) {
           final message = capture.messages[index];
           if (!knownIds.add(message.stableId)) continue;
@@ -70,6 +72,7 @@ class ConversationFileStore {
                       capture.capturedAt.toUtc().toIso8601String();
                 knownIds.add(message.stableId);
                 inserted++;
+                lastInsertedDirection = 'incoming';
               }
               continue;
             }
@@ -84,6 +87,10 @@ class ConversationFileStore {
               if (capturedAt == null ||
                   capture.capturedAt.difference(capturedAt).abs() >
                       const Duration(minutes: 2)) {
+                return false;
+              }
+              if (!_sameIncomingBubbleTimestampOrUnknown(
+                  item['sent_at'], message.sentAt)) {
                 return false;
               }
               return _isMoreCompleteVariant(
@@ -104,6 +111,7 @@ class ConversationFileStore {
                       capture.capturedAt.toUtc().toIso8601String();
                 knownIds.add(message.stableId);
                 inserted++;
+                lastInsertedDirection = 'incoming';
                 final alreadyAnswered = messages
                     .skip(upgradeIndex + 1)
                     .any((item) => item['direction'] == 'outgoing');
@@ -129,6 +137,10 @@ class ConversationFileStore {
               if (capturedAt == null ||
                   capture.capturedAt.difference(capturedAt).abs() >
                       const Duration(minutes: 2)) {
+                return false;
+              }
+              if (!_sameIncomingBubbleTimestampOrUnknown(
+                  item['sent_at'], message.sentAt)) {
                 return false;
               }
               return _sameOcrWordBag(
@@ -168,19 +180,19 @@ class ConversationFileStore {
             'media': [for (final media in message.media) media.toJson()],
           });
           inserted++;
+          lastInsertedDirection = message.direction;
           if (message.direction == 'incoming') {
-            final hasLaterSellerReply = capture.messages
-                .skip(index + 1)
-                .any((candidate) => candidate.direction == 'outgoing');
-            if (!hasLaterSellerReply) {
-              insertedIncomingIds.add(message.stableId);
-            }
+            insertedIncomingIds.add(message.stableId);
+          } else if (message.direction == 'outgoing') {
+            insertedOutgoingIds.add(message.stableId);
           }
         }
         if (inserted > 0) await _write(document, userId);
         return CaptureAppendResult(
           changed: inserted,
           insertedIncomingIds: insertedIncomingIds,
+          insertedOutgoingIds: insertedOutgoingIds,
+          lastInsertedDirection: lastInsertedDirection,
         );
       });
 
@@ -456,7 +468,20 @@ class ConversationFileStore {
     if (left == right) return true;
     final shorter = left.length < right.length ? left : right;
     final longer = left.length < right.length ? right : left;
-    return shorter.length >= 15 && longer.contains(shorter);
+    if (shorter.length >= 15 && longer.contains(shorter)) return true;
+
+    Set<String> words(String value) => RegExp(r'[a-z0-9]+|[\u3400-\u9fff]')
+        .allMatches(value.toLowerCase())
+        .map((match) => match.group(0)!)
+        .toSet();
+    final generatedWords = words(generated);
+    final observedWords = words(observed);
+    final smallerWords = generatedWords.length < observedWords.length
+        ? generatedWords
+        : observedWords;
+    if (smallerWords.length < 6) return false;
+    final overlap = generatedWords.intersection(observedWords).length;
+    return overlap >= 6 && overlap / smallerWords.length >= 0.75;
   }
 
   bool _sameBubbleTime(Object? storedValue, DateTime? observed) {
@@ -501,6 +526,14 @@ class ConversationFileStore {
     // commonly separate rapid messages and must remain separate.
     return stored.toUtc().millisecondsSinceEpoch ==
         observed.toUtc().millisecondsSinceEpoch;
+  }
+
+  bool _sameIncomingBubbleTimestampOrUnknown(
+      Object? storedValue, DateTime? observed) {
+    if (observed == null) {
+      return DateTime.tryParse(storedValue?.toString() ?? '') == null;
+    }
+    return _sameIncomingBubbleTime(storedValue, observed);
   }
 
   Future<Map<String, Object?>> _readOrCreate({
@@ -557,10 +590,14 @@ class CaptureAppendResult {
   const CaptureAppendResult({
     required this.changed,
     required this.insertedIncomingIds,
+    required this.insertedOutgoingIds,
+    required this.lastInsertedDirection,
   });
 
   final int changed;
   final List<String> insertedIncomingIds;
+  final List<String> insertedOutgoingIds;
+  final String? lastInsertedDirection;
 }
 
 extension<T> on Iterable<T> {

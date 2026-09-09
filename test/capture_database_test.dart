@@ -701,6 +701,148 @@ void main() {
         'not finding the machine');
   });
 
+  test('same customer text at a new timestamp is a new pending message',
+      () async {
+    final root = await Directory.systemTemp.createTemp('repeat_text_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final firstTime = DateTime.utc(2026, 9, 4, 5, 20, 5);
+    CapturedConversation capture(String id, DateTime sentAt) =>
+        CapturedConversation(
+          stableKey: 'customer:repeat',
+          customerName: 'buyer',
+          customerExternalId: 'buyer',
+          capturedAt: sentAt.add(const Duration(seconds: 3)),
+          messages: [
+            CapturedMessage(
+              stableId: id,
+              direction: 'incoming',
+              body: 'do i need to add ink on that thermal printer',
+              sentAt: sentAt,
+              axPath: 'ocr',
+            ),
+          ],
+        );
+
+    await database.saveCapture(capture('first-question', firstTime));
+    final secondTime = firstTime.add(const Duration(seconds: 32));
+    await database.saveCapture(capture('repeated-question', secondTime));
+
+    expect(await database.pendingMessageId('buyer'), 'repeated-question');
+    final document = await (await database.history).read('buyer');
+    expect(document!['messages'], hasLength(2));
+  });
+
+  test(
+      'known generated reply below a late-captured question does not answer it',
+      () async {
+    final root = await Directory.systemTemp.createTemp('crossed_reply_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final start = DateTime.utc(2026, 9, 4, 5, 19, 51);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:crossed',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: start,
+      messages: [
+        CapturedMessage(
+          stableId: 'try-message',
+          direction: 'incoming',
+          body: 'ok.. i will try',
+          sentAt: start,
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const reply =
+        'Okay, please try it. If the paper still jams, let us know what happens.';
+    await database.saveDraft(
+        pending.id,
+        const AiDraft(
+          reply: reply,
+          decision: 'draft',
+          confidence: .99,
+          riskLevel: 'low',
+          model: 'test',
+          usedRecordIds: [],
+          actions: [],
+          attachments: [],
+          rawJson:
+              '{"reply":"Okay, please try it. If the paper still jams, let us know what happens.","decision":"draft","confidence":0.99,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+        ));
+    await database.markReplySent(userId: 'buyer', reply: reply);
+
+    final questionTime = start.add(const Duration(seconds: 14));
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:crossed',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: questionTime.add(const Duration(seconds: 5)),
+      messages: [
+        CapturedMessage(
+          stableId: 'ink-question',
+          direction: 'incoming',
+          body: 'do i need to add ink on that thermal printer',
+          sentAt: questionTime,
+          axPath: 'ocr',
+        ),
+        CapturedMessage(
+          stableId: 'visible-known-reply',
+          direction: 'outgoing',
+          body: reply,
+          sentAt: questionTime.add(const Duration(seconds: 2)),
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(await database.pendingMessageId('buyer'), 'ink-question');
+  });
+
+  test('older seller OCR above a newer customer message keeps AI pending',
+      () async {
+    final root = await Directory.systemTemp.createTemp('ordered_scan_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final now = DateTime.utc(2026, 9, 4, 6, 25, 25);
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:ordered',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: now,
+      messages: [
+        CapturedMessage(
+          stableId: 'older-seller-ocr',
+          direction: 'outgoing',
+          body: 'A previously visible seller message',
+          sentAt: now.subtract(const Duration(seconds: 39)),
+          axPath: 'ocr',
+        ),
+        CapturedMessage(
+          stableId: 'new-customer-question',
+          direction: 'incoming',
+          body: "isn't it your product?",
+          sentAt: now.subtract(const Duration(seconds: 5)),
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(await database.pendingMessageId('buyer'), 'new-customer-question');
+  });
+
   test('exact production sequence keeps one incoming and one outgoing',
       () async {
     final root =

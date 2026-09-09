@@ -82,6 +82,24 @@ Set<String> explicitProductModels(String text) =>
             match.group(0)!.toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
         .toSet();
 
+/// Carries the latest customer-stated model across short follow-up turns such
+/// as "what are its features?". A model-free product reset deliberately stops
+/// the search so an older product cannot leak into a new topic.
+Set<String> activeProductModels(List<Map<String, dynamic>> messages) {
+  for (final message in messages.reversed) {
+    if (message['direction'] != 'incoming') continue;
+    final text = message['body']?.toString() ?? '';
+    final models = explicitProductModels(text);
+    if (models.isNotEmpty) return models;
+    if (RegExp(
+            r'\b(different product|another product|other product|new product|not (?:this|that|the) (?:one|product|model))\b|不同的产品|另一个产品|其他产品|换(?:一个|款)|不是这个')
+        .hasMatch(text.toLowerCase())) {
+      return const <String>{};
+    }
+  }
+  return const <String>{};
+}
+
 bool resetsPreviousProductContext(
     String latestText, String earlierCustomerText) {
   final normalized = latestText.toLowerCase();
@@ -273,9 +291,12 @@ class CodexReplyService {
     if (rawMessages.isEmpty) {
       throw const CodexReplyException('No customer messages are available.');
     }
-    final recent = rawMessages.length <= 5
+    // Keep enough bounded history for follow-up pronouns and product context.
+    // The previous five-record window was easily consumed by one OCR copy of
+    // an outgoing reply plus a short message burst.
+    final recent = rawMessages.length <= 12
         ? rawMessages
-        : rawMessages.sublist(rawMessages.length - 5);
+        : rawMessages.sublist(rawMessages.length - 12);
     if (!recent.any((message) => message['direction'] == 'incoming')) {
       throw const CodexReplyException(
           'No incoming customer message is available.');
@@ -299,6 +320,12 @@ class CodexReplyService {
         .join('\n');
     final productContextReset =
         resetsPreviousProductContext(currentTurnText, earlierCustomerText);
+    final currentModels = explicitProductModels(currentTurnText);
+    final activeModels = productContextReset && currentModels.isEmpty
+        ? const <String>{}
+        : currentModels.isNotEmpty
+            ? currentModels
+            : activeProductModels(rawMessages);
     final clarificationCount = clarificationQuestionsUsed(rawMessages);
     final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
     final images = <String>{};
@@ -325,15 +352,20 @@ class CodexReplyService {
 
     // Retrieval is grounded only in the current customer turn. Generated
     // replies must never feed their own product names back into future search.
-    final customerQuery = buildTurnScopedRetrievalQuery(rawMessages);
+    final turnQuery = buildTurnScopedRetrievalQuery(rawMessages);
+    final customerQuery = [
+      turnQuery,
+      if (activeModels.isNotEmpty)
+        'Active customer product model: ${activeModels.join(' ')}',
+    ].where((part) => part.trim().isNotEmpty).join('\n');
     final retriever = LocalKnowledgeRetriever(knowledgeDirectory);
     final rawRetrievedRecords = await retriever.retrieve(
         customerQuery.isEmpty
             ? 'customer product image identification'
             : customerQuery,
         limit: 5);
-    final retrievedRecords =
-        filterKnowledgeForLatestProduct(rawRetrievedRecords, currentTurnText);
+    final retrievedRecords = filterKnowledgeForLatestProduct(
+        rawRetrievedRecords, '$currentTurnText ${activeModels.join(' ')}');
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
     const knowledgeMedia = <Map<String, Object?>>[];
@@ -348,8 +380,7 @@ class CodexReplyService {
           : recent.sublist(0, recent.length - 1),
       'conversation': productContextReset ? currentCustomerTurn : recent,
       'product_context_reset': productContextReset,
-      'explicit_product_models':
-          explicitProductModels(currentTurnText).toList(growable: false),
+      'explicit_product_models': activeModels.toList(growable: false),
       'retrieved_knowledge_records': retrievedRecords,
       'approved_knowledge_media': knowledgeMedia,
       'attached_image_paths': images.toList(growable: false),
@@ -362,6 +393,8 @@ class CodexReplyService {
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Do not invent product specifications, availability, or policies.',
         'Treat the latest customer-stated product or model as authoritative. Never continue referencing an older product after the customer corrects or changes it.',
+        if (activeModels.isNotEmpty)
+          'The active customer-stated product model is ${activeModels.join(', ')}. Resolve follow-ups such as "it", "this product", and "others" against this model unless the customer changes it.',
         if (productContextReset)
           'The customer changed or corrected the product context. Ignore every older product and model; use only the current customer turn and matching retrieved records.',
         if (clarificationBudget > 0)

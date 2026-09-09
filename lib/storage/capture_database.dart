@@ -227,9 +227,11 @@ class CaptureDatabase {
     final userId = capture.customerExternalId ?? capture.customerName;
     if (result.changed == 0) return 0;
     final db = await database;
-    if (isCurrentViewport &&
-        capture.messages.isNotEmpty &&
-        capture.messages.last.direction == 'outgoing') {
+    // Clear queued AI work only for a newly discovered seller message. A
+    // previously generated reply can remain visually below a customer message
+    // that OCR notices late; its mere presence must not mark that new question
+    // as answered.
+    if (isCurrentViewport && result.lastInsertedDirection == 'outgoing') {
       await db.delete('pending_customers',
           where: 'user_id = ?', whereArgs: [userId]);
       await db.delete('generated_drafts',

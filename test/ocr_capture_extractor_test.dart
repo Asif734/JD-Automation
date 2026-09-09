@@ -622,6 +622,45 @@ void main() {
     expect(result.latestIncomingHasText, isTrue);
   });
 
+  test('removes Qianniu Shift+Space composer hint from customer text', () {
+    OcrExtractionAttempt extract(String body) =>
+        const OcrCaptureExtractor().analyze(OcrInspection(
+          image: Uint8List(0),
+          imageWidth: 2550,
+          imageHeight: 1640,
+          windowTitle: '咚咚融合工作台',
+          recognizedText: '',
+          capturedAt: DateTime(2026, 9, 4, 10, 19, 40),
+          activeCustomerId: 'jd_41aeec7741d05',
+          observations: [
+            const OcrObservation(
+                text: 'jd_41aeec7741d05 10:19:40',
+                confidence: 1,
+                x: .22,
+                y: .40,
+                width: .18,
+                height: .02),
+            OcrObservation(
+                text: body,
+                confidence: .9,
+                x: .22,
+                y: .44,
+                width: .36,
+                height: .02),
+          ],
+        ));
+
+    expect(extract('hello 按住Shift+Space可快速选中输入框').capture!.messages.single.body,
+        'hello');
+    expect(
+        extract('how many suns are there? ◎ 按住 Shift ＋ Space 可快速选中输入框')
+            .capture!
+            .messages
+            .single
+            .body,
+        'how many suns are there?');
+  });
+
   test('removes trailing D plus JD control glyph without changing model D', () {
     OcrExtractionAttempt extract(String body) =>
         const OcrCaptureExtractor().analyze(OcrInspection(

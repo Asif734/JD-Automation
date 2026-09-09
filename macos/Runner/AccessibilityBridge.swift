@@ -1289,8 +1289,24 @@ final class QianniuAXCollector {
     guard let window = nodes.first(where: {
       $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
     }) else { return [] }
-    guard let windowFrame = window.frame,
-          let evidence = unreadScreenshot(pid: pid) else { return [] }
+    guard let windowFrame = window.frame else { return [] }
+    let activeFallback: () -> [[String: Any]] = { [weak self] in
+      guard let customer = self?.activeCustomerIdentity(), !customer.isEmpty else {
+        return []
+      }
+      return [[
+        "customer": customer,
+        "unread": false,
+        "unreadEvidence": 0,
+        "evidenceAvailable": false,
+      ]]
+    }
+    // A one-customer JD layout can expose the active identity in the verified
+    // chat header while omitting a usable screenshot/pressable sidebar row.
+    // Keep monitoring that active conversation instead of reporting zero rows.
+    guard let evidence = unreadScreenshot(pid: pid) else {
+      return activeFallback()
+    }
     let customerGroups = nodes.compactMap { node -> (String, CGRect)? in
       guard node.path.hasPrefix(window.path + "/"),
             node.role == kAXGroupRole as String,
@@ -1309,6 +1325,7 @@ final class QianniuAXCollector {
     }
     var seen = Set<String>()
     let unique = customerGroups.filter { seen.insert($0.0).inserted }
+    if unique.isEmpty { return activeFallback() }
     return unique.map { customer, frame in
       let redPixels = unreadRedPixels(
         frame: frame, windowBounds: evidence.bounds, image: evidence.image)

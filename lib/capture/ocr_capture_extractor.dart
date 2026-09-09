@@ -219,6 +219,15 @@ class OcrCaptureExtractor {
     // as `回`. Keep model suffixes such as `M880D`: only a whitespace-bounded
     // standalone D at the end is an artifact.
     final cleaned = combined
+        // Qianniu renders this fixed composer shortcut below the conversation.
+        // Vision can merge it into the newest bubble when both share one
+        // sender-bounded region. Remove the complete UI hint after OCR while
+        // preserving any customer text that precedes it.
+        .replaceAll(
+            RegExp(
+                r'(?:[◎◉○口回□▣]\s*)?(?:按住\s*)?Shift\s*[+＋]\s*Space\s*可\s*快速\s*选中\s*输入框',
+                caseSensitive: false),
+            '')
         .replaceFirstMapped(
             RegExp(r'(^|[\s，。！？；：,.!?;:])D(?:\s*[◎◉○口回□▣])*\s*$'),
             (match) => match.group(1)?.trim() ?? '')

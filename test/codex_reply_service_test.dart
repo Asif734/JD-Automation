@@ -303,6 +303,30 @@ void main() {
     expect(explicitProductModels('Model TP879.'), {'tp879'});
   });
 
+  test('carries the latest customer model into pronoun follow-ups', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'my old machine was TP879'},
+      {'direction': 'outgoing', 'body': 'Okay'},
+      {'direction': 'incoming', 'body': 'it is only TP874, no D'},
+      {'direction': 'outgoing', 'body': 'Understood'},
+      {'direction': 'incoming', 'body': 'what are the features of it?'},
+      {'direction': 'incoming', 'body': 'what is different from others?'},
+    ];
+
+    expect(activeProductModels(messages), {'tp874'});
+  });
+
+  test('model-free product change clears inherited product memory', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'tell me about TP874'},
+      {'direction': 'outgoing', 'body': 'Okay'},
+      {'direction': 'incoming', 'body': 'this is another product'},
+      {'direction': 'incoming', 'body': 'what are its features?'},
+    ];
+
+    expect(activeProductModels(messages), isEmpty);
+  });
+
   test('filters conflicting attendance knowledge after printer correction', () {
     final filtered = filterKnowledgeForLatestProduct(
       <Map<String, Object?>>[
