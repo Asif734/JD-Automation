@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'capture/capture_coordinator.dart';
 import 'capture/ocr_capture_extractor.dart';
 import 'capture/ocr_image_candidate_selector.dart';
+import 'capture/video_frame_extractor.dart';
 import 'codex/codex_reply_service.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
@@ -68,7 +69,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   Timer? _autoCaptureTimer;
   final Map<String, Timer> _draftDebounceTimers = {};
   final Set<String> _draftQueue = {};
-  static const int _maxConcurrentDraftWorkers = 4;
+  static const int _maxConcurrentDraftWorkers = 2;
   final Set<String> _activeDraftUsers = {};
   Future<void> _jdUiTail = Future<void>.value();
   bool _deliveryWorkerRunning = false;
@@ -444,7 +445,8 @@ class _CaptureHomeState extends State<CaptureHome> {
       for (final candidate in _draftQueue) {
         // One customer owns at most one active Codex process. A later turn
         // from that customer remains queued until the current process exits,
-        // while up to four different customers may generate in parallel.
+        // while up to two different customers may generate in parallel. This
+        // avoids local/network contention between short-lived Codex processes.
         if (!_activeDraftUsers.contains(candidate)) {
           userId = candidate;
           break;
@@ -489,6 +491,10 @@ class _CaptureHomeState extends State<CaptureHome> {
         messageIdAtGenerationStart) {
       return;
     }
+    if (await _promoteCodexDetectedVideo(conversation, draft)) {
+      _scheduleDraftGeneration(userId, newEvidence: true);
+      return;
+    }
     final saved = await _database.saveDraft(conversation.id, draft);
     // Contacting or a manually observed seller reply may remove the queue
     // while Codex is generating. Never send a result from that stale turn.
@@ -514,6 +520,105 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     await _coordinator.refresh();
     _requestDelivery();
+  }
+
+  Future<bool> _promoteCodexDetectedVideo(
+      ConversationSummary conversation, AiDraft draft) async {
+    final videoImagePaths = draft.imageDescriptions.entries
+        .where((entry) => codexIdentifiedVideoThumbnail(entry.value))
+        .map((entry) => entry.key)
+        .toSet();
+    if (videoImagePaths.isEmpty) return false;
+
+    final document = await (await _database.history).read(conversation.userId);
+    String? expectedFingerprint;
+    final messages = document?['messages'] as List<Object?>? ?? const [];
+    for (final message
+        in messages.whereType<Map<String, dynamic>>().toList().reversed) {
+      final mediaItems = message['media'] as List<Object?>? ?? const [];
+      for (final media in mediaItems.whereType<Map<String, dynamic>>()) {
+        if (videoImagePaths.contains(media['path']?.toString())) {
+          expectedFingerprint = media['visual_fingerprint']?.toString();
+          break;
+        }
+      }
+      if (expectedFingerprint?.isNotEmpty == true) break;
+    }
+    if (expectedFingerprint?.isNotEmpty != true) return false;
+
+    try {
+      return await _withJdUiOperation(() async {
+        await _adapter
+            .openConversation(conversation.userId, allowActivation: true)
+            .timeout(_captureOperationTimeout);
+        final windows =
+            await _adapter.listOcrWindows().timeout(_captureOperationTimeout);
+        if (windows.isEmpty) return false;
+        final reception = windows.firstWhere(
+            (window) => window.title.contains('咚咚融合工作台'),
+            orElse: () => windows.first);
+        final inspection = await _inspectStableConversation(reception.windowId);
+        final candidates = const OcrImageCandidateSelector().select(
+          inspection,
+          conversation.userId,
+          allowUnlabeledLatestImage: true,
+        );
+        for (final region in candidates) {
+          final visible = await _adapter.captureImageRegion(
+            expectedCustomer: conversation.userId,
+            windowId: inspection.windowId,
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+          );
+          final fingerprint = visible.visualFingerprint ?? '';
+          if (!_similarImageFingerprints(expectedFingerprint!, fingerprint)) {
+            continue;
+          }
+          final video = await _saveVisibleVideo(
+            conversation.userId,
+            inspection.windowId,
+            region,
+            fingerprint,
+          );
+          if (video == null) return false;
+          final inserted = await _database.saveCapture(CapturedConversation(
+            stableKey: conversation.stableKey,
+            customerName: conversation.customerName,
+            customerExternalId: conversation.userId,
+            messages: [video],
+            capturedAt: inspection.capturedAt,
+          ));
+          if (inserted > 0 && mounted) {
+            setState(() => _diagnostics =
+                'Codex recognized a video thumbnail for ${conversation.userId}; downloaded it and queued the sampled frames for a second analysis.');
+          }
+          return inserted > 0;
+        }
+        return false;
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _diagnostics =
+            'Codex recognized a video thumbnail, but JD video download failed: $error');
+      }
+      return false;
+    }
+  }
+
+  bool _similarImageFingerprints(String left, String right,
+      {int maximumDistance = 8}) {
+    final a = BigInt.tryParse(left, radix: 16);
+    final b = BigInt.tryParse(right, radix: 16);
+    if (a == null || b == null) return false;
+    var difference = a ^ b;
+    var distance = 0;
+    while (difference > BigInt.zero && distance <= maximumDistance) {
+      difference &= difference - BigInt.one;
+      distance++;
+    }
+    return distance <= maximumDistance;
   }
 
   void _requestDelivery() {
@@ -649,8 +754,10 @@ class _CaptureHomeState extends State<CaptureHome> {
         return !sellerActivityBelow;
       }).toList(growable: false);
     }
-    // Automatic media capture is deliberately screenshot-first and never
-    // opens JD's modal image viewer. Only the newest candidate can create work.
+    // Automatic image capture stays screenshot-first and never opens JD's
+    // image viewer. A detected video play overlay instead uses JD's bounded
+    // Save As flow while JD is already frontmost. Only the newest candidate
+    // can create work.
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
     for (final region in imageCandidates) {
@@ -663,7 +770,15 @@ class _CaptureHomeState extends State<CaptureHome> {
           width: region.width,
           height: region.height,
         );
-        if (visible.kind == 'image' && visible.bytes != null) {
+        if (visible.kind == 'video') {
+          final saved = await _saveVisibleVideo(
+            customer,
+            inspection.windowId,
+            region,
+            visible.visualFingerprint ?? '',
+          );
+          if (saved != null) capturedMedia.add(saved);
+        } else if (visible.kind == 'image' && visible.bytes != null) {
           final saved = await _saveVisibleImage(
             customer,
             visible,
@@ -676,7 +791,8 @@ class _CaptureHomeState extends State<CaptureHome> {
         // text already extracted from the visible conversation.
       }
     }
-    _visibleMediaTrace = 'strict routing: image -> screenshot; candidates='
+    _visibleMediaTrace =
+        'strict routing: image -> screenshot, video -> Save As + 1fps frames; candidates='
         '${imageCandidates.length}, captured=${capturedMedia.length}, '
         'failures=$failures; '
         'JD image viewer was not opened';
@@ -691,6 +807,72 @@ class _CaptureHomeState extends State<CaptureHome> {
       customerExternalId: customer,
       capturedAt: inspection.capturedAt,
       messages: [...?textCapture?.messages, ...uniqueMedia],
+    );
+  }
+
+  Future<CapturedMessage?> _saveVisibleVideo(
+    String customer,
+    int windowId,
+    OcrVisualRegion region,
+    String thumbnailFingerprint,
+  ) async {
+    final store = await _database.history;
+    if (thumbnailFingerprint.isNotEmpty &&
+        await store.hasSimilarImageFingerprint(
+          customer,
+          thumbnailFingerprint,
+          captureSources: const {'jd_video_save_as'},
+        )) {
+      return null;
+    }
+    final destination = Directory(
+      '${store.mediaDirectory.path}/${store.safeUserId(customer)}/videos',
+    );
+    await destination.create(recursive: true);
+    final downloaded = await _adapter.downloadVideoAt(
+      expectedCustomer: customer,
+      windowId: windowId,
+      x: region.x,
+      y: region.y,
+      width: region.width,
+      height: region.height,
+      destinationDirectory: destination.path,
+    );
+    if (downloaded.path.isEmpty) return null;
+    final extracted =
+        await const VideoFrameExtractor().extract(downloaded.path);
+    final frameMedia = <CapturedMedia>[];
+    for (var index = 0; index < extracted.framePaths.length; index++) {
+      frameMedia.add(CapturedMedia(
+        type: 'image',
+        path: extracted.framePaths[index],
+        mimeType: 'image/jpeg',
+        originalName:
+            'video_frame_${(index + 1).toString().padLeft(2, '0')}s.jpg',
+        captureSource: 'jd_video_frame_1fps',
+        description: 'Pending Codex visual analysis.',
+      ));
+    }
+    return CapturedMessage(
+      stableId: 'visible-video:${extracted.sha256Digest}',
+      direction: 'incoming',
+      body:
+          '[Customer sent a video; downloaded and sampled at one frame per second, maximum 20 frames]',
+      sender: customer,
+      axPath: 'ocr:jd-video-save-as',
+      media: [
+        CapturedMedia(
+          type: 'video',
+          path: downloaded.path,
+          mimeType: downloaded.mimeType,
+          originalName: downloaded.originalName,
+          captureSource: 'jd_video_save_as',
+          description:
+              'Original customer video; visual evidence is stored in the sampled frame images.',
+          visualFingerprint: thumbnailFingerprint,
+        ),
+        ...frameMedia,
+      ],
     );
   }
 

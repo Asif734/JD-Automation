@@ -28,7 +28,11 @@ Open `http://127.0.0.1:8080/tester` for the lightweight browser test interface. 
 
 The Flutter conversation dialog now uses the same API. It selects the latest captured incoming/unknown message as `customer_message`, sends up to 20 earlier real messages as context, saves the returned draft in the local capture SQLite database, and displays it in a review-only panel. Configure a non-default backend at build time with `--dart-define=RAG_BACKEND_URL=http://127.0.0.1:PORT`. The Flutter app contains no insert/send reply action.
 
-The tester also accepts customer screenshots, photos, and videos. Images are supplied to the model as visual evidence; videos are stored but deliberately not treated as analyzed. Uploaded images are limited to 15 MB and videos to 50 MB. Retrieved knowledge records expose only allow-listed local media, and draft attachments are filtered against those retrieved IDs before being returned.
+The tester also accepts customer screenshots, photos, and videos. Images are supplied to the model as visual evidence; videos uploaded through the backend tester are stored but deliberately not treated as analyzed. Uploaded images are limited to 15 MB and videos to 50 MB. Retrieved knowledge records expose only allow-listed local media, and draft attachments are filtered against those retrieved IDs before being returned.
+
+The macOS JD capture path separately recognizes the centered play overlay on an incoming video bubble. While JD is frontmost, it uses the bubble's three-dot menu and **Save As** action to save the original into the customer media directory, closes the popover, and runs local FFmpeg at one frame per second with a hard limit of 20 frames. Those chronological JPEG frames are passed to Codex through the same guarded image-input path and their factual descriptions are saved back to the conversation JSON. JD's embedded chat does not expose a direct video URL through Accessibility, so this verified UI workflow is required.
+
+Local Codex drafts use low reasoning effort and low verbosity for reduced latency, ignore unrelated user-level Codex plugin configuration, run at most two generation workers concurrently, and have a 90-second deadline. Timeout, invalid-output, and process-error fallbacks are labeled separately; their deterministic fallback retains recent product and connection context instead of asking again for information the customer already supplied.
 
 Media API:
 

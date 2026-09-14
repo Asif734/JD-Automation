@@ -41,15 +41,81 @@ bool explicitlyRequestsHumanAgent(String text) {
       .hasMatch(normalized);
 }
 
+bool isRefundRequest(String text) => RegExp(
+      r'\brefund(?:ed|ing|s)?\b|退款|退钱|仅退款',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool isVideoGuideRequest(String text) {
+  final normalized = text.toLowerCase();
+  final mentionsVideo = RegExp(r'\bvideo\b|视频').hasMatch(normalized);
+  final asksForGuidance = RegExp(
+          r'\b(guide|guidance|guideline|guidelines|tutorial|instructions?|how[- ]?to|setup|set up|operate|operation)\b|教程|指导|指南|操作|设置|怎么')
+      .hasMatch(normalized);
+  return mentionsVideo && asksForGuidance;
+}
+
+bool codexIdentifiedVideoThumbnail(String description) => RegExp(
+      r'\bvideo (?:thumbnail|preview)\b|\bplay (?:button|icon|control)\b|视频缩略图|视频预览|播放(?:按钮|图标|控件)',
+      caseSensitive: false,
+    ).hasMatch(description);
+
+bool modelCannotResolveTechnicalIssue(AiDraft draft) {
+  if (!draftRequiresHumanReview(draft)) return false;
+  final evidence = <String>[
+    draft.reply,
+    draft.rawJson,
+  ].join(' ').toLowerCase();
+  final technical = RegExp(
+          r'\b(technical|troubleshoot|compatib|connect|driver|firmware|hardware|software|printer|device)\b|技术|故障|排查|连接|驱动|固件|硬件|软件|打印机|设备')
+      .hasMatch(evidence);
+  final unresolved = RegExp(
+          r'\b(cannot|can\x27t|unable|unresolved|not resolve|could not|(?:need|require)(?:s)? confirmation|missing (?:required )?knowledge)\b|无法|不能|未解决|无法确认|需要确认|缺少.*知识')
+      .hasMatch(evidence);
+  return technical && unresolved;
+}
+
 bool hasProductCatalogIntent(String text) {
   final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   final asksAboutProducts = RegExp(
           r'\b(what|which) products?\b|\b(what|which) models?\b|\bproducts? (?:do you have|do you sell|are available)\b|\b(recommend|suggest|should (?:i|we) buy|want to buy|need to buy)\b|有什么产品|有哪些产品|有什么型号|有哪些型号|推荐|建议|哪款|买哪|选哪|想买|需要买')
       .hasMatch(normalized);
-  final productContext = RegExp(
-          r'\b(product|model|printer|attendance machine|card machine|paper card)\b|产品|型号|打印机|考勤机|打卡机|纸卡')
-      .hasMatch(normalized);
-  return asksAboutProducts && productContext;
+  return asksAboutProducts && hasProductContext(normalized);
+}
+
+bool hasProductSuggestionIntent(String text) => RegExp(
+      r'\b(recommend|recommendation|suggest|suggestion|should (?:i|we) buy|which (?:one|model)|what (?:should|would) (?:i|we) (?:buy|choose))\b|推荐|建议|哪款|买哪|选哪|怎么选',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool hasProductContext(String text) => RegExp(
+      r'\b(product|model|printer|attendance machine|card machine|paper card|label|receipt)\b|产品|型号|打印机|考勤机|打卡机|纸卡|标签|票据',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool hasProductCatalogIntentWithContext(
+        String currentTurnText, String recentCustomerContext) =>
+    hasProductCatalogIntent(currentTurnText) ||
+    (hasProductSuggestionIntent(currentTurnText) &&
+        hasProductContext(recentCustomerContext));
+
+const productRecommendationCatalogFileName =
+    'product_model_feature_catalog_kb.md';
+
+Future<String> loadProductRecommendationCatalog(
+    Directory knowledgeDirectory) async {
+  final file = File(
+      p.join(knowledgeDirectory.path, productRecommendationCatalogFileName));
+  if (!await file.exists()) {
+    throw CodexReplyException(
+        'Product recommendation catalog is missing: ${file.path}');
+  }
+  final catalog = await file.readAsString();
+  if (catalog.trim().isEmpty) {
+    throw CodexReplyException(
+        'Product recommendation catalog is empty: ${file.path}');
+  }
+  return catalog;
 }
 
 List<Map<String, dynamic>> latestCustomerTurn(
@@ -72,7 +138,9 @@ String buildTurnScopedRetrievalQuery(List<Map<String, dynamic>> messages) =>
     latestCustomerTurn(messages)
         .map((message) => message['body']?.toString().trim() ?? '')
         .where((body) =>
-            body.isNotEmpty && !body.startsWith('[Customer sent an image'))
+            body.isNotEmpty &&
+            !body.startsWith('[Customer sent an image') &&
+            !body.startsWith('[Customer sent a video'))
         .join('\n');
 
 Set<String> explicitProductModels(String text) =>
@@ -229,7 +297,7 @@ class CodexReplyService {
     required this.knowledgeDirectory,
     required this.outputSchema,
     this.model = 'gpt-5.6-sol',
-    this.timeout = const Duration(seconds: 40),
+    this.timeout = const Duration(seconds: 90),
     this.enforceProductPhotoReviewPolicy = false,
   });
 
@@ -311,7 +379,13 @@ class CodexReplyService {
         .map((message) => message['body']?.toString() ?? '')
         .where((body) => body.isNotEmpty)
         .join('\n');
-    final productCatalogRequested = hasProductCatalogIntent(currentTurnText);
+    final recentCustomerContext = recent
+        .where((message) => message['direction'] == 'incoming')
+        .map((message) => message['body']?.toString() ?? '')
+        .where((body) => body.isNotEmpty)
+        .join('\n');
+    final productCatalogRequested = hasProductCatalogIntentWithContext(
+        currentTurnText, recentCustomerContext);
     final earlierCustomerText = rawMessages
         .take(rawMessages.length - currentCustomerTurn.length)
         .where((message) => message['direction'] == 'incoming')
@@ -329,6 +403,7 @@ class CodexReplyService {
     final clarificationCount = clarificationQuestionsUsed(rawMessages);
     final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
     final images = <String>{};
+    final videoFrames = <String>{};
     for (final message in currentCustomerTurn.reversed) {
       for (final media in (message['media'] as List<Object?>? ?? const [])) {
         if (media is! Map<String, dynamic> || media['type'] != 'image') {
@@ -340,6 +415,9 @@ class CodexReplyService {
             description == 'Pending Codex visual analysis.';
         if (needsAnalysis && path != null && await File(path).exists()) {
           images.add(path);
+          if (media['capture_source'] == 'jd_video_frame_1fps') {
+            videoFrames.add(path);
+          }
         }
       }
     }
@@ -369,6 +447,9 @@ class CodexReplyService {
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
     const knowledgeMedia = <Map<String, Object?>>[];
+    final productRecommendationCatalog = productCatalogRequested
+        ? await loadProductRecommendationCatalog(knowledgeDirectory)
+        : null;
 
     final request = {
       'task': 'Generate one review-only customer-service reply.',
@@ -384,8 +465,15 @@ class CodexReplyService {
       'retrieved_knowledge_records': retrievedRecords,
       'approved_knowledge_media': knowledgeMedia,
       'attached_image_paths': images.toList(growable: false),
+      'attached_video_frame_paths': videoFrames.toList(growable: false),
       'image_analysis_required': images.isNotEmpty,
       'product_catalog_requested': productCatalogRequested,
+      if (productRecommendationCatalog != null)
+        'product_model_feature_catalog': {
+          'record_id': 'product_model_feature_catalog',
+          'source_file': productRecommendationCatalogFileName,
+          'content': productRecommendationCatalog,
+        },
       'clarification_questions_already_asked': clarificationCount,
       'clarification_questions_remaining': clarificationBudget,
       'requirements': [
@@ -402,12 +490,14 @@ class CodexReplyService {
         if (clarificationBudget == 0)
           'The two-question clarification limit is exhausted. Do not ask another question. Give the best useful answer or next step from known context and state any necessary assumption briefly.',
         if (productCatalogRequested)
-          'The customer is asking about products. Briefly list the relevant products or models explicitly present in retrieved_knowledge_records. Do not choose or recommend one, do not discuss undocumented capacity, and do not merely repeat the customer requirements. Include the supporting knowledge record IDs in used_record_ids.',
+          'The customer wants a product suggestion. Use product_model_feature_catalog as the primary source and evaluate every stated hard requirement against one confirmed model/SKU. If one model fully matches, recommend it directly with concise confirmed reasons. If several fully match, briefly state the confirmed options and ask one decisive preference only when needed to distinguish them. If none fully matches, say that no specific model can currently be confirmed and identify the missing field. Never combine capabilities from different models/SKUs, never turn "unconfirmed" into support or non-support, and never invent a link, price, stock, size, connection method, or compatibility. Include product_model_feature_catalog in used_record_ids.',
         if (images.isNotEmpty)
           'Inspect attached customer images and use only clearly visible evidence.',
         if (images.isNotEmpty)
           'Return one concise image_descriptions item per image using its exact path.',
-        'Raise human review when the customer explicitly requests a human agent.',
+        if (videoFrames.isNotEmpty)
+          'The attached video-frame paths are chronological one-second samples from one customer video. Analyze them together as a sequence, describe only visible changes or actions, and do not claim unseen events between frames.',
+        'Require human review for refunds, video guides, explicit human requests, or technical issues you cannot resolve.',
         'Return only reply.schema.json output, keep auto_send_allowed false, and leave attachments empty.',
       ],
     };
@@ -436,13 +526,22 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         exitCode = await process.exitCode.timeout(timeout);
       } on TimeoutException {
         process.kill();
-        return _deadlineFallback(recent, hasImage: images.isNotEmpty);
+        return contextAwareFallback(
+          recent,
+          hasImage: images.isNotEmpty,
+          failure: CodexFallbackFailure.timeout,
+        );
       }
       final stdoutText = await stdoutFuture;
       final stderrText = await stderrFuture;
       if (exitCode != 0) {
-        throw CodexReplyException(
-            'Codex exited with code $exitCode: ${_clip(stderrText.isEmpty ? stdoutText : stderrText)}');
+        return contextAwareFallback(
+          recent,
+          hasImage: images.isNotEmpty,
+          failure: CodexFallbackFailure.processError,
+          detail:
+              'exit $exitCode: ${_clip(stderrText.isEmpty ? stdoutText : stderrText)}',
+        );
       }
       if (!await output.exists()) {
         throw const CodexReplyException(
@@ -459,9 +558,13 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         // A completed process can still produce malformed or unusably short
         // output. Never send that output (for example, a lone "1"); use the
         // same safe response used when the generation deadline is exceeded.
-        return _deadlineFallback(recent, hasImage: images.isNotEmpty);
+        return contextAwareFallback(
+          recent,
+          hasImage: images.isNotEmpty,
+          failure: CodexFallbackFailure.invalidOutput,
+        );
       }
-      final reviewGuardedDraft = enforceExplicitHumanReviewPolicy(
+      final reviewGuardedDraft = enforceHumanReviewPolicy(
         draft,
         latestCustomerText,
       );
@@ -473,16 +576,43 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
           conversation.userId, guardedDraft.imageDescriptions);
       return guardedDraft;
     } on ProcessException catch (error) {
-      throw CodexReplyException('Could not start Codex: ${error.message}');
+      return contextAwareFallback(
+        recent,
+        hasImage: images.isNotEmpty,
+        failure: CodexFallbackFailure.processError,
+        detail: error.message,
+      );
     } finally {
       if (await temporary.exists()) await temporary.delete(recursive: true);
     }
   }
 
-  AiDraft enforceExplicitHumanReviewPolicy(
-      AiDraft draft, String latestCustomerText) {
+  AiDraft enforceHumanReviewPolicy(AiDraft draft, String latestCustomerText) {
+    if (isRefundRequest(latestCustomerText)) {
+      return _forceHumanReview(
+        draft,
+        latestCustomerText,
+        englishReply:
+            'I\u2019ve forwarded your refund request for human review. Is there anything else I can help with?',
+        chineseReply: '我已将您的退款申请转交人工审核。还有其他需要帮助的吗？',
+        trigger: 'refund_request',
+        reason: 'Customer requested a refund.',
+      );
+    }
+    if (isVideoGuideRequest(latestCustomerText)) {
+      return _forceHumanReview(
+        draft,
+        latestCustomerText,
+        englishReply:
+            'I\u2019ve forwarded your video-guide request for human review. Is there anything else I can help with?',
+        chineseReply: '我已将您的视频教程需求转交人工审核。还有其他需要帮助的吗？',
+        trigger: 'video_guide_request',
+        reason: 'Customer requested video guidance.',
+      );
+    }
     if (!draftRequiresHumanReview(draft) ||
-        explicitlyRequestsHumanAgent(latestCustomerText)) {
+        explicitlyRequestsHumanAgent(latestCustomerText) ||
+        modelCannotResolveTechnicalIssue(draft)) {
       return draft;
     }
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
@@ -494,6 +624,31 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
       ..['human_review_required'] = false
       ..['reason'] = null
       ..['actions'] = <Object?>[]
+      ..['model'] = model;
+    return AiDraft.fromJson(raw.cast<String, Object?>(),
+        mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+  }
+
+  AiDraft _forceHumanReview(
+    AiDraft draft,
+    String customerText, {
+    required String englishReply,
+    required String chineseReply,
+    required String trigger,
+    required String reason,
+  }) {
+    final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+    raw
+      ..['reply'] = RegExp(r'[\u3400-\u9fff]').hasMatch(customerText)
+          ? chineseReply
+          : englishReply
+      ..['decision'] = 'human_review_required'
+      ..['risk_level'] = 'high'
+      ..['risk_triggers'] = <String>[trigger]
+      ..['human_review_required'] = true
+      ..['reason'] = reason
+      ..['actions'] = <Object?>[]
+      ..['attachments'] = <Object?>[]
       ..['model'] = model;
     return AiDraft.fromJson(raw.cast<String, Object?>(),
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
@@ -518,38 +673,94 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
   }
 
-  AiDraft _deadlineFallback(List<Map<String, dynamic>> recent,
-      {required bool hasImage}) {
+  AiDraft contextAwareFallback(
+    List<Map<String, dynamic>> recent, {
+    required bool hasImage,
+    required CodexFallbackFailure failure,
+    String? detail,
+  }) {
     final latestCustomerText = recent.reversed
         .where((message) => message['direction'] == 'incoming')
         .map((message) => message['body']?.toString() ?? '')
         .firstWhere(
-            (body) =>
-                body.isNotEmpty && !body.startsWith('[Customer sent an image'),
+            (body) => body.isNotEmpty && !body.startsWith('[Customer sent'),
             orElse: () => '');
-    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(latestCustomerText);
-    final reply = hasImage
-        ? chinese
-            ? '如果我理解得没错，您说的是图里这台便携式打印机。您现在是想确认型号，还是需要帮您解决使用问题？'
-            : 'If I understand correctly, you mean the portable printer in the photo. Would you like help identifying the model or solving a usage problem?'
-        : chinese
-            ? '我收到您的问题了。您能再确认一下具体型号或想解决的问题吗？'
-            : 'I received your question. Could you confirm the exact model or the issue you want help with?';
+    final customerContext = recent
+        .where((message) => message['direction'] == 'incoming')
+        .map((message) => message['body']?.toString() ?? '')
+        .where((body) => body.isNotEmpty && !body.startsWith('[Customer sent'))
+        .join(' ');
+    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(customerContext);
+    final models = activeProductModels(recent).toList(growable: false);
+    final modelLabel = models.isEmpty ? null : models.last.toUpperCase();
+    final bluetooth =
+        RegExp(r'\bbluetooth\b|\bblutooth\b|蓝牙', caseSensitive: false)
+            .hasMatch(customerContext);
+    final usb = RegExp(r'\busb\b|数据线|有线', caseSensitive: false)
+        .hasMatch(customerContext);
+    final macVersion = RegExp(
+      r'\bmac(?:os|book)?\s*(?:version)?\s*(\d+(?:\.\d+)*)',
+      caseSensitive: false,
+    ).firstMatch(customerContext)?.group(1);
+    final connectionIssue = RegExp(
+      r"not\s+connect|won't\s+connect|cannot\s+connect|can't\s+connect|connection|pair|连接不上|无法连接|不能连接|配对",
+      caseSensitive: false,
+    ).hasMatch(customerContext);
+
+    late final String reply;
+    final actionableConnectionFallback =
+        connectionIssue && (modelLabel != null || bluetooth || usb);
+    if (actionableConnectionFallback) {
+      final device = modelLabel == null ? 'the printer' : 'the $modelLabel';
+      final method = bluetooth
+          ? 'by Bluetooth'
+          : usb
+              ? 'by USB'
+              : '';
+      final methodPhrase = method.isEmpty ? '' : '$method ';
+      final platform = macVersion == null
+          ? 'your Mac'
+          : 'your Mac running macOS $macVersion';
+      reply = chinese
+          ? '明白了，您正在将${modelLabel ?? '打印机'}连接到 Mac${bluetooth ? '（蓝牙）' : usb ? '（USB）' : ''}${macVersion == null ? '' : '，macOS $macVersion'}。请先删除 Mac 中已有的打印机配对记录，重启打印机和 Mac 的连接功能后重新配对；如果仍然失败，请发送连接页面的报错截图。'
+          : 'Understood—you are connecting $device ${methodPhrase}to $platform. Remove its existing pairing or printer entry, restart the printer and the Mac connection, then pair it again. If it still fails, send a screenshot of the connection error.';
+    } else {
+      reply = hasImage
+          ? chinese
+              ? '如果我理解得没错，您说的是图里这台便携式打印机。您现在是想确认型号，还是需要帮您解决使用问题？'
+              : 'If I understand correctly, you mean the portable printer in the photo. Would you like help identifying the model or solving a usage problem?'
+          : latestCustomerText.isEmpty
+              ? chinese
+                  ? '我已收到您的消息，请告诉我您需要解决的问题。'
+                  : 'I received your message. Please tell me what you need help with.'
+              : chinese
+                  ? '我已记录您刚才的信息：“$latestCustomerText”。请按当前问题继续操作；如果仍未解决，请发送报错截图。'
+                  : 'I have your latest information: "$latestCustomerText". Please continue with the current troubleshooting step; if the problem remains, send a screenshot of the error.';
+    }
+    final failureName = switch (failure) {
+      CodexFallbackFailure.timeout => 'timeout',
+      CodexFallbackFailure.invalidOutput => 'invalid-output',
+      CodexFallbackFailure.processError => 'process-error',
+    };
     final response = <String, Object?>{
       'reply': reply,
-      'decision': 'ask_clarification',
+      'decision': actionableConnectionFallback ? 'draft' : 'ask_clarification',
       'confidence': 0.6,
       'used_record_ids': <String>[],
-      'required_slots': <String>['customer intent'],
+      'required_slots': actionableConnectionFallback
+          ? <String>[]
+          : <String>['customer intent'],
       'actions': <Object?>[],
       'risk_level': 'low',
       'risk_triggers': <String>[],
       'auto_send_allowed': false,
-      'model': 'local-deadline-fallback-v1',
+      'model': 'local-$failureName-fallback-v2',
       'attachments': <Object?>[],
       'image_descriptions': <Object?>[],
       'human_review_required': false,
-      'reason': null,
+      'reason': detail == null || detail.trim().isEmpty
+          ? 'codex_$failureName'
+          : 'codex_$failureName: ${_clip(detail)}',
     };
     return AiDraft.fromJson(response,
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
@@ -562,11 +773,16 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
       [
         'exec',
         '--ephemeral',
+        '--ignore-user-config',
         '--skip-git-repo-check',
         '--sandbox',
         'read-only',
         '--model',
         model,
+        '--config',
+        'model_reasoning_effort="low"',
+        '--config',
+        'model_verbosity="low"',
         '--color',
         'never',
         '--output-schema',
@@ -662,6 +878,8 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
   static String _clip(String value) =>
       value.length <= 800 ? value : '${value.substring(0, 800)}…';
 }
+
+enum CodexFallbackFailure { timeout, invalidOutput, processError }
 
 class CodexReplyException implements Exception {
   const CodexReplyException(this.message);

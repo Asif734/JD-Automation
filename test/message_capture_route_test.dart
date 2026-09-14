@@ -6,6 +6,8 @@ void main() {
     expect(strictMessageCaptureRoute('text'), MessageCaptureRoute.textOcr);
     expect(
         strictMessageCaptureRoute('image'), MessageCaptureRoute.imageAnalysis);
+    expect(
+        strictMessageCaptureRoute('video'), MessageCaptureRoute.videoAnalysis);
     expect(strictMessageCaptureRoute('unknown'), MessageCaptureRoute.defer);
     expect(strictMessageCaptureRoute('unavailable'), MessageCaptureRoute.defer);
   });

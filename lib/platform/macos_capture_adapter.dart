@@ -156,6 +156,34 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return VisibleImagePayload.fromMap(value);
   }
 
+  Future<DownloadedVideoPayload> downloadVideoAt({
+    required String expectedCustomer,
+    required int windowId,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+    required String destinationDirectory,
+  }) async {
+    final value = await _mapCall('downloadVideoAt', <String, Object?>{
+      'expectedCustomer': expectedCustomer,
+      'windowId': windowId,
+      'x': x,
+      'y': y,
+      'width': width,
+      'height': height,
+      'destinationDirectory': destinationDirectory,
+    });
+    if (value['error'] case final String code) {
+      throw PlatformException(
+        code: code,
+        message: value['message'] as String? ??
+            'The original JD video could not be downloaded.',
+      );
+    }
+    return DownloadedVideoPayload.fromMap(value);
+  }
+
   Future<List<String>> listConversations() async {
     final value = await _channel.invokeListMethod<Object?>('listConversations');
     return (value ?? const [])
@@ -429,4 +457,23 @@ class VisibleImagePayload {
   final String? originalName;
   final String? visualFingerprint;
   final Uint8List? bytes;
+}
+
+class DownloadedVideoPayload {
+  const DownloadedVideoPayload({
+    required this.path,
+    required this.originalName,
+    required this.mimeType,
+  });
+
+  factory DownloadedVideoPayload.fromMap(Map<String, Object?> value) =>
+      DownloadedVideoPayload(
+        path: value['path']?.toString() ?? '',
+        originalName: value['originalName']?.toString() ?? 'customer-video.mp4',
+        mimeType: value['mimeType']?.toString() ?? 'video/mp4',
+      );
+
+  final String path;
+  final String originalName;
+  final String mimeType;
 }

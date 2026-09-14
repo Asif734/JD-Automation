@@ -68,6 +68,17 @@ final class AccessibilityBridge {
         normalizedX: (args?["x"] as? NSNumber)?.doubleValue ?? -1,
         normalizedY: (args?["y"] as? NSNumber)?.doubleValue ?? -1,
         completion: result)
+    case "downloadVideoAt":
+      let args = call.arguments as? [String: Any]
+      collector.downloadVideoAt(
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "",
+        windowID: CGWindowID((args?["windowId"] as? NSNumber)?.uint32Value ?? 0),
+        normalizedX: (args?["x"] as? NSNumber)?.doubleValue ?? -1,
+        normalizedY: (args?["y"] as? NSNumber)?.doubleValue ?? -1,
+        normalizedWidth: (args?["width"] as? NSNumber)?.doubleValue ?? -1,
+        normalizedHeight: (args?["height"] as? NSNumber)?.doubleValue ?? -1,
+        destinationDirectory: args?["destinationDirectory"] as? String ?? "",
+        completion: result)
     case "sendDraftOnce":
       let args = call.arguments as? [String: Any]
       collector.sendDraftOnce(
@@ -350,6 +361,12 @@ private struct DownloadedImageCandidate {
   let size: Int
 }
 
+private struct DownloadedVideoCandidate {
+  let url: URL
+  let modified: Date
+  let size: Int
+}
+
 private func downloadableImages(in directory: URL) -> [String: DownloadedImageCandidate] {
   let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
   guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -361,6 +378,24 @@ private func downloadableImages(in directory: URL) -> [String: DownloadedImageCa
     guard let values = try? url.resourceValues(forKeys: keys),
           values.isRegularFile == true else { continue }
     result[url.path] = DownloadedImageCandidate(
+      url: url,
+      modified: values.contentModificationDate ?? .distantPast,
+      size: values.fileSize ?? 0)
+  }
+  return result
+}
+
+private func downloadableVideos(in directory: URL) -> [String: DownloadedVideoCandidate] {
+  let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
+  guard let urls = try? FileManager.default.contentsOfDirectory(
+    at: directory, includingPropertiesForKeys: Array(keys),
+    options: [.skipsHiddenFiles]) else { return [:] }
+  let extensions = Set(["mp4", "mov", "m4v", "webm"])
+  var result: [String: DownloadedVideoCandidate] = [:]
+  for url in urls where extensions.contains(url.pathExtension.lowercased()) {
+    guard let values = try? url.resourceValues(forKeys: keys),
+          values.isRegularFile == true else { continue }
+    result[url.path] = DownloadedVideoCandidate(
       url: url,
       modified: values.contentModificationDate ?? .distantPast,
       size: values.fileSize ?? 0)
@@ -585,12 +620,191 @@ final class QianniuAXCollector {
                 "message": "The image region or active customer changed during capture."])
         return
       }
+      var videoDetected = looksLikeVideoThumbnail(image)
+      // JD renders the play control in a separate overlay layer that is absent
+      // from a window-only capture. When JD is frontmost, hover the verified
+      // bubble and inspect a bounded composite crop solely for classification.
+      if !videoDetected,
+         NSWorkspace.shared.frontmostApplication?.processIdentifier == runningPID(),
+         let bounds = windowBounds(windowID) {
+        let screenCrop = CGRect(
+          x: bounds.minX + bounds.width * normalizedX,
+          y: bounds.minY + bounds.height * normalizedY,
+          width: bounds.width * normalizedWidth,
+          height: bounds.height * normalizedHeight).integral
+        _ = postHover(at: CGPoint(x: screenCrop.midX, y: screenCrop.midY))
+        if let composite = CGWindowListCreateImage(
+             screenCrop, .optionOnScreenOnly, kCGNullWindowID,
+             [.boundsIgnoreFraming, .bestResolution]) {
+          videoDetected = looksLikeVideoThumbnail(composite)
+        }
+      }
       finish([
-        "kind": "image",
+        "kind": videoDetected ? "video" : "image",
         "mimeType": "image/png",
         "extension": "png",
         "dataBase64": png.base64EncodedString(),
         "visualFingerprint": averageImageHash(image),
+      ])
+    }
+  }
+
+  /// Downloads a verified video bubble through JD's three-dot > Save As flow.
+  /// The caller supplies the sender-bounded OCR rectangle and a private target
+  /// directory. No URL is expected because JD's embedded chat view does not
+  /// expose message media through Accessibility.
+  func downloadVideoAt(expectedCustomer: String, windowID: CGWindowID,
+                       normalizedX: Double, normalizedY: Double,
+                       normalizedWidth: Double, normalizedHeight: Double,
+                       destinationDirectory: String,
+                       completion: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) {
+        DispatchQueue.main.async { completion(payload) }
+      }
+      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      let destination = URL(fileURLWithPath: destinationDirectory, isDirectory: true)
+        .standardizedFileURL
+      guard AXIsProcessTrusted(), !expected.isEmpty,
+            normalizedX >= 0, normalizedY >= 0,
+            normalizedWidth > 0, normalizedHeight > 0,
+            normalizedX + normalizedWidth <= 1,
+            normalizedY + normalizedHeight <= 1,
+            activeCustomerIdentity() == expected,
+            let pid = runningPID(),
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+            let bounds = windowBounds(windowID),
+            FileManager.default.fileExists(atPath: destination.path) else {
+        finish(["error": "video_download_precondition_failed",
+                "message": "Keep the verified customer video visible and JD frontmost before it is downloaded."])
+        return
+      }
+
+      let home = FileManager.default.homeDirectoryForCurrentUser
+      let downloadLocations = [
+        destination,
+        home,
+        home.appendingPathComponent("Downloads", isDirectory: true),
+        home.appendingPathComponent("Desktop", isDirectory: true),
+        home.appendingPathComponent("Documents", isDirectory: true),
+      ].filter { FileManager.default.fileExists(atPath: $0.path) }
+      let before = Dictionary(uniqueKeysWithValues: downloadLocations.map {
+        ($0.path, downloadableVideos(in: $0))
+      })
+      let bubble = CGRect(
+        x: bounds.minX + bounds.width * normalizedX,
+        y: bounds.minY + bounds.height * normalizedY,
+        width: bounds.width * normalizedWidth,
+        height: bounds.height * normalizedHeight)
+      // JD 10.4 reveals this control only after hovering just outside the
+      // upper-right edge of the media thumbnail.
+      let menuPoint = CGPoint(
+        x: min(bounds.maxX - 8,
+               bubble.maxX + max(12, bubble.width * 0.14) + 1.5),
+        y: bubble.minY + max(18, bubble.height * 0.05) - 2)
+      guard postHover(at: menuPoint), activeCustomerIdentity() == expected,
+            postClick(at: menuPoint) else {
+        finish(["error": "video_menu_open_failed",
+                "message": "Could not open the verified JD video menu."])
+        return
+      }
+      usleep(250_000)
+      // Resolve the visible label instead of relying on menu row offsets,
+      // which vary with JD versions and display scaling.
+      guard let saveAsPoint = recognizedMenuItemPoint(
+              near: menuPoint, labels: ["另存为", "Save As"]),
+            postClick(at: saveAsPoint) else {
+        finish(["error": "video_save_as_failed",
+                "message": "Could not select Save As for the JD video."])
+        return
+      }
+      var savePanelVisible = false
+      for _ in 0..<12 {
+        usleep(100_000)
+        let root = AXUIElementCreateApplication(pid)
+        var hasSaveDialog = false
+        var hasSaveButton = false
+        self.walk(root, path: "save-panel", depth: 0,
+                  maxDepth: 8, maxNodes: 800) { node, _ in
+          let label = [node.title, node.description, node.value]
+            .compactMap { $0 }.joined(separator: " ").lowercased()
+          if node.role == kAXSheetRole as String ||
+              (node.role == kAXWindowRole as String &&
+               node.subrole == "AXDialog") {
+            hasSaveDialog = true
+          }
+          if node.role == kAXButtonRole as String &&
+              (label == "save" || label == "保存" || label == "存储") {
+            hasSaveButton = true
+          }
+        }
+        savePanelVisible = hasSaveDialog && hasSaveButton
+        if savePanelVisible { break }
+      }
+      guard savePanelVisible else {
+        finish(["error": "video_save_panel_missing",
+                "message": "JD did not open a verified Save dialog; no key was sent."])
+        return
+      }
+
+      // Keep the JD interaction minimal: Save As, then one Enter. The saved
+      // file is moved into private app storage afterward without more UI keys.
+      guard postReturn() else {
+        finish(["error": "video_save_confirm_failed",
+                "message": "Could not confirm the JD video save dialog."])
+        return
+      }
+
+      var downloaded: URL?
+      for _ in 0..<40 {
+        usleep(125_000)
+        downloaded = downloadLocations.flatMap { location in
+          let oldFiles = before[location.path] ?? [:]
+          return downloadableVideos(in: location).values.filter { candidate in
+            guard let old = oldFiles[candidate.url.path] else { return true }
+            return candidate.modified > old.modified || candidate.size != old.size
+          }
+        }.sorted { $0.modified > $1.modified }.first?.url
+        if downloaded != nil { break }
+      }
+      guard activeCustomerIdentity() == expected,
+            var file = downloaded else {
+        finish(["error": "video_download_not_found",
+                "message": "JD did not save a new video in a monitored location."])
+        return
+      }
+      if file.deletingLastPathComponent().standardizedFileURL != destination {
+        var target = destination.appendingPathComponent(file.lastPathComponent)
+        if FileManager.default.fileExists(atPath: target.path) {
+          target = destination.appendingPathComponent(
+            "\(UUID().uuidString).\(file.pathExtension)")
+        }
+        do {
+          try FileManager.default.moveItem(at: file, to: target)
+          file = target
+        } catch {
+          finish(["error": "video_move_failed",
+                  "message": "The saved JD video could not be moved into private storage."])
+          return
+        }
+      }
+      guard let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
+            let size = values.fileSize, size > 0, size <= 100 * 1024 * 1024 else {
+        finish(["error": "video_download_not_found",
+                "message": "The saved JD video is empty or exceeds 100 MB."])
+        return
+      }
+      let ext = file.pathExtension.lowercased()
+      let mime = ext == "mov" || ext == "m4v" ? "video/quicktime" :
+        (ext == "webm" ? "video/webm" : "video/mp4")
+      finish([
+        "kind": "video",
+        "path": file.path,
+        "originalName": file.lastPathComponent,
+        "mimeType": mime,
+        "size": size,
+        "captureSource": "jd-video-save-as",
       ])
     }
   }
@@ -1780,6 +1994,71 @@ private func averageImageHash(_ image: CGImage) -> String {
   return String(format: "%016llx", hash)
 }
 
+/// JD video thumbnails use a bright circular play ring near the media center.
+/// OCR crops may include the sender avatar and surrounding whitespace, so scan
+/// a small center area rather than assuming the ring is at the crop midpoint.
+/// Requiring most angular sectors plus the center triangle avoids promoting
+/// ordinary product photos merely because they contain one white control.
+private func looksLikeVideoThumbnail(_ image: CGImage) -> Bool {
+  let bitmap = NSBitmapImageRep(cgImage: image)
+  let width = bitmap.pixelsWide
+  let height = bitmap.pixelsHigh
+  let shortest = Double(min(width, height))
+  guard shortest >= 80 else { return false }
+  let imageCenterX = Double(width - 1) / 2
+  let imageCenterY = Double(height - 1) / 2
+
+  func brightness(x: Int, y: Int) -> Double {
+    guard x >= 0, y >= 0, x < width, y < height,
+          let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+    else { return 0 }
+    return 0.2126 * Double(color.redComponent) +
+      0.7152 * Double(color.greenComponent) +
+      0.0722 * Double(color.blueComponent)
+  }
+
+  func hasPlayControl(centerX: Double, centerY: Double,
+                      nominalRadius: Double) -> Bool {
+    var brightSectors = 0
+    for sector in 0..<24 {
+      let angle = Double(sector) * 2 * Double.pi / 24
+      var maximum = 0.0
+      for offset in -4...4 {
+        let radius = nominalRadius + Double(offset)
+        let x = Int((centerX + cos(angle) * radius).rounded())
+        let y = Int((centerY + sin(angle) * radius).rounded())
+        maximum = max(maximum, brightness(x: x, y: y))
+      }
+      if maximum >= 0.82 { brightSectors += 1 }
+    }
+    guard brightSectors >= 18 else { return false }
+
+    var brightCenterSamples = 0
+    for yOffset in stride(from: -0.035, through: 0.035, by: 0.0175) {
+      for xOffset in stride(from: -0.015, through: 0.05, by: 0.01625) {
+        let x = Int((centerX + shortest * xOffset).rounded())
+        let y = Int((centerY + shortest * yOffset).rounded())
+        if brightness(x: x, y: y) >= 0.82 { brightCenterSamples += 1 }
+      }
+    }
+    return brightCenterSamples >= 5
+  }
+
+  for yOffset in stride(from: -0.12, through: 0.12, by: 0.02) {
+    for xOffset in stride(from: -0.14, through: 0.14, by: 0.02) {
+      let centerX = imageCenterX + Double(width) * xOffset
+      let centerY = imageCenterY + Double(height) * yOffset
+      for radiusRatio in stride(from: 0.065, through: 0.11, by: 0.01) {
+        if hasPlayControl(centerX: centerX, centerY: centerY,
+                          nominalRadius: shortest * radiusRatio) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
 private func postClick(at point: CGPoint) -> Bool {
   guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
                            mouseCursorPosition: point, mouseButton: .left),
@@ -1788,6 +2067,72 @@ private func postClick(at point: CGPoint) -> Bool {
   down.post(tap: .cghidEventTap)
   up.post(tap: .cghidEventTap)
   usleep(100_000)
+  return true
+}
+
+private func postHover(at point: CGPoint) -> Bool {
+  guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                           mouseCursorPosition: point, mouseButton: .left)
+  else { return false }
+  move.post(tap: .cghidEventTap)
+  usleep(250_000)
+  return true
+}
+
+/// Finds a visible context-menu label near the hovered video control. The
+/// context menu is a separate on-screen layer, so capture a bounded composite
+/// screen rectangle rather than the underlying JD window alone.
+private func recognizedMenuItemPoint(near anchor: CGPoint,
+                                     labels: [String]) -> CGPoint? {
+  guard CGPreflightScreenCaptureAccess() else { return nil }
+  let captureRect = CGRect(
+    x: max(0, anchor.x - 36),
+    y: max(0, anchor.y + 8),
+    width: 300,
+    height: 280)
+  guard let image = CGWindowListCreateImage(
+          captureRect, .optionOnScreenOnly, kCGNullWindowID,
+          [.boundsIgnoreFraming, .bestResolution]) else { return nil }
+  let request = VNRecognizeTextRequest()
+  request.recognitionLevel = .accurate
+  request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+  request.usesLanguageCorrection = false
+  try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+  let normalizedLabels = labels.map {
+    $0.lowercased().replacingOccurrences(of: " ", with: "")
+  }
+  for observation in request.results ?? [] {
+    guard let candidate = observation.topCandidates(1).first else { continue }
+    let text = candidate.string.lowercased()
+      .replacingOccurrences(of: " ", with: "")
+    guard normalizedLabels.contains(where: { text.contains($0) }) else {
+      continue
+    }
+    let box = observation.boundingBox
+    return CGPoint(
+      x: captureRect.minX + box.midX * captureRect.width,
+      y: captureRect.minY + (1 - box.midY) * captureRect.height)
+  }
+  return nil
+}
+
+private func postCommandShiftG() -> Bool {
+  guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 5, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: 5, keyDown: false)
+  else { return false }
+  down.flags = [.maskCommand, .maskShift]
+  up.flags = [.maskCommand, .maskShift]
+  down.post(tap: .cghidEventTap)
+  up.post(tap: .cghidEventTap)
+  return true
+}
+
+private func postReturn() -> Bool {
+  guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: false)
+  else { return false }
+  down.post(tap: .cghidEventTap)
+  up.post(tap: .cghidEventTap)
   return true
 }
 

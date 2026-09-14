@@ -22,20 +22,51 @@ void main() {
   tearDown(() => root.delete(recursive: true));
 
   test('uses ephemeral read-only execution and structured output', () {
-    expect(service.timeout, const Duration(seconds: 40));
+    expect(service.timeout, const Duration(seconds: 90));
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],
     );
     expect(arguments,
         containsAllInOrder(['--ephemeral', '--sandbox', 'read-only']));
+    expect(arguments, contains('--ignore-user-config'));
     expect(arguments, contains('--skip-git-repo-check'));
     expect(arguments, containsAllInOrder(['--model', 'gpt-5.6-sol']));
+    expect(arguments,
+        containsAllInOrder(['--config', 'model_reasoning_effort="low"']));
+    expect(
+        arguments, containsAllInOrder(['--config', 'model_verbosity="low"']));
     expect(arguments, contains('--output-schema'));
     expect(arguments, contains('--output-last-message'));
     expect(
         arguments, containsAllInOrder(['--image', '/tmp/customer image.png']));
     expect(arguments.last, '-');
+  });
+
+  test('timeout fallback retains model, connection, and macOS context', () {
+    final draft = service.contextAwareFallback(
+      <Map<String, dynamic>>[
+        {'direction': 'incoming', 'body': 'model is TP732'},
+        {
+          'direction': 'outgoing',
+          'body': 'How are you connecting it and which macOS version?'
+        },
+        {
+          'direction': 'incoming',
+          'body': 'by blutooth, macos version 26.6; it is not connecting'
+        },
+      ],
+      hasImage: false,
+      failure: CodexFallbackFailure.timeout,
+    );
+
+    expect(draft.model, 'local-timeout-fallback-v2');
+    expect(draft.reply, contains('TP732'));
+    expect(draft.reply, contains('Bluetooth'));
+    expect(draft.reply, contains('macOS 26.6'));
+    expect(draft.reply, isNot(contains('confirm the exact model')));
+    expect(draft.decision, 'draft');
+    expect(draft.actions, isEmpty);
   });
 
   test('accepts a safe structured draft', () {
@@ -123,6 +154,31 @@ void main() {
         hasProductCatalogIntent(
             'We need paper card attendance for 4,000 employees.'),
         isFalse);
+    expect(hasProductSuggestionIntent('What do you suggest?'), isTrue);
+    expect(
+        hasProductContext('We need a paper-card attendance machine.'), isTrue);
+    expect(
+        hasProductCatalogIntentWithContext(
+          'What do you suggest?',
+          'We need a paper-card attendance machine.',
+        ),
+        isTrue);
+    expect(
+        hasProductCatalogIntentWithContext(
+          'Great, thank you.',
+          'Which printer do you recommend?',
+        ),
+        isFalse);
+  });
+
+  test('loads the dedicated product recommendation catalog', () async {
+    final projectRoot = Directory.current;
+    final catalog = await loadProductRecommendationCatalog(
+        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+
+    expect(catalog, contains('knowledge_base: product_model_feature_catalog'));
+    expect(catalog, contains('## 2. 快速选型结论'));
+    expect(catalog, contains('TD630G'));
   });
 
   test('counts clarification slots across the current topic only', () {
@@ -160,8 +216,7 @@ void main() {
     expect(clarificationQuestionsUsed(messages), 2);
   });
 
-  test('technical uncertainty cannot create human review without a request',
-      () {
+  test('unresolved technical issue can create human review', () {
     final draft = service.parseResponse('''{
       "reply":"This requires confirmation from our technical team.",
       "decision":"human_review_required",
@@ -179,12 +234,59 @@ void main() {
       "reason":"Technical confirmation required"
     }''');
 
-    final guarded =
-        service.enforceExplicitHumanReviewPolicy(draft, 'macOs 26.6.2');
+    final guarded = service.enforceHumanReviewPolicy(draft, 'macOs 26.6.2');
 
-    expect(draftRequiresHumanReview(guarded), isFalse);
-    expect(guarded.decision, 'draft');
-    expect(guarded.riskLevel, 'low');
+    expect(draftRequiresHumanReview(guarded), isTrue);
+    expect(guarded.decision, 'human_review_required');
+    expect(guarded.riskLevel, 'high');
+  });
+
+  test('recognizes refund and video-guide review requests', () {
+    expect(isRefundRequest('I need a refund'), isTrue);
+    expect(isRefundRequest('我要退款'), isTrue);
+    expect(isVideoGuideRequest('Please send the setup video guide'), isTrue);
+    expect(isVideoGuideRequest('请发设置视频教程'), isTrue);
+    expect(isVideoGuideRequest('I sent a fault video'), isFalse);
+  });
+
+  test('recognizes Codex video-thumbnail descriptions', () {
+    expect(
+        codexIdentifiedVideoThumbnail(
+            'A blurred video thumbnail with a play button.'),
+        isTrue);
+    expect(codexIdentifiedVideoThumbnail('画面中有一个视频缩略图和播放按钮'), isTrue);
+    expect(codexIdentifiedVideoThumbnail('A printer with a round power key.'),
+        isFalse);
+  });
+
+  test('forces refund and video-guide requests into human review', () {
+    final ordinary = service.parseResponse('''{
+      "reply":"I can help.",
+      "decision":"draft",
+      "confidence":0.9,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final refund =
+        service.enforceHumanReviewPolicy(ordinary, 'I need a refund');
+    final video = service.enforceHumanReviewPolicy(
+        ordinary, 'Please send the setup video guide');
+
+    expect(draftRequiresHumanReview(refund), isTrue);
+    expect(refund.reply, contains('refund request'));
+    expect(draftHumanReviewReason(refund), contains('refund'));
+    expect(draftRequiresHumanReview(video), isTrue);
+    expect(video.reply, contains('video-guide request'));
   });
 
   test('builds a useful human-review reason when model reason is null', () {
@@ -368,6 +470,36 @@ void main() {
     expect(records, isNotEmpty);
     expect(records.first['id'], 'global_refund_return_high_risk');
     expect(records.first, isNot(contains('keywords')));
+  });
+
+  test('retrieves every Markdown file and both RAG JSONL stores', () async {
+    final knowledge = Directory('${root.path}/knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    await File('${ragCards.path}/customer_service_rag_cards.jsonl').writeAsString(
+        '{"id":"card_zephyr","status":"active","issue":"zephyrcardtoken","reply_template":"card answer"}\n');
+    await File('${ragCards.path}/source_chunks.jsonl').writeAsString(
+        '{"id":"chunk_orbit","type":"source_chunk","source_file":"source.md","content":"orbitchunktoken"}\n');
+    await File('${knowledge.path}/first.md')
+        .writeAsString('# First\n\nzirconmarkdownone');
+    final nestedMarkdownFile = File('${knowledge.path}/nested/second.md');
+    await nestedMarkdownFile.create(recursive: true);
+    await nestedMarkdownFile.writeAsString('# Second\n\nquasarmarkdowntwo');
+
+    final retriever = LocalKnowledgeRetriever(knowledge);
+    final card = await retriever.retrieve('zephyrcardtoken', limit: 1);
+    final sourceChunk = await retriever.retrieve('orbitchunktoken', limit: 1);
+    final firstMarkdown =
+        await retriever.retrieve('zirconmarkdownone', limit: 1);
+    final nestedMarkdown =
+        await retriever.retrieve('quasarmarkdowntwo', limit: 1);
+
+    expect(card.single['id'], 'card_zephyr');
+    expect(sourceChunk.single['id'], 'chunk_orbit');
+    expect(firstMarkdown.single['source_file'], 'first.md');
+    expect(firstMarkdown.single['content'], contains('zirconmarkdownone'));
+    expect(nestedMarkdown.single['source_file'], 'nested/second.md');
+    expect(nestedMarkdown.single['content'], contains('quasarmarkdowntwo'));
   });
 
   test('retrieves an available attendance product for a buying conversation',
