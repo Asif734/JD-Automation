@@ -821,7 +821,7 @@ class _CaptureHomeState extends State<CaptureHome> {
         await store.hasSimilarImageFingerprint(
           customer,
           thumbnailFingerprint,
-          captureSources: const {'jd_video_save_as'},
+          captureSources: const {'jd_video_cache', 'jd_video_save_as'},
         )) {
       return null;
     }
@@ -857,16 +857,16 @@ class _CaptureHomeState extends State<CaptureHome> {
       stableId: 'visible-video:${extracted.sha256Digest}',
       direction: 'incoming',
       body:
-          '[Customer sent a video; downloaded and sampled at one frame per second, maximum 20 frames]',
+          '[Customer sent a video; copied from JD cache and sampled at one frame per second, maximum 20 frames]',
       sender: customer,
-      axPath: 'ocr:jd-video-save-as',
+      axPath: 'ocr:jd-video-cache',
       media: [
         CapturedMedia(
           type: 'video',
           path: downloaded.path,
           mimeType: downloaded.mimeType,
           originalName: downloaded.originalName,
-          captureSource: 'jd_video_save_as',
+          captureSource: 'jd_video_cache',
           description:
               'Original customer video; visual evidence is stored in the sampled frame images.',
           visualFingerprint: thumbnailFingerprint,

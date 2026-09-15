@@ -385,22 +385,40 @@ private func downloadableImages(in directory: URL) -> [String: DownloadedImageCa
   return result
 }
 
-private func downloadableVideos(in directory: URL) -> [String: DownloadedVideoCandidate] {
-  let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
-  guard let urls = try? FileManager.default.contentsOfDirectory(
-    at: directory, includingPropertiesForKeys: Array(keys),
-    options: [.skipsHiddenFiles]) else { return [:] }
+/// JD 10.4 downloads an incoming video into its own per-chat media cache before
+/// rendering the thumbnail. Restrict discovery to that cache shape and a short
+/// freshness window so automatic analysis never needs to click inside JD.
+private func newestRecentJDCachedVideo(
+  now: Date = Date(), maximumAge: TimeInterval = 5 * 60
+) -> DownloadedVideoCandidate? {
+  let root = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/JingDong/咚咚工作台",
+                           isDirectory: true)
+  let keys: Set<URLResourceKey> = [
+    .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
+  ]
+  guard let enumerator = FileManager.default.enumerator(
+    at: root, includingPropertiesForKeys: Array(keys),
+    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
   let extensions = Set(["mp4", "mov", "m4v", "webm"])
-  var result: [String: DownloadedVideoCandidate] = [:]
-  for url in urls where extensions.contains(url.pathExtension.lowercased()) {
-    guard let values = try? url.resourceValues(forKeys: keys),
-          values.isRegularFile == true else { continue }
-    result[url.path] = DownloadedVideoCandidate(
-      url: url,
-      modified: values.contentModificationDate ?? .distantPast,
-      size: values.fileSize ?? 0)
+  var candidates: [DownloadedVideoCandidate] = []
+  for case let url as URL in enumerator {
+    let parent = url.deletingLastPathComponent()
+    let chatDirectory = parent.deletingLastPathComponent().lastPathComponent
+    guard parent.lastPathComponent == "videos",
+          chatDirectory.hasPrefix("chat_"),
+          extensions.contains(url.pathExtension.lowercased()),
+          let values = try? url.resourceValues(forKeys: keys),
+          values.isRegularFile == true,
+          let modified = values.contentModificationDate,
+          let size = values.fileSize,
+          size > 0, size <= 100 * 1024 * 1024 else { continue }
+    let age = now.timeIntervalSince(modified)
+    guard age >= -5, age <= maximumAge else { continue }
+    candidates.append(DownloadedVideoCandidate(
+      url: url, modified: modified, size: size))
   }
-  return result
+  return candidates.max(by: { $0.modified < $1.modified })
 }
 
 private func windowBounds(_ id: CGWindowID) -> CGRect? {
@@ -649,10 +667,9 @@ final class QianniuAXCollector {
     }
   }
 
-  /// Downloads a verified video bubble through JD's three-dot > Save As flow.
-  /// The caller supplies the sender-bounded OCR rectangle and a private target
-  /// directory. No URL is expected because JD's embedded chat view does not
-  /// expose message media through Accessibility.
+  /// Copies a freshly received video from JD's local per-chat media cache.
+  /// AX and the sender-bounded OCR rectangle verify the active incoming bubble,
+  /// but this method deliberately performs no clicks or keyboard actions in JD.
   func downloadVideoAt(expectedCustomer: String, windowID: CGWindowID,
                        normalizedX: Double, normalizedY: Double,
                        normalizedWidth: Double, normalizedHeight: Double,
@@ -672,127 +689,35 @@ final class QianniuAXCollector {
             normalizedX + normalizedWidth <= 1,
             normalizedY + normalizedHeight <= 1,
             activeCustomerIdentity() == expected,
-            let pid = runningPID(),
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-            let bounds = windowBounds(windowID),
+            runningPID() != nil, windowBounds(windowID) != nil,
             FileManager.default.fileExists(atPath: destination.path) else {
         finish(["error": "video_download_precondition_failed",
-                "message": "Keep the verified customer video visible and JD frontmost before it is downloaded."])
+                "message": "Keep the verified customer video visible while its local cache is inspected."])
         return
       }
-
-      let home = FileManager.default.homeDirectoryForCurrentUser
-      let downloadLocations = [
-        destination,
-        home,
-        home.appendingPathComponent("Downloads", isDirectory: true),
-        home.appendingPathComponent("Desktop", isDirectory: true),
-        home.appendingPathComponent("Documents", isDirectory: true),
-      ].filter { FileManager.default.fileExists(atPath: $0.path) }
-      let before = Dictionary(uniqueKeysWithValues: downloadLocations.map {
-        ($0.path, downloadableVideos(in: $0))
-      })
-      let bubble = CGRect(
-        x: bounds.minX + bounds.width * normalizedX,
-        y: bounds.minY + bounds.height * normalizedY,
-        width: bounds.width * normalizedWidth,
-        height: bounds.height * normalizedHeight)
-      // JD 10.4 reveals this control only after hovering just outside the
-      // upper-right edge of the media thumbnail.
-      let menuPoint = CGPoint(
-        x: min(bounds.maxX - 8,
-               bubble.maxX + max(12, bubble.width * 0.14) + 1.5),
-        y: bubble.minY + max(18, bubble.height * 0.05) - 2)
-      guard postHover(at: menuPoint), activeCustomerIdentity() == expected,
-            postClick(at: menuPoint) else {
-        finish(["error": "video_menu_open_failed",
-                "message": "Could not open the verified JD video menu."])
+      guard let cached = newestRecentJDCachedVideo() else {
+        finish(["error": "video_download_not_found",
+                "message": "No fresh video was found in JD's local media cache; the conversation was left untouched."])
         return
       }
-      usleep(250_000)
-      // Resolve the visible label instead of relying on menu row offsets,
-      // which vary with JD versions and display scaling.
-      guard let saveAsPoint = recognizedMenuItemPoint(
-              near: menuPoint, labels: ["另存为", "Save As"]),
-            postClick(at: saveAsPoint) else {
-        finish(["error": "video_save_as_failed",
-                "message": "Could not select Save As for the JD video."])
+      var file = destination.appendingPathComponent(cached.url.lastPathComponent)
+      if FileManager.default.fileExists(atPath: file.path) {
+        file = destination.appendingPathComponent(
+          "\(UUID().uuidString).\(cached.url.pathExtension)")
+      }
+      do {
+        try FileManager.default.copyItem(at: cached.url, to: file)
+      } catch {
+        finish(["error": "video_copy_failed",
+                "message": "JD's cached video could not be copied into private storage."])
         return
-      }
-      var savePanelVisible = false
-      for _ in 0..<12 {
-        usleep(100_000)
-        let root = AXUIElementCreateApplication(pid)
-        var hasSaveDialog = false
-        var hasSaveButton = false
-        self.walk(root, path: "save-panel", depth: 0,
-                  maxDepth: 8, maxNodes: 800) { node, _ in
-          let label = [node.title, node.description, node.value]
-            .compactMap { $0 }.joined(separator: " ").lowercased()
-          if node.role == kAXSheetRole as String ||
-              (node.role == kAXWindowRole as String &&
-               node.subrole == "AXDialog") {
-            hasSaveDialog = true
-          }
-          if node.role == kAXButtonRole as String &&
-              (label == "save" || label == "保存" || label == "存储") {
-            hasSaveButton = true
-          }
-        }
-        savePanelVisible = hasSaveDialog && hasSaveButton
-        if savePanelVisible { break }
-      }
-      guard savePanelVisible else {
-        finish(["error": "video_save_panel_missing",
-                "message": "JD did not open a verified Save dialog; no key was sent."])
-        return
-      }
-
-      // Keep the JD interaction minimal: Save As, then one Enter. The saved
-      // file is moved into private app storage afterward without more UI keys.
-      guard postReturn() else {
-        finish(["error": "video_save_confirm_failed",
-                "message": "Could not confirm the JD video save dialog."])
-        return
-      }
-
-      var downloaded: URL?
-      for _ in 0..<40 {
-        usleep(125_000)
-        downloaded = downloadLocations.flatMap { location in
-          let oldFiles = before[location.path] ?? [:]
-          return downloadableVideos(in: location).values.filter { candidate in
-            guard let old = oldFiles[candidate.url.path] else { return true }
-            return candidate.modified > old.modified || candidate.size != old.size
-          }
-        }.sorted { $0.modified > $1.modified }.first?.url
-        if downloaded != nil { break }
       }
       guard activeCustomerIdentity() == expected,
-            var file = downloaded else {
-        finish(["error": "video_download_not_found",
-                "message": "JD did not save a new video in a monitored location."])
-        return
-      }
-      if file.deletingLastPathComponent().standardizedFileURL != destination {
-        var target = destination.appendingPathComponent(file.lastPathComponent)
-        if FileManager.default.fileExists(atPath: target.path) {
-          target = destination.appendingPathComponent(
-            "\(UUID().uuidString).\(file.pathExtension)")
-        }
-        do {
-          try FileManager.default.moveItem(at: file, to: target)
-          file = target
-        } catch {
-          finish(["error": "video_move_failed",
-                  "message": "The saved JD video could not be moved into private storage."])
-          return
-        }
-      }
-      guard let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
-            let size = values.fileSize, size > 0, size <= 100 * 1024 * 1024 else {
-        finish(["error": "video_download_not_found",
-                "message": "The saved JD video is empty or exceeds 100 MB."])
+            let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
+            let size = values.fileSize, size == cached.size else {
+        try? FileManager.default.removeItem(at: file)
+        finish(["error": "video_copy_verification_failed",
+                "message": "The cached video changed during copying; the partial copy was removed."])
         return
       }
       let ext = file.pathExtension.lowercased()
@@ -804,7 +729,7 @@ final class QianniuAXCollector {
         "originalName": file.lastPathComponent,
         "mimeType": mime,
         "size": size,
-        "captureSource": "jd-video-save-as",
+        "captureSource": "jd-video-cache",
       ])
     }
   }
@@ -2079,58 +2004,12 @@ private func postHover(at point: CGPoint) -> Bool {
   return true
 }
 
-/// Finds a visible context-menu label near the hovered video control. The
-/// context menu is a separate on-screen layer, so capture a bounded composite
-/// screen rectangle rather than the underlying JD window alone.
-private func recognizedMenuItemPoint(near anchor: CGPoint,
-                                     labels: [String]) -> CGPoint? {
-  guard CGPreflightScreenCaptureAccess() else { return nil }
-  let captureRect = CGRect(
-    x: max(0, anchor.x - 36),
-    y: max(0, anchor.y + 8),
-    width: 300,
-    height: 280)
-  guard let image = CGWindowListCreateImage(
-          captureRect, .optionOnScreenOnly, kCGNullWindowID,
-          [.boundsIgnoreFraming, .bestResolution]) else { return nil }
-  let request = VNRecognizeTextRequest()
-  request.recognitionLevel = .accurate
-  request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-  request.usesLanguageCorrection = false
-  try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-  let normalizedLabels = labels.map {
-    $0.lowercased().replacingOccurrences(of: " ", with: "")
-  }
-  for observation in request.results ?? [] {
-    guard let candidate = observation.topCandidates(1).first else { continue }
-    let text = candidate.string.lowercased()
-      .replacingOccurrences(of: " ", with: "")
-    guard normalizedLabels.contains(where: { text.contains($0) }) else {
-      continue
-    }
-    let box = observation.boundingBox
-    return CGPoint(
-      x: captureRect.minX + box.midX * captureRect.width,
-      y: captureRect.minY + (1 - box.midY) * captureRect.height)
-  }
-  return nil
-}
-
 private func postCommandShiftG() -> Bool {
   guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 5, keyDown: true),
         let up = CGEvent(keyboardEventSource: nil, virtualKey: 5, keyDown: false)
   else { return false }
   down.flags = [.maskCommand, .maskShift]
   up.flags = [.maskCommand, .maskShift]
-  down.post(tap: .cghidEventTap)
-  up.post(tap: .cghidEventTap)
-  return true
-}
-
-private func postReturn() -> Bool {
-  guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true),
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: false)
-  else { return false }
   down.post(tap: .cghidEventTap)
   up.post(tap: .cghidEventTap)
   return true
