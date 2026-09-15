@@ -11,196 +11,196 @@ class ConversationFileStore {
   ConversationFileStore(this.rootDirectory);
 
   final Directory rootDirectory;
-  Future<void> _writeTail = Future.value();
+  final Map<String, Future<void>> _writeTails = {};
 
   Directory get conversationsDirectory => rootDirectory;
   Directory get mediaDirectory =>
       Directory(p.join(rootDirectory.path, 'media'));
 
-  Future<CaptureAppendResult> appendCapture(CapturedConversation capture) =>
-      _serialized(() async {
-        final userId = capture.customerExternalId ?? capture.customerName;
-        final document = await _readOrCreate(
-          userId: userId,
-          displayName: capture.customerName,
-          stableKey: capture.stableKey,
-        );
-        final messages = (document['messages'] as List<Object?>)
-            .cast<Map<String, Object?>>();
-        final knownIds =
-            messages.map((item) => item['id']).whereType<String>().toSet();
-        final knownIncomingVariants = <String, Set<String>>{};
-        for (final item in messages.where((item) =>
-            item['direction'] == 'incoming' &&
-            (item['source'] == 'jd_automation' ||
-                item['source'] == 'qianniu_capture'))) {
-          final raw = item['body']?.toString() ?? '';
-          final canonical = _ocrCanonical(raw);
-          if (canonical.isNotEmpty) {
-            knownIncomingVariants.putIfAbsent(canonical, () => {}).add(raw);
-          }
+  Future<CaptureAppendResult> appendCapture(CapturedConversation capture) {
+    final userId = capture.customerExternalId ?? capture.customerName;
+    return _serialized(userId, () async {
+      final document = await _readOrCreate(
+        userId: userId,
+        displayName: capture.customerName,
+        stableKey: capture.stableKey,
+      );
+      final messages =
+          (document['messages'] as List<Object?>).cast<Map<String, Object?>>();
+      final knownIds =
+          messages.map((item) => item['id']).whereType<String>().toSet();
+      final knownIncomingVariants = <String, Set<String>>{};
+      for (final item in messages.where((item) =>
+          item['direction'] == 'incoming' &&
+          (item['source'] == 'jd_automation' ||
+              item['source'] == 'qianniu_capture'))) {
+        final raw = item['body']?.toString() ?? '';
+        final canonical = _ocrCanonical(raw);
+        if (canonical.isNotEmpty) {
+          knownIncomingVariants.putIfAbsent(canonical, () => {}).add(raw);
         }
-        var inserted = 0;
-        final insertedIncomingIds = <String>[];
-        final insertedOutgoingIds = <String>[];
-        String? lastInsertedDirection;
-        for (var index = 0; index < capture.messages.length; index++) {
-          final message = capture.messages[index];
-          if (!knownIds.add(message.stableId)) continue;
-          if (message.direction == 'incoming') {
-            final canonical = _ocrCanonical(message.body);
-            final sameBubbleIndex = messages.lastIndexWhere((item) =>
-                item['direction'] == 'incoming' &&
-                (item['source'] == 'jd_automation' ||
-                    item['source'] == 'qianniu_capture') &&
-                _sameIncomingBubbleTime(item['sent_at'], message.sentAt) &&
-                _sameBubbleContent(
-                    item['body']?.toString() ?? '', message.body));
-            if (sameBubbleIndex >= 0) {
-              final existing = messages[sameBubbleIndex];
-              final existingBody = existing['body']?.toString() ?? '';
-              if (_ocrCanonical(message.body).length >
-                  _ocrCanonical(existingBody).length) {
-                final oldId = existing['id']?.toString();
-                if (oldId != null) knownIds.remove(oldId);
-                existing
-                  ..['id'] = message.stableId
-                  ..['body'] = message.body
-                  ..['sender'] = message.sender
-                  ..['sent_at'] = message.sentAt?.toUtc().toIso8601String()
-                  ..['captured_at'] =
-                      capture.capturedAt.toUtc().toIso8601String();
-                knownIds.add(message.stableId);
-                inserted++;
-                lastInsertedDirection = 'incoming';
-              }
-              continue;
-            }
-            final upgradeIndex = messages.lastIndexWhere((item) {
-              if (item['direction'] != 'incoming' ||
-                  (item['source'] != 'jd_automation' &&
-                      item['source'] != 'qianniu_capture')) {
-                return false;
-              }
-              final capturedAt =
-                  DateTime.tryParse(item['captured_at']?.toString() ?? '');
-              if (capturedAt == null ||
-                  capture.capturedAt.difference(capturedAt).abs() >
-                      const Duration(minutes: 2)) {
-                return false;
-              }
-              if (!_sameIncomingBubbleTimestampOrUnknown(
-                  item['sent_at'], message.sentAt)) {
-                return false;
-              }
-              return _isMoreCompleteVariant(
-                  item['body']?.toString() ?? '', message.body);
-            });
-            if (upgradeIndex >= 0) {
-              final existing = messages[upgradeIndex];
-              final existingCanonical =
-                  _ocrCanonical(existing['body']?.toString() ?? '');
-              if (canonical.length > existingCanonical.length) {
-                final oldId = existing['id']?.toString();
-                if (oldId != null) knownIds.remove(oldId);
-                existing
-                  ..['id'] = message.stableId
-                  ..['body'] = message.body
-                  ..['sender'] = message.sender
-                  ..['captured_at'] =
-                      capture.capturedAt.toUtc().toIso8601String();
-                knownIds.add(message.stableId);
-                inserted++;
-                lastInsertedDirection = 'incoming';
-                final alreadyAnswered = messages
-                    .skip(upgradeIndex + 1)
-                    .any((item) => item['direction'] == 'outgoing');
-                if (!alreadyAnswered) {
-                  insertedIncomingIds.add(message.stableId);
-                }
-              }
-              continue;
-            }
-            final variants = knownIncomingVariants[canonical];
-            // A different OCR spelling of the same canonical text is an old
-            // visible bubble being re-read. An exact repeated customer message
-            // is still allowed when its timestamp-derived stable ID is new.
-            if (variants != null && !variants.contains(message.body)) continue;
-            final recentDuplicate = messages.reversed.take(12).any((item) {
-              if (item['direction'] != 'incoming' ||
-                  (item['source'] != 'jd_automation' &&
-                      item['source'] != 'qianniu_capture')) {
-                return false;
-              }
-              final capturedAt =
-                  DateTime.tryParse(item['captured_at']?.toString() ?? '');
-              if (capturedAt == null ||
-                  capture.capturedAt.difference(capturedAt).abs() >
-                      const Duration(minutes: 2)) {
-                return false;
-              }
-              if (!_sameIncomingBubbleTimestampOrUnknown(
-                  item['sent_at'], message.sentAt)) {
-                return false;
-              }
-              return _sameOcrWordBag(
-                  item['body']?.toString() ?? '', message.body);
-            });
-            if (recentDuplicate) continue;
-            knownIncomingVariants
-                .putIfAbsent(canonical, () => {})
-                .add(message.body);
-          }
-          if (message.direction == 'outgoing') {
-            final matchingDraft = messages.reversed
-                .where((item) =>
-                    item['direction'] == 'outgoing' &&
-                    item['source'] == 'generated_reply' &&
-                    (_sameReply(item['body']?.toString() ?? '', message.body) ||
-                        _sameBubbleTime(item['sent_at'], message.sentAt)))
-                .firstOrNull;
-            if (matchingDraft != null) {
-              if (matchingDraft['delivery_status'] != 'sent') {
-                matchingDraft['delivery_status'] = 'sent';
-                matchingDraft['sent_at'] =
+      }
+      var inserted = 0;
+      final insertedIncomingIds = <String>[];
+      final insertedOutgoingIds = <String>[];
+      String? lastInsertedDirection;
+      for (var index = 0; index < capture.messages.length; index++) {
+        final message = capture.messages[index];
+        if (!knownIds.add(message.stableId)) continue;
+        if (message.direction == 'incoming') {
+          final canonical = _ocrCanonical(message.body);
+          final sameBubbleIndex = messages.lastIndexWhere((item) =>
+              item['direction'] == 'incoming' &&
+              (item['source'] == 'jd_automation' ||
+                  item['source'] == 'qianniu_capture') &&
+              _sameIncomingBubbleTime(item['sent_at'], message.sentAt) &&
+              _sameBubbleContent(item['body']?.toString() ?? '', message.body));
+          if (sameBubbleIndex >= 0) {
+            final existing = messages[sameBubbleIndex];
+            final existingBody = existing['body']?.toString() ?? '';
+            if (_ocrCanonical(message.body).length >
+                _ocrCanonical(existingBody).length) {
+              final oldId = existing['id']?.toString();
+              if (oldId != null) knownIds.remove(oldId);
+              existing
+                ..['id'] = message.stableId
+                ..['body'] = message.body
+                ..['sender'] = message.sender
+                ..['sent_at'] = message.sentAt?.toUtc().toIso8601String()
+                ..['captured_at'] =
                     capture.capturedAt.toUtc().toIso8601String();
-                inserted++;
-              }
-              continue;
+              knownIds.add(message.stableId);
+              inserted++;
+              lastInsertedDirection = 'incoming';
             }
+            continue;
           }
-          messages.add({
-            'id': message.stableId,
-            'direction': message.direction,
-            'body': message.body,
-            'sender': message.sender,
-            'sent_at': message.sentAt?.toUtc().toIso8601String(),
-            'captured_at': capture.capturedAt.toUtc().toIso8601String(),
-            'source': 'jd_automation',
-            'media': [for (final media in message.media) media.toJson()],
+          final upgradeIndex = messages.lastIndexWhere((item) {
+            if (item['direction'] != 'incoming' ||
+                (item['source'] != 'jd_automation' &&
+                    item['source'] != 'qianniu_capture')) {
+              return false;
+            }
+            final capturedAt =
+                DateTime.tryParse(item['captured_at']?.toString() ?? '');
+            if (capturedAt == null ||
+                capture.capturedAt.difference(capturedAt).abs() >
+                    const Duration(minutes: 2)) {
+              return false;
+            }
+            if (!_sameIncomingBubbleTimestampOrUnknown(
+                item['sent_at'], message.sentAt)) {
+              return false;
+            }
+            return _isMoreCompleteVariant(
+                item['body']?.toString() ?? '', message.body);
           });
-          inserted++;
-          lastInsertedDirection = message.direction;
-          if (message.direction == 'incoming') {
-            insertedIncomingIds.add(message.stableId);
-          } else if (message.direction == 'outgoing') {
-            insertedOutgoingIds.add(message.stableId);
+          if (upgradeIndex >= 0) {
+            final existing = messages[upgradeIndex];
+            final existingCanonical =
+                _ocrCanonical(existing['body']?.toString() ?? '');
+            if (canonical.length > existingCanonical.length) {
+              final oldId = existing['id']?.toString();
+              if (oldId != null) knownIds.remove(oldId);
+              existing
+                ..['id'] = message.stableId
+                ..['body'] = message.body
+                ..['sender'] = message.sender
+                ..['captured_at'] =
+                    capture.capturedAt.toUtc().toIso8601String();
+              knownIds.add(message.stableId);
+              inserted++;
+              lastInsertedDirection = 'incoming';
+              final alreadyAnswered = messages
+                  .skip(upgradeIndex + 1)
+                  .any((item) => item['direction'] == 'outgoing');
+              if (!alreadyAnswered) {
+                insertedIncomingIds.add(message.stableId);
+              }
+            }
+            continue;
+          }
+          final variants = knownIncomingVariants[canonical];
+          // A different OCR spelling of the same canonical text is an old
+          // visible bubble being re-read. An exact repeated customer message
+          // is still allowed when its timestamp-derived stable ID is new.
+          if (variants != null && !variants.contains(message.body)) continue;
+          final recentDuplicate = messages.reversed.take(12).any((item) {
+            if (item['direction'] != 'incoming' ||
+                (item['source'] != 'jd_automation' &&
+                    item['source'] != 'qianniu_capture')) {
+              return false;
+            }
+            final capturedAt =
+                DateTime.tryParse(item['captured_at']?.toString() ?? '');
+            if (capturedAt == null ||
+                capture.capturedAt.difference(capturedAt).abs() >
+                    const Duration(minutes: 2)) {
+              return false;
+            }
+            if (!_sameIncomingBubbleTimestampOrUnknown(
+                item['sent_at'], message.sentAt)) {
+              return false;
+            }
+            return _sameOcrWordBag(
+                item['body']?.toString() ?? '', message.body);
+          });
+          if (recentDuplicate) continue;
+          knownIncomingVariants
+              .putIfAbsent(canonical, () => {})
+              .add(message.body);
+        }
+        if (message.direction == 'outgoing') {
+          final matchingDraft = messages.reversed
+              .where((item) =>
+                  item['direction'] == 'outgoing' &&
+                  item['source'] == 'generated_reply' &&
+                  (_sameReply(item['body']?.toString() ?? '', message.body) ||
+                      _sameBubbleTime(item['sent_at'], message.sentAt)))
+              .firstOrNull;
+          if (matchingDraft != null) {
+            if (matchingDraft['delivery_status'] != 'sent') {
+              matchingDraft['delivery_status'] = 'sent';
+              matchingDraft['sent_at'] =
+                  capture.capturedAt.toUtc().toIso8601String();
+              inserted++;
+            }
+            continue;
           }
         }
-        if (inserted > 0) await _write(document, userId);
-        return CaptureAppendResult(
-          changed: inserted,
-          insertedIncomingIds: insertedIncomingIds,
-          insertedOutgoingIds: insertedOutgoingIds,
-          lastInsertedDirection: lastInsertedDirection,
-        );
-      });
+        messages.add({
+          'id': message.stableId,
+          'direction': message.direction,
+          'body': message.body,
+          'sender': message.sender,
+          'sent_at': message.sentAt?.toUtc().toIso8601String(),
+          'captured_at': capture.capturedAt.toUtc().toIso8601String(),
+          'source': 'jd_automation',
+          'media': [for (final media in message.media) media.toJson()],
+        });
+        inserted++;
+        lastInsertedDirection = message.direction;
+        if (message.direction == 'incoming') {
+          insertedIncomingIds.add(message.stableId);
+        } else if (message.direction == 'outgoing') {
+          insertedOutgoingIds.add(message.stableId);
+        }
+      }
+      if (inserted > 0) await _write(document, userId);
+      return CaptureAppendResult(
+        changed: inserted,
+        insertedIncomingIds: insertedIncomingIds,
+        insertedOutgoingIds: insertedOutgoingIds,
+        lastInsertedDirection: lastInsertedDirection,
+      );
+    });
+  }
 
   /// Adds factual visual descriptions to already captured media without
   /// writing an unsent customer reply into conversation history.
   Future<int> updateMediaDescriptions(
           String userId, Map<String, String> descriptions) =>
-      _serialized(() async {
+      _serialized(userId, () async {
         if (descriptions.isEmpty) return 0;
         final document = await read(userId);
         if (document == null) return 0;
@@ -260,7 +260,7 @@ class ConversationFileStore {
     required String stableKey,
     required AiDraft draft,
   }) =>
-      _serialized(() async {
+      _serialized(userId, () async {
         final document = await _readOrCreate(
           userId: userId,
           displayName: displayName,
@@ -303,7 +303,8 @@ class ConversationFileStore {
   /// Removes legacy unsent generated replies written by older builds.
   /// Incoming messages, OCR-observed seller messages, and confirmed generated
   /// sends are preserved.
-  Future<int> purgeLegacyUnsentDrafts() => _serialized(() async {
+  Future<int> purgeLegacyUnsentDrafts() =>
+      _serialized('*maintenance*', () async {
         if (!await conversationsDirectory.exists()) return 0;
         var removed = 0;
         await for (final entity in conversationsDirectory.list()) {
@@ -316,6 +317,18 @@ class ConversationFileStore {
           } catch (_) {
             continue;
           }
+          final userId = document['user_id']?.toString();
+          if (userId != null && userId.isNotEmpty) {
+            final customerNamedFile = _conversationFile(userId);
+            if (p.absolute(entity.path) != p.absolute(customerNamedFile.path) &&
+                !await customerNamedFile.exists()) {
+              try {
+                await entity.rename(customerNamedFile.path);
+              } on FileSystemException {
+                // Keep the original file intact if a rename is unavailable.
+              }
+            }
+          }
           final rawMessages = document['messages'];
           if (rawMessages is! List<Object?>) continue;
           final retained = rawMessages.where((item) {
@@ -327,7 +340,6 @@ class ConversationFileStore {
           }).toList(growable: true);
           if (retained.length == rawMessages.length) continue;
           document['messages'] = retained;
-          final userId = document['user_id']?.toString();
           if (userId != null && userId.isNotEmpty) {
             await _write(document, userId);
           }
@@ -339,7 +351,7 @@ class ConversationFileStore {
     required String userId,
     required String reply,
   }) =>
-      _serialized(() async {
+      _serialized(userId, () async {
         final document = await read(userId);
         if (document == null) return false;
         final messages = (document['messages'] as List<Object?>? ?? const [])
@@ -383,8 +395,19 @@ class ConversationFileStore {
   }
 
   Future<Map<String, Object?>?> read(String userId) async {
-    final file = _conversationFile(userId);
-    if (!await file.exists()) return null;
+    var file = _conversationFile(userId);
+    if (!await file.exists()) {
+      final legacy = _legacyConversationFile(userId);
+      if (!await legacy.exists()) return null;
+      await conversationsDirectory.create(recursive: true);
+      try {
+        file = await legacy.rename(file.path);
+      } on FileSystemException {
+        // A concurrent reader may already have migrated it. Otherwise retain
+        // read access to the old hashed file without risking data loss.
+        if (!await file.exists()) file = legacy;
+      }
+    }
     return (jsonDecode(await file.readAsString()) as Map<String, dynamic>)
         .cast<String, Object?>();
   }
@@ -394,7 +417,7 @@ class ConversationFileStore {
     required String filename,
     required List<int> bytes,
   }) =>
-      _serialized(() async {
+      _serialized(userId, () async {
         final directory =
             Directory(p.join(mediaDirectory.path, safeUserId(userId)));
         await directory.create(recursive: true);
@@ -410,6 +433,24 @@ class ConversationFileStore {
       });
 
   String safeUserId(String userId) {
+    final trimmed = userId.trim();
+    if (trimmed.isEmpty) {
+      return 'user_${sha256.convert(utf8.encode(userId))}';
+    }
+    var safe = trimmed.replaceAll(RegExp(r'[/\\:\x00-\x1f\x7f]'), '_');
+    final changed = safe != trimmed;
+    if (utf8.encode(safe).length > 180) {
+      safe = String.fromCharCodes(safe.runes.take(48));
+    }
+    if (changed || safe != trimmed) {
+      final suffix =
+          sha256.convert(utf8.encode(trimmed)).toString().substring(0, 10);
+      safe = '${safe}_$suffix';
+    }
+    return safe;
+  }
+
+  String _legacySafeUserId(String userId) {
     final trimmed = userId.trim();
     if (RegExp(r'^[A-Za-z0-9._-]{1,100}$').hasMatch(trimmed)) return trimmed;
     return 'user_${sha256.convert(utf8.encode(trimmed))}';
@@ -573,9 +614,13 @@ class ConversationFileStore {
   File _conversationFile(String userId) =>
       File(p.join(conversationsDirectory.path, '${safeUserId(userId)}.json'));
 
-  Future<T> _serialized<T>(Future<T> Function() action) {
+  File _legacyConversationFile(String userId) => File(
+      p.join(conversationsDirectory.path, '${_legacySafeUserId(userId)}.json'));
+
+  Future<T> _serialized<T>(String userId, Future<T> Function() action) {
     final completer = Completer<T>();
-    _writeTail = _writeTail.then((_) async {
+    final previous = _writeTails[userId] ?? Future<void>.value();
+    _writeTails[userId] = previous.then((_) async {
       try {
         completer.complete(await action());
       } catch (error, stack) {

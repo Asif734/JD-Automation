@@ -2,6 +2,7 @@ import ApplicationServices
 import Cocoa
 import CryptoKit
 import FlutterMacOS
+import Speech
 import Vision
 
 /// MethodChannel boundary for the macOS-only adapter. No send/insert/confirm action is exposed.
@@ -9,6 +10,7 @@ final class AccessibilityBridge {
   private let channel: FlutterMethodChannel
   private let collector = QianniuAXCollector()
   private let ocrInspector = QianniuOCRInspector()
+  private let audioTranscriber = VideoAudioTranscriber()
 
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(
@@ -25,6 +27,9 @@ final class AccessibilityBridge {
     }
     ocrInspector.customerIdentityProvider = { [weak collector] in
       collector?.activeCustomerIdentity()
+    }
+    ocrInspector.chatFrameProvider = { [weak collector] in
+      collector?.activeChatFrame()
     }
   }
 
@@ -79,6 +84,10 @@ final class AccessibilityBridge {
         normalizedHeight: (args?["height"] as? NSNumber)?.doubleValue ?? -1,
         destinationDirectory: args?["destinationDirectory"] as? String ?? "",
         completion: result)
+    case "transcribeAudio":
+      let args = call.arguments as? [String: Any]
+      audioTranscriber.transcribe(
+        path: args?["path"] as? String ?? "", completion: result)
     case "sendDraftOnce":
       let args = call.arguments as? [String: Any]
       collector.sendDraftOnce(
@@ -119,10 +128,94 @@ final class AccessibilityBridge {
   }
 }
 
+/// Transcribes a local speech-ready WAV with macOS Speech. Chinese and English
+/// are evaluated independently and the higher-confidence non-empty result is
+/// returned. This API never records from the microphone.
+final class VideoAudioTranscriber {
+  private struct Candidate {
+    let transcript: String
+    let language: String
+    let confidence: Double
+  }
+
+  func transcribe(path: String, completion: @escaping FlutterResult) {
+    let url = URL(fileURLWithPath: path).standardizedFileURL
+    guard !path.isEmpty, FileManager.default.fileExists(atPath: url.path) else {
+      completion(["error": "audio_missing",
+                  "message": "The extracted video audio file is missing."])
+      return
+    }
+    SFSpeechRecognizer.requestAuthorization { status in
+      guard status == .authorized else {
+        DispatchQueue.main.async {
+          completion(["error": "speech_recognition_not_allowed",
+                      "message": "Speech Recognition permission is required to transcribe video audio."])
+        }
+        return
+      }
+      self.recognize(url: url, languages: ["zh-CN", "en-US"],
+                     candidates: [], completion: completion)
+    }
+  }
+
+  private func recognize(url: URL, languages: [String],
+                         candidates: [Candidate],
+                         completion: @escaping FlutterResult) {
+    guard let language = languages.first else {
+      let best = candidates.max { left, right in
+        if left.confidence == right.confidence {
+          return left.transcript.count < right.transcript.count
+        }
+        return left.confidence < right.confidence
+      }
+      DispatchQueue.main.async {
+        completion([
+          "transcript": best?.transcript ?? "",
+          "language": best?.language ?? "",
+          "confidence": best?.confidence ?? 0,
+          "speechDetected": best?.transcript.isEmpty == false,
+        ])
+      }
+      return
+    }
+    let remaining = Array(languages.dropFirst())
+    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
+          recognizer.isAvailable else {
+      recognize(url: url, languages: remaining, candidates: candidates,
+                completion: completion)
+      return
+    }
+    let request = SFSpeechURLRecognitionRequest(url: url)
+    request.shouldReportPartialResults = false
+    var finished = false
+    recognizer.recognitionTask(with: request) { result, error in
+      guard !finished else { return }
+      if let result, result.isFinal {
+        finished = true
+        let transcript = result.bestTranscription.formattedString
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        let segments = result.bestTranscription.segments
+        let confidence = segments.isEmpty ? 0 :
+          segments.reduce(0) { $0 + Double($1.confidence) } /
+            Double(segments.count)
+        let next = transcript.isEmpty ? candidates : candidates + [Candidate(
+          transcript: transcript, language: language, confidence: confidence)]
+        self.recognize(url: url, languages: remaining, candidates: next,
+                       completion: completion)
+      } else if error != nil {
+        finished = true
+        self.recognize(url: url, languages: remaining,
+                       candidates: candidates, completion: completion)
+      }
+    }
+  }
+}
+
 /// Window-only screenshot and Apple Vision diagnostics. This inspector never
 /// clicks, types, inserts, or sends anything to Qianniu.
 final class QianniuOCRInspector {
   var customerIdentityProvider: (() -> String?)?
+  var chatFrameProvider: (() -> CGRect?)?
   private let bundleIdentifier = "com.jd.jdmddwb"
   private let queue = DispatchQueue(label: "jd.ocr.inspect", qos: .userInitiated)
 
@@ -291,7 +384,7 @@ final class QianniuOCRInspector {
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
       throw OCRInspectorError(code: "png_encoding_failed", message: "Could not encode the captured window image.")
     }
-    return [
+    var payload: [String: Any] = [
       "pid": Int(app.processIdentifier),
       "windowId": Int(window.id),
       "windowTitle": window.title,
@@ -309,6 +402,17 @@ final class QianniuOCRInspector {
       "activeCustomerId": customerIdentityProvider?() as Any,
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ]
+    if let chatFrame = chatFrameProvider?(), window.bounds.width > 0 {
+      let left = max(0, min(1,
+        (chatFrame.minX - window.bounds.minX) / window.bounds.width))
+      let right = max(left, min(1,
+        (chatFrame.maxX - window.bounds.minX) / window.bounds.width))
+      payload["chatRegion"] = [
+        "left": Double(left),
+        "right": Double(right),
+      ]
+    }
+    return payload
   }
 
   private func windows(pid: pid_t) -> [OCRWindow] {
@@ -502,9 +606,54 @@ private func unreadRedPixels(frame: CGRect, windowBounds: CGRect,
   return max(count(in: topOrigin), count(in: flipped))
 }
 
+private func normalizedCustomerIdentity(_ value: String) -> String {
+  value.trimmingCharacters(in: .whitespacesAndNewlines)
+    .folding(options: [.caseInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+}
+
+private func exactCustomerIdentityMatches(_ left: String, _ right: String) -> Bool {
+  normalizedCustomerIdentity(left) == normalizedCustomerIdentity(right)
+}
+
+private func visibleCustomerIdentityMatches(_ visible: String, expected: String) -> Bool {
+  if exactCustomerIdentityMatches(visible, expected) { return true }
+  let trimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
+  let isTruncated = trimmed.contains("...") || trimmed.contains("…")
+  guard isTruncated else { return false }
+  let prefix = normalizedCustomerIdentity(
+    trimmed.replacingOccurrences(of: "...", with: "")
+      .replacingOccurrences(of: "…", with: ""))
+  // Truncated headers are useful only when they expose a meaningful prefix.
+  // Three Unicode characters covers short CJK names; six is retained for
+  // Latin/digit-only identities where a tiny prefix is too collision-prone.
+  let latinOnly = prefix.unicodeScalars.allSatisfy { $0.isASCII }
+  guard prefix.count >= (latinOnly ? 6 : 3) else { return false }
+  return normalizedCustomerIdentity(expected).hasPrefix(prefix)
+}
+
+private func cleanedRowCustomerIdentity(_ raw: String) -> String? {
+  var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+  text = text.replacingOccurrences(
+    of: #"\s+(?:20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*$"#,
+    with: "", options: .regularExpression)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !text.isEmpty, text.count <= 80,
+        !text.contains("..."), !text.contains("…"),
+        text.rangeOfCharacter(from: .alphanumerics) != nil else { return nil }
+  let compact = text.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+  let ignored: Set<String> = [
+    "在线咨询", "留言", "排序", "清除", "紧凑布局", "客服助手", "暂无选中的会话",
+  ]
+  guard !ignored.contains(compact),
+        text.range(of: #"^\d{1,2}:\d{2}(?::\d{2})?$"#,
+                   options: .regularExpression) == nil else { return nil }
+  return text
+}
+
 /// JD exposes each conversation as an untitled pressable AXGroup. Read the
-/// visible customer ID from that group's screenshot crop; the active header is
-/// still used independently after a click to verify the selected customer.
+/// first-line display identity from that group's screenshot crop; the active
+/// header is still used independently after a click to verify the selection.
 private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
                              image: CGImage) -> String? {
   guard windowBounds.width > 0, windowBounds.height > 0 else { return nil }
@@ -520,21 +669,27 @@ private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
     CGRect(x: x, y: CGFloat(image.height) - y - height,
            width: width, height: height).integral.intersection(bounds),
   ]
-  let pattern = try? NSRegularExpression(pattern: #"jd_[A-Za-z0-9_-]{3,64}"#,
-                                          options: [.caseInsensitive])
   for rect in candidates where rect.width >= 40 && rect.height >= 20 {
     guard let crop = image.cropping(to: rect) else { continue }
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
-    request.recognitionLanguages = ["en-US"]
+    request.recognitionLanguages = ["zh-Hans", "en-US"]
     request.usesLanguageCorrection = false
     try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
-    for observation in request.results ?? [] {
-      guard let text = observation.topCandidates(1).first?.string else { continue }
-      let range = NSRange(text.startIndex..<text.endIndex, in: text)
-      guard let match = pattern?.firstMatch(in: text, range: range),
-            let swiftRange = Range(match.range, in: text) else { continue }
-      return String(text[swiftRange]).lowercased()
+    let ranked = (request.results ?? []).compactMap { observation -> (String, Double)? in
+      guard observation.boundingBox.midY >= 0.46,
+            observation.boundingBox.minX >= 0.10,
+            observation.boundingBox.minX < 0.84,
+            let candidate = observation.topCandidates(1).first,
+            let identity = cleanedRowCustomerIdentity(candidate.string) else { return nil }
+      // Prefer the upper-left text line. This separates the identity from the
+      // lower message preview and the right-aligned recency/timestamp label.
+      let score = Double(observation.boundingBox.midY) * 100 -
+        Double(observation.boundingBox.minX) * 20 + Double(candidate.confidence)
+      return (identity, score)
+    }.sorted { $0.1 > $1.1 }
+    if let identity = ranked.first?.0 {
+      return identity
     }
   }
   return nil
@@ -612,7 +767,7 @@ final class QianniuAXCollector {
             normalizedWidth > 0, normalizedHeight > 0,
             normalizedX + normalizedWidth <= 1,
             normalizedY + normalizedHeight <= 1,
-            activeCustomerIdentity() == expected else {
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
         finish(["error": "image_crop_precondition_failed",
                 "message": "The expected customer or image region could not be verified."])
         return
@@ -631,7 +786,7 @@ final class QianniuAXCollector {
         height: CGFloat(normalizedHeight) * CGFloat(fullImage.height)).integral
       guard crop.width >= 40, crop.height >= 40,
             let image = fullImage.cropping(to: crop),
-            activeCustomerIdentity() == expected,
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             let png = NSBitmapImageRep(cgImage: image)
               .representation(using: .png, properties: [:]) else {
         finish(["error": "image_crop_verification_failed",
@@ -688,7 +843,7 @@ final class QianniuAXCollector {
             normalizedWidth > 0, normalizedHeight > 0,
             normalizedX + normalizedWidth <= 1,
             normalizedY + normalizedHeight <= 1,
-            activeCustomerIdentity() == expected,
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             runningPID() != nil, windowBounds(windowID) != nil,
             FileManager.default.fileExists(atPath: destination.path) else {
         finish(["error": "video_download_precondition_failed",
@@ -712,7 +867,7 @@ final class QianniuAXCollector {
                 "message": "JD's cached video could not be copied into private storage."])
         return
       }
-      guard activeCustomerIdentity() == expected,
+      guard activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
             let size = values.fileSize, size == cached.size else {
         try? FileManager.default.removeItem(at: file)
@@ -748,7 +903,7 @@ final class QianniuAXCollector {
       guard AXIsProcessTrusted(), !expected.isEmpty,
             normalizedX >= 0, normalizedX <= 1,
             normalizedY >= 0, normalizedY <= 1,
-            activeCustomerIdentity() == expected,
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             let pid = runningPID(),
             let jdApp = NSRunningApplication(processIdentifier: pid) else {
         finish(["kind": "unavailable", "reason": "qianniu_unavailable"])
@@ -845,7 +1000,7 @@ final class QianniuAXCollector {
       guard AXIsProcessTrusted(), !expected.isEmpty,
             normalizedX >= 0, normalizedX <= 1,
             normalizedY >= 0, normalizedY <= 1,
-            activeCustomerIdentity() == expected,
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             let pid = runningPID(),
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
             let sourceBounds = windowBounds(windowID) else {
@@ -1162,7 +1317,6 @@ final class QianniuAXCollector {
   }
 
   private func activeCustomerMatches(_ expected: String, nodes: [AXNode]) -> Bool {
-    let prefix = String(expected.prefix(min(8, expected.count))).lowercased()
     guard let composer = nodes.first(where: { $0.role == kAXTextAreaRole as String }),
           let split = nodes
             .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
@@ -1174,7 +1328,7 @@ final class QianniuAXCollector {
       // The active-chat header is immediately above the central split/composer.
       return candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
         candidate.maxY <= frame.minY && candidate.minY >= frame.minY - 100 &&
-        text.hasPrefix(prefix)
+        visibleCustomerIdentityMatches(text, expected: expected)
     }
     if headerMatches { return true }
 
@@ -1182,7 +1336,7 @@ final class QianniuAXCollector {
       guard node.role == kAXStaticTextRole as String,
             let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
             let candidate = node.frame else { return false }
-      return text.caseInsensitiveCompare(expected) == .orderedSame &&
+      return exactCustomerIdentityMatches(text, expected) &&
         candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
         candidate.minY >= frame.minY && candidate.maxY <= frame.minY + 70
     }
@@ -1193,9 +1347,9 @@ final class QianniuAXCollector {
     // satisfy this independent verification signal.
     return nodes.contains { node in
       guard node.role == kAXStaticTextRole as String,
-            let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
             let candidate = node.frame else { return false }
-      return candidate.minX >= frame.maxX && text == expected.lowercased()
+      return candidate.minX >= frame.maxX && exactCustomerIdentityMatches(text, expected)
     }
   }
 
@@ -1218,6 +1372,33 @@ final class QianniuAXCollector {
       .first(where: { !$0.isTerminated })?.processIdentifier
   }
 
+  /// Returns the AX split that owns the active conversation and composer.
+  /// Its horizontal bounds exclude both the customer sidebar and details
+  /// panel, allowing OCR to reject text that belongs to another row.
+  func activeChatFrame() -> CGRect? {
+    guard AXIsProcessTrusted(), let pid = runningPID() else { return nil }
+    let root = AXUIElementCreateApplication(pid)
+    var nodes: [AXNode] = []
+    walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
+      node, _ in nodes.append(node)
+    }
+    guard let window = nodes.first(where: {
+      $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
+    }) else { return nil }
+    let scoped = nodes.filter {
+      $0.path == window.path || $0.path.hasPrefix(window.path + "/")
+    }
+    guard let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }) else {
+      return nil
+    }
+    return scoped
+      .filter({
+        $0.role == kAXSplitGroupRole as String &&
+          composer.path.hasPrefix($0.path + "/") && $0.frame != nil
+      })
+      .max(by: { $0.path.count < $1.path.count })?.frame
+  }
+
   /// Resolves the exact active account from the clickable conversation group.
   /// Qianniu truncates the central header, but the corresponding group title
   /// contains the complete account name.
@@ -1236,17 +1417,21 @@ final class QianniuAXCollector {
        let split = scoped
         .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
         .max(by: { $0.path.count < $1.path.count }),
-       let frame = split.frame,
-       let exactJDIdentity = scoped.first(where: { node in
+       let frame = split.frame {
+      let exactHeaderIdentity = scoped.compactMap { node -> (String, CGRect)? in
          guard node.role == kAXStaticTextRole as String,
                let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let candidate = node.frame else { return false }
-         return text.range(of: #"^jd_[A-Za-z0-9_-]+$"#,
-                           options: .regularExpression) != nil &&
-           candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
-           candidate.minY >= frame.minY && candidate.maxY <= frame.minY + 70
-       })?.text {
-      return exactJDIdentity
+               let identity = cleanedRowCustomerIdentity(text),
+               let candidate = node.frame,
+               candidate.minX >= frame.minX && candidate.maxX <= frame.maxX,
+               candidate.minY >= frame.minY && candidate.maxY <= frame.minY + 70
+         else { return nil }
+         return (identity, candidate)
+       }.min { left, right in
+         if abs(left.1.minX - right.1.minX) > 2 { return left.1.minX < right.1.minX }
+         return left.1.minY < right.1.minY
+       }?.0
+      if let exactHeaderIdentity { return exactHeaderIdentity }
     }
     let conversations = scoped.filter {
       $0.role == kAXGroupRole as String && $0.actions.contains(kAXPressAction as String) &&
@@ -1265,13 +1450,11 @@ final class QianniuAXCollector {
             return candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
               candidate.maxY <= frame.minY && candidate.minY >= frame.minY - 100
           })?.text else { return nil }
-    let prefix = header.replacingOccurrences(of: "...", with: "")
-      .replacingOccurrences(of: "…", with: "")
-      .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let matches = conversations.compactMap(\.title).filter {
-      $0.lowercased().hasPrefix(prefix)
+      visibleCustomerIdentityMatches(header, expected: $0)
     }
-    return matches.count == 1 ? matches[0] : nil
+    if matches.count == 1 { return matches[0] }
+    return cleanedRowCustomerIdentity(header)
   }
 
   func conversationIdentities() -> [String] {
@@ -1515,7 +1698,7 @@ final class QianniuAXCollector {
               let customer = customerIDInRow(
                 frame: frame, windowBounds: evidence.bounds, image: evidence.image)
         else { return false }
-        return customer.caseInsensitiveCompare(expected) == .orderedSame
+        return exactCustomerIdentityMatches(customer, expected)
       }
       guard let target = candidates.min(by: {
         ($0.frame?.minX ?? .greatestFiniteMagnitude) <
@@ -1526,7 +1709,9 @@ final class QianniuAXCollector {
       }
 
       func verified() -> Bool {
-        if activeCustomerIdentity() == expected { return true }
+        if activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true {
+          return true
+        }
         var current: [AXNode] = []
         walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
           node, _ in current.append(node)

@@ -148,6 +148,21 @@ class CaptureDatabase {
     });
   }
 
+  /// Releases a welcome reservation only when sending failed before JD's Send
+  /// control was clicked. Unconfirmed post-click attempts remain reserved to
+  /// prevent a duplicate welcome.
+  Future<void> releaseTransferWelcomeReservation({
+    required String userId,
+    required String eventKey,
+  }) async {
+    final db = await database;
+    await db.delete(
+      'transfer_welcomes',
+      where: 'user_id = ? AND event_key = ?',
+      whereArgs: [userId, eventKey],
+    );
+  }
+
   Future<void> appendAutomatedNoticeSent(
       {required String userId, required String reply}) async {
     final raw = <String, Object?>{

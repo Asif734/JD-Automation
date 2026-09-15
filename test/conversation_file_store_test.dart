@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/domain/capture_models.dart';
 import 'package:jd_automation/storage/conversation_file_store.dart';
@@ -66,5 +68,57 @@ void main() {
         (document!['messages'] as List).cast<Map<String, Object?>>();
     expect(messages, hasLength(1));
     expect(messages.single['body'], 'how to connect tp732 with macos');
+  });
+
+  test('keeps parallel customer histories in customer-named JSON files',
+      () async {
+    final capturedAt = DateTime.utc(2026, 9, 15, 12, 46);
+    final captures = {
+      'jd_41aeec7741d05': 'what is the feature of this?',
+      '上海思谆志科技': 'what its feature?',
+      'clffd520': 'hello',
+    };
+
+    await Future.wait(captures.entries.map((entry) => store.appendCapture(
+          CapturedConversation(
+            stableKey: 'customer:${entry.key}',
+            customerName: entry.key,
+            customerExternalId: entry.key,
+            capturedAt: capturedAt,
+            messages: [incoming('${entry.key}-1', entry.value, capturedAt)],
+          ),
+        )));
+
+    for (final entry in captures.entries) {
+      expect(File('${root.path}/${entry.key}.json').existsSync(), isTrue);
+      final document = await store.read(entry.key);
+      final messages =
+          (document!['messages'] as List).cast<Map<String, Object?>>();
+      expect(messages.single['body'], entry.value);
+      for (final other
+          in captures.entries.where((item) => item.key != entry.key)) {
+        expect(messages.single['body'], isNot(other.value));
+      }
+    }
+  });
+
+  test('migrates a legacy hashed Unicode customer file without losing data',
+      () async {
+    const customer = '上海思谆志科技';
+    final legacyName = 'user_${sha256.convert(utf8.encode(customer))}.json';
+    final legacyFile = File('${root.path}/$legacyName');
+    await legacyFile.writeAsString('''{
+      "schema_version": 1,
+      "user_id": "$customer",
+      "display_name": "$customer",
+      "stable_key": "customer:legacy",
+      "messages": []
+    }''');
+
+    final document = await store.read(customer);
+
+    expect(document?['user_id'], customer);
+    expect(File('${root.path}/$customer.json').existsSync(), isTrue);
+    expect(legacyFile.existsSync(), isFalse);
   });
 }

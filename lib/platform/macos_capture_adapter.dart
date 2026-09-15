@@ -6,6 +6,13 @@ import 'package:flutter/services.dart';
 import '../domain/capture_models.dart';
 import 'capture_adapter.dart';
 
+bool customerIdentitiesMatch(String? observed, String expected) {
+  String normalize(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  return observed != null && normalize(observed) == normalize(expected);
+}
+
 class MacOSCaptureAdapter implements CaptureAdapter {
   MacOSCaptureAdapter({MethodChannel? channel})
       : _channel = channel ?? const MethodChannel(_channelName) {
@@ -70,6 +77,32 @@ class MacOSCaptureAdapter implements CaptureAdapter {
       );
     }
     return OcrInspection.fromMap(value);
+  }
+
+  /// Waits until Qianniu's active header proves that a requested row switch
+  /// completed. Callers must not persist OCR under the requested customer
+  /// name until this independent identity check succeeds.
+  Future<OcrInspection> inspectExpectedCustomer({
+    required int windowId,
+    required String expectedCustomer,
+    int maximumAttempts = 6,
+    Duration retryDelay = const Duration(milliseconds: 250),
+  }) async {
+    OcrInspection? lastInspection;
+    for (var attempt = 0; attempt < maximumAttempts; attempt++) {
+      if (attempt > 0) await Future<void>.delayed(retryDelay);
+      lastInspection = await inspectOcr(windowId: windowId);
+      if (customerIdentitiesMatch(
+          lastInspection.activeCustomerId, expectedCustomer)) {
+        return lastInspection;
+      }
+    }
+    throw PlatformException(
+      code: 'customer_switch_not_verified',
+      message: 'Qianniu did not settle on $expectedCustomer. OCR data was '
+          'discarded instead of being saved to the wrong customer file '
+          '(active: ${lastInspection?.activeCustomerId ?? 'unknown'}).',
+    );
   }
 
   Future<Map<String, Object?>> sendDraftOnce({
@@ -182,6 +215,20 @@ class MacOSCaptureAdapter implements CaptureAdapter {
       );
     }
     return DownloadedVideoPayload.fromMap(value);
+  }
+
+  Future<SpeechTranscription> transcribeAudio(String path) async {
+    final value = await _mapCall('transcribeAudio', <String, Object?>{
+      'path': path,
+    });
+    if (value['error'] case final String code) {
+      throw PlatformException(
+        code: code,
+        message: value['message'] as String? ??
+            'The video audio could not be transcribed.',
+      );
+    }
+    return SpeechTranscription.fromMap(value);
   }
 
   Future<List<String>> listConversations() async {
@@ -363,12 +410,15 @@ class OcrInspection {
     this.windowId = 0,
     this.activeCustomerId,
     this.ocrEngine = 'unknown',
+    this.chatLeft,
+    this.chatRight,
   });
 
   factory OcrInspection.fromMap(Map<String, Object?> value) {
     final rawObservations = value['observations'] as List<Object?>? ?? const [];
     final rawVisualRegions =
         value['visualRegions'] as List<Object?>? ?? const [];
+    final chatRegion = value['chatRegion'] as Map<Object?, Object?>?;
     return OcrInspection(
       image: base64Decode(value['pngBase64'] as String? ?? ''),
       imageWidth: (value['imageWidth'] as num?)?.toInt() ?? 0,
@@ -380,6 +430,8 @@ class OcrInspection {
       activeCustomerId: value['activeCustomerId'] as String?,
       windowId: (value['windowId'] as num?)?.toInt() ?? 0,
       ocrEngine: value['ocrEngine'] as String? ?? 'unknown',
+      chatLeft: (chatRegion?['left'] as num?)?.toDouble(),
+      chatRight: (chatRegion?['right'] as num?)?.toDouble(),
       observations: rawObservations
           .whereType<Map<Object?, Object?>>()
           .map(OcrObservation.fromMap)
@@ -402,6 +454,8 @@ class OcrInspection {
   final int windowId;
   final String? activeCustomerId;
   final String ocrEngine;
+  final double? chatLeft;
+  final double? chatRight;
 }
 
 class OcrVisualRegion {
@@ -476,4 +530,26 @@ class DownloadedVideoPayload {
   final String path;
   final String originalName;
   final String mimeType;
+}
+
+class SpeechTranscription {
+  const SpeechTranscription({
+    required this.transcript,
+    required this.language,
+    required this.confidence,
+    required this.speechDetected,
+  });
+
+  factory SpeechTranscription.fromMap(Map<String, Object?> value) =>
+      SpeechTranscription(
+        transcript: value['transcript']?.toString().trim() ?? '',
+        language: value['language']?.toString() ?? '',
+        confidence: (value['confidence'] as num?)?.toDouble() ?? 0,
+        speechDetected: value['speechDetected'] == true,
+      );
+
+  final String transcript;
+  final String language;
+  final double confidence;
+  final bool speechDetected;
 }

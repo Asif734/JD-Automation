@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'capture/capture_coordinator.dart';
 import 'capture/ocr_capture_extractor.dart';
 import 'capture/ocr_image_candidate_selector.dart';
+import 'capture/video_audio_extractor.dart';
 import 'capture/video_frame_extractor.dart';
 import 'codex/codex_reply_service.dart';
 import 'domain/capture_models.dart';
@@ -69,7 +70,10 @@ class _CaptureHomeState extends State<CaptureHome> {
   Timer? _autoCaptureTimer;
   final Map<String, Timer> _draftDebounceTimers = {};
   final Set<String> _draftQueue = {};
-  static const int _maxConcurrentDraftWorkers = 2;
+  // Each active customer owns a separate ephemeral Codex CLI process. Four
+  // workers let the normal multi-chat workload generate concurrently without
+  // launching an unbounded number of local model processes.
+  static const int _maxConcurrentDraftWorkers = 4;
   final Set<String> _activeDraftUsers = {};
   Future<void> _jdUiTail = Future<void>.value();
   bool _deliveryWorkerRunning = false;
@@ -271,8 +275,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           final activeCustomer = inspection.activeCustomerId?.trim();
           if (activeCustomer != null &&
               activeCustomer.isNotEmpty &&
-              rows.any((row) => row.customer == activeCustomer) &&
-              !await _database.isHumanContacting(activeCustomer)) {
+              rows.any((row) => row.customer == activeCustomer)) {
             final extraction = const OcrCaptureExtractor().analyze(inspection);
             if (extraction.transferNoticeVisible) {
               if (_visibleTransferWelcomes.add(activeCustomer)) {
@@ -284,19 +287,24 @@ class _CaptureHomeState extends State<CaptureHome> {
             } else {
               _visibleTransferWelcomes.remove(activeCustomer);
             }
-            final capture = await _captureWithVisibleMedia(
-                inspection, extraction,
-                // Passive polling may save newly recognized text, but it must
-                // never open an old image without verified unread evidence.
-                allowUnlabeledLatestImage: false);
-            if (capture != null) {
-              insertedFromActiveChat = await _database.saveCapture(capture);
+            // A new transfer to this profile must be welcomed even if an old
+            // ticket still marks the customer as human_contacting. Apart from
+            // that acknowledgement, preserve the human pause.
+            if (!await _database.isHumanContacting(activeCustomer)) {
+              final capture = await _captureWithVisibleMedia(
+                  inspection, extraction,
+                  // Passive polling may save newly recognized text, but it must
+                  // never open an old image without verified unread evidence.
+                  allowUnlabeledLatestImage: false);
+              if (capture != null) {
+                insertedFromActiveChat = await _database.saveCapture(capture);
+              }
+              if (await _database.hasPendingUnanswered(activeCustomer)) {
+                _scheduleDraftGeneration(activeCustomer,
+                    newEvidence: insertedFromActiveChat > 0);
+              }
+              if (insertedFromActiveChat > 0) await _coordinator.refresh();
             }
-            if (await _database.hasPendingUnanswered(activeCustomer)) {
-              _scheduleDraftGeneration(activeCustomer,
-                  newEvidence: insertedFromActiveChat > 0);
-            }
-            if (insertedFromActiveChat > 0) await _coordinator.refresh();
           }
         }
         if (mounted) {
@@ -327,8 +335,12 @@ class _CaptureHomeState extends State<CaptureHome> {
           await _adapter
               .openConversation(customer, allowActivation: false)
               .timeout(_captureOperationTimeout);
-          final inspection =
-              await _inspectStableConversation(reception.windowId);
+          final inspection = await _adapter
+              .inspectExpectedCustomer(
+                windowId: reception.windowId,
+                expectedCustomer: customer,
+              )
+              .timeout(_captureOperationTimeout);
           if (mounted) setState(() => _ocrInspection = inspection);
           final extraction = const OcrCaptureExtractor().analyze(inspection);
           if (extraction.transferNoticeVisible) {
@@ -424,11 +436,26 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     const welcome =
         'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
-    await _adapter.sendDraftOnce(
-      expectedCustomer: userId,
-      reply: welcome,
-      mediaPaths: const [],
-    );
+    try {
+      await _adapter.sendDraftOnce(
+        expectedCustomer: userId,
+        reply: welcome,
+        mediaPaths: const [],
+      );
+    } on PlatformException catch (error) {
+      // Every native error except send_unconfirmed occurs before the physical
+      // Send click. Release those reservations so a still-visible transfer is
+      // retried on the next scan. An unconfirmed click remains reserved to
+      // avoid greeting the customer twice.
+      if (error.code != 'send_unconfirmed') {
+        await _database.releaseTransferWelcomeReservation(
+          userId: userId,
+          eventKey: eventKey,
+        );
+        _visibleTransferWelcomes.remove(userId);
+      }
+      rethrow;
+    }
     await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
     _handledUnreadEvidence[userId] = int.tryParse(eventKey) ?? 0;
     if (mounted) {
@@ -445,8 +472,9 @@ class _CaptureHomeState extends State<CaptureHome> {
       for (final candidate in _draftQueue) {
         // One customer owns at most one active Codex process. A later turn
         // from that customer remains queued until the current process exits,
-        // while up to two different customers may generate in parallel. This
-        // avoids local/network contention between short-lived Codex processes.
+        // while up to four different customers generate in parallel. Every
+        // worker starts its own ephemeral Codex CLI process with its own input
+        // and output file; customer histories are never shared.
         if (!_activeDraftUsers.contains(candidate)) {
           userId = candidate;
           break;
@@ -557,7 +585,12 @@ class _CaptureHomeState extends State<CaptureHome> {
         final reception = windows.firstWhere(
             (window) => window.title.contains('咚咚融合工作台'),
             orElse: () => windows.first);
-        final inspection = await _inspectStableConversation(reception.windowId);
+        final inspection = await _adapter
+            .inspectExpectedCustomer(
+              windowId: reception.windowId,
+              expectedCustomer: conversation.userId,
+            )
+            .timeout(_captureOperationTimeout);
         final candidates = const OcrImageCandidateSelector().select(
           inspection,
           conversation.userId,
@@ -841,6 +874,69 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (downloaded.path.isEmpty) return null;
     final extracted =
         await const VideoFrameExtractor().extract(downloaded.path);
+    var audioEvidence = '[Video audio: analysis unavailable]';
+    CapturedMedia? audioMedia;
+    try {
+      final audio = await const VideoAudioExtractor().extract(downloaded.path);
+      if (!audio.hasAudioStream) {
+        audioEvidence = '[Video audio: no audio stream]';
+      } else if (!audio.hasAudibleContent) {
+        audioEvidence =
+            '[Video audio: an audio stream exists, but no meaningful audible content was detected]';
+        audioMedia = CapturedMedia(
+          type: 'audio',
+          path: audio.audioPath!,
+          mimeType: 'audio/wav',
+          originalName: 'video_audio.wav',
+          captureSource: 'jd_video_audio_ffmpeg',
+          description:
+              'Audio stream present; meaningful sound was not detected.',
+        );
+      } else {
+        SpeechTranscription? speech;
+        try {
+          speech = await _adapter
+              .transcribeAudio(audio.audioPath!)
+              .timeout(const Duration(seconds: 60));
+        } catch (_) {
+          // Audio evidence remains useful even if permission, connectivity, or
+          // the platform recognizer is temporarily unavailable.
+        }
+        final transcript =
+            speech?.transcript.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+        if (speech?.speechDetected == true && transcript.isNotEmpty) {
+          final bounded = transcript.length <= 8000
+              ? transcript
+              : '${transcript.substring(0, 8000)}…';
+          audioEvidence =
+              '[Video speech transcript (${speech!.language}): $bounded]';
+          audioMedia = CapturedMedia(
+            type: 'audio',
+            path: audio.audioPath!,
+            mimeType: 'audio/wav',
+            originalName: 'video_audio.wav',
+            captureSource: 'jd_video_audio_ffmpeg',
+            description:
+                'Audible speech transcribed as ${speech.language} with confidence ${speech.confidence.toStringAsFixed(2)}: $bounded',
+          );
+        } else {
+          audioEvidence =
+              '[Video audio: audible content exists, but no speech was recognized]';
+          audioMedia = CapturedMedia(
+            type: 'audio',
+            path: audio.audioPath!,
+            mimeType: 'audio/wav',
+            originalName: 'video_audio.wav',
+            captureSource: 'jd_video_audio_ffmpeg',
+            description:
+                'Audible content detected; no speech transcript was available.',
+          );
+        }
+      }
+    } catch (_) {
+      // Visual video analysis must still proceed if the audio stream is
+      // malformed or local FFmpeg audio extraction is unavailable.
+    }
     final frameMedia = <CapturedMedia>[];
     for (var index = 0; index < extracted.framePaths.length; index++) {
       frameMedia.add(CapturedMedia(
@@ -857,7 +953,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       stableId: 'visible-video:${extracted.sha256Digest}',
       direction: 'incoming',
       body:
-          '[Customer sent a video; copied from JD cache and sampled at one frame per second, maximum 20 frames]',
+          '[Customer sent a video; copied from JD cache and sampled at one frame per second, maximum 20 frames]\n$audioEvidence',
       sender: customer,
       axPath: 'ocr:jd-video-cache',
       media: [
@@ -871,6 +967,7 @@ class _CaptureHomeState extends State<CaptureHome> {
               'Original customer video; visual evidence is stored in the sampled frame images.',
           visualFingerprint: thumbnailFingerprint,
         ),
+        if (audioMedia != null) audioMedia,
         ...frameMedia,
       ],
     );

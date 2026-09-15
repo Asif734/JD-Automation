@@ -11,9 +11,13 @@ class OcrImageCandidateSelector {
     String customer, {
     bool allowUnlabeledLatestImage = false,
   }) {
+    final left = inspection.chatLeft ?? .15;
+    final right = inspection.chatRight ?? .68;
     final senderLabels = inspection.observations
-        .where(
-            (item) => _isCustomer(item.text, customer) || _isSeller(item.text))
+        .where((item) =>
+            item.x + item.width / 2 >= left &&
+            item.x + item.width / 2 < right &&
+            (_isCustomer(item.text, customer) || _isSeller(item.text)))
         .toList()
       ..sort((left, right) => left.y.compareTo(right.y));
     final selected = <OcrVisualRegion>[];
@@ -23,7 +27,7 @@ class OcrImageCandidateSelector {
       final nextSenderY =
           index + 1 < senderLabels.length ? senderLabels[index + 1].y : .90;
       final matches = inspection.visualRegions
-          .where(_validGeometry)
+          .where((region) => _validGeometry(region, left, right))
           .where((region) => !_isTextDense(region, inspection.observations))
           .where((region) =>
               label.y <= region.y &&
@@ -37,12 +41,12 @@ class OcrImageCandidateSelector {
 
     if (selected.isEmpty && allowUnlabeledLatestImage && senderLabels.isEmpty) {
       final unlabeled = inspection.visualRegions
-          .where(_validGeometry)
+          .where((region) => _validGeometry(region, left, right))
           .where((region) => !_isTextDense(region, inspection.observations))
           .where((region) =>
-              region.x >= .15 &&
-              region.x < .50 &&
-              region.x + region.width <= .64 &&
+              region.x >= left &&
+              region.x < right &&
+              region.x + region.width <= right &&
               region.width >= .12 &&
               region.width <= .38 &&
               region.height >= .12)
@@ -69,9 +73,9 @@ class OcrImageCandidateSelector {
     return selected;
   }
 
-  bool _validGeometry(OcrVisualRegion region) =>
-      region.x >= .15 &&
-      region.x + region.width <= .68 &&
+  bool _validGeometry(OcrVisualRegion region, double left, double right) =>
+      region.x >= left &&
+      region.x + region.width <= right &&
       region.y >= .14 &&
       region.y + region.height <= .90 &&
       region.width >= .035 &&

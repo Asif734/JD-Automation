@@ -30,6 +30,17 @@ void main() {
             eventKey: 'new-transfer',
             now: now.add(const Duration(seconds: 31))),
         isTrue);
+
+    await database.releaseTransferWelcomeReservation(
+      userId: 'jd_test',
+      eventKey: 'ocr-shape-a',
+    );
+    expect(
+        await database.reserveTransferWelcome(
+            userId: 'jd_test',
+            eventKey: 'ocr-shape-a',
+            now: now.add(const Duration(minutes: 1))),
+        isTrue);
   });
 
   test('demo data uses JSON history and SQLite only as pending queue',

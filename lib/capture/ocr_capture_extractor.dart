@@ -36,13 +36,23 @@ class OcrCaptureExtractor {
       return const OcrExtractionAttempt(
           reason: 'No unambiguous full customer ID was found.');
     }
+    final verifiedChatLeft = inspection.chatLeft;
+    final verifiedChatRight = inspection.chatRight;
+    final hasVerifiedChatRegion = verifiedChatLeft != null &&
+        verifiedChatRight != null &&
+        verifiedChatLeft >= 0 &&
+        verifiedChatRight <= 1 &&
+        verifiedChatRight - verifiedChatLeft >= 0.10;
+    final chatLeft = hasVerifiedChatRegion ? verifiedChatLeft : _chatBodyLeft;
+    final chatRight =
+        hasVerifiedChatRegion ? verifiedChatRight : _chatBodyRight;
 
     final messageLabels = observations
         .where((item) =>
             (_sameIdentity(item.text, customerId) ||
                 _isSellerIdentity(item.text)) &&
-            item.x >= 0.20 &&
-            item.x < 0.64 &&
+            item.x + item.width / 2 >= chatLeft &&
+            item.x + item.width / 2 < chatRight &&
             item.y >= 0.18 &&
             item.y < 0.82)
         .map((item) => _MessageLabel(
@@ -93,7 +103,7 @@ class OcrCaptureExtractor {
           return false;
         }
         final centerX = item.x + item.width / 2;
-        if (centerX < _chatBodyLeft || centerX >= _chatBodyRight) return false;
+        if (centerX < chatLeft || centerX >= chatRight) return false;
         return !_isMetadata(text, customerId);
       }).toList()
         ..sort((left, right) {
@@ -277,7 +287,7 @@ class OcrCaptureExtractor {
     final candidates = <String, double>{};
     for (final item in observations) {
       final text = item.text.trim();
-      if (!_accountId.hasMatch(text) || text.contains('...')) continue;
+      if (!_looksLikeAccountIdentity(text) || text.contains('...')) continue;
       if (_ignoredIdentifiers.contains(text.toLowerCase())) continue;
       var score = candidates[text] ?? 0;
       score +=
@@ -318,9 +328,25 @@ class OcrCaptureExtractor {
     return visiblePrefix.length >= 6 && full.startsWith(visiblePrefix);
   }
 
+  bool _looksLikeAccountIdentity(String value) {
+    final text = value.trim();
+    if (text.length < 2 || text.length > 80 || _timestamp.hasMatch(text)) {
+      return false;
+    }
+    // Qianniu customer display identities are not restricted to JD-generated
+    // ASCII IDs. They can be ordinary account names, digits, or CJK business
+    // names. Require actual name/number content while rejecting obvious UI.
+    return RegExp(r'[A-Za-z0-9_\u3400-\u9fff]').hasMatch(text) &&
+        !RegExp(r'[\r\n]').hasMatch(text);
+  }
+
   bool _isMetadata(String value, String customerId) {
     final lower = value.toLowerCase();
     return _sameIdentity(value, customerId) ||
+        // Sidebar previews are visually truncated; actual chat bubbles are
+        // not. Never merge a neighboring customer's preview into this turn.
+        value.contains('...') ||
+        value.contains('…') ||
         RegExp(r'(您的)?同事.*将客户')
             .hasMatch(value.replaceAll(RegExp(r'\s+'), '')) ||
         value.contains('转接给您') ||
@@ -403,7 +429,6 @@ class OcrCaptureExtractor {
     return result;
   }
 
-  static final _accountId = RegExp(r'^[A-Za-z][A-Za-z0-9_.-]{3,63}$');
   static final _timestamp = RegExp(
       r'(?:20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+)?\d{1,2}:\d{2}(?::\d{2})?');
   static final _sidebarRecency = RegExp(

@@ -5,6 +5,131 @@ import 'package:jd_automation/capture/ocr_capture_extractor.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  for (final customer in const ['上海思停志科技', 'clffq520', 'jd_41aeec7741d05']) {
+    test('captures messages for unrestricted customer identity: $customer', () {
+      final inspection = OcrInspection(
+        image: Uint8List(0),
+        imageWidth: 2550,
+        imageHeight: 1640,
+        windowTitle: '咚咚融合工作台',
+        recognizedText: '',
+        windowId: 1,
+        capturedAt: DateTime(2026, 9, 15, 12, 24),
+        activeCustomerId: customer,
+        observations: [
+          OcrObservation(
+              text: '$customer 12:24:00',
+              confidence: .99,
+              x: .22,
+              y: .40,
+              width: .18,
+              height: .02),
+          const OcrObservation(
+              text: 'hello',
+              confidence: .99,
+              x: .22,
+              y: .44,
+              width: .05,
+              height: .02),
+        ],
+      );
+
+      final capture = const OcrCaptureExtractor().extract(inspection);
+
+      expect(capture, isNotNull);
+      expect(capture!.customerExternalId, customer);
+      expect(capture.messages.single.body, 'hello');
+    });
+  }
+
+  test('discovers a Chinese customer identity when AX supplies no identity',
+      () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 9, 15, 12, 24),
+      observations: const [
+        OcrObservation(
+            text: '上海思停志科技',
+            confidence: .99,
+            x: .62,
+            y: .20,
+            width: .12,
+            height: .02),
+        OcrObservation(
+            text: '上海思停志科技 12:24:00',
+            confidence: .99,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: 'hello',
+            confidence: .99,
+            x: .22,
+            y: .44,
+            width: .05,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture, isNotNull);
+    expect(capture!.customerExternalId, '上海思停志科技');
+    expect(capture.messages.single.body, 'hello');
+  });
+
+  test('AX chat bounds exclude another customer sidebar preview', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1644,
+      imageHeight: 1422,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 9, 15, 13, 5),
+      activeCustomerId: '上海思谆志科技',
+      chatLeft: .35,
+      chatRight: .93,
+      observations: const [
+        OcrObservation(
+            text: '上海思谆志科技 13:04:36',
+            confidence: .99,
+            x: .40,
+            y: .40,
+            width: .18,
+            height: .02),
+        // Preview from the jd_41... sidebar row. It is vertically aligned
+        // with this message but outside the AX-verified chat split.
+        OcrObservation(
+            text: 'For 300 employees, our confirm...',
+            confidence: .99,
+            x: .06,
+            y: .44,
+            width: .26,
+            height: .02),
+        OcrObservation(
+            text: 'what is the other model',
+            confidence: .99,
+            x: .41,
+            y: .44,
+            width: .20,
+            height: .02),
+      ],
+    );
+
+    final capture = const OcrCaptureExtractor().extract(inspection);
+
+    expect(capture, isNotNull);
+    expect(capture!.customerExternalId, '上海思谆志科技');
+    expect(capture.messages.single.body, 'what is the other model');
+  });
+
   test('detects a JD colleague transfer notice as a system event', () {
     final inspection = OcrInspection(
       image: Uint8List(0),

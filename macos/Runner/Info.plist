@@ -13,4 +13,6 @@
   <key>NSHumanReadableCopyright</key><string>$(PRODUCT_COPYRIGHT)</string>
   <key>NSMainNibFile</key><string>MainMenu</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Transcribe speech in customer-provided videos for support analysis.</string>
 </dict></plist>

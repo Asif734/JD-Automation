@@ -43,7 +43,46 @@ void main() {
     expect(arguments.last, '-');
   });
 
-  test('timeout fallback retains model, connection, and macOS context', () {
+  test('uses a fast bounded model for contextual query planning', () {
+    final arguments =
+        service.buildPlannerArguments(outputPath: '${root.path}/plan.json');
+    expect(arguments, containsAllInOrder(['--model', 'gpt-5.6-luna']));
+    expect(arguments, contains(service.searchPlanSchema.absolute.path));
+    expect(arguments, isNot(contains('--image')));
+    expect(arguments.last, '-');
+  });
+
+  test('parses and bounds planned knowledge queries', () {
+    expect(
+      parseKnowledgeSearchPlan(
+          '{"queries":["M880D previous year","M880D 去年日期","third","fourth"]}'),
+      ['M880D previous year', 'M880D 去年日期', 'third'],
+    );
+  });
+
+  test('plans only context-dependent customer turns', () {
+    expect(needsKnowledgeQueryPlanning('yes'), isTrue);
+    expect(needsKnowledgeQueryPlanning('what about it?'), isTrue);
+    expect(needsKnowledgeQueryPlanning('Can M880D change its date to 2025?'),
+        isFalse);
+  });
+
+  test('merges planned and raw retrieval without duplicate records', () {
+    final merged = mergeKnowledgeResults([
+      [
+        {'id': 'planned-a'},
+        {'id': 'shared'},
+      ],
+      [
+        {'id': 'raw-a'},
+        {'id': 'shared'},
+      ],
+    ]);
+    expect(
+        merged.map((record) => record['id']), ['planned-a', 'raw-a', 'shared']);
+  });
+
+  test('timeout fallback routes the conversation to human review', () {
     final draft = service.contextAwareFallback(
       <Map<String, dynamic>>[
         {'direction': 'incoming', 'body': 'model is TP732'},
@@ -61,11 +100,9 @@ void main() {
     );
 
     expect(draft.model, 'local-timeout-fallback-v2');
-    expect(draft.reply, contains('TP732'));
-    expect(draft.reply, contains('Bluetooth'));
-    expect(draft.reply, contains('macOS 26.6'));
-    expect(draft.reply, isNot(contains('confirm the exact model')));
-    expect(draft.decision, 'draft');
+    expect(draft.reply, contains('human support agent'));
+    expect(draft.decision, 'human_review_required');
+    expect(draftRequiresHumanReview(draft), isTrue);
     expect(draft.actions, isEmpty);
   });
 
@@ -139,6 +176,59 @@ void main() {
     expect(explicitlyRequestsHumanAgent('macOs 26.6.2'), isFalse);
     expect(
         explicitlyRequestsHumanAgent('Does TP732 work with my Mac?'), isFalse);
+  });
+
+  test('recognizes dissatisfaction with automated support', () {
+    expect(isCustomerDissatisfiedWithSupport('I am not satisfied'), isTrue);
+    expect(
+        isCustomerDissatisfiedWithSupport('This reply did not help'), isTrue);
+    expect(isCustomerDissatisfiedWithSupport('还是没解决，一直重复'), isTrue);
+    expect(isCustomerDissatisfiedWithSupport('The printer is not connected'),
+        isFalse);
+  });
+
+  test('excludes truncated Qianniu sidebar previews from Codex context', () {
+    expect(
+        isLikelySidebarPreviewLeak({
+          'source': 'jd_automation',
+          'direction': 'incoming',
+          'body': 'For only 3 employees, the M880... what is the other model',
+        }),
+        isTrue);
+    expect(
+        isLikelySidebarPreviewLeak({
+          'source': 'qianniu_capture',
+          'direction': 'outgoing',
+          'body': 'For 300 employees, our confirm... You\'re welcome!',
+        }),
+        isTrue);
+    expect(
+        isLikelySidebarPreviewLeak({
+          'source': 'generated_reply',
+          'direction': 'outgoing',
+          'body': 'Please wait... I am checking that for you.',
+        }),
+        isFalse);
+  });
+
+  test('customer model excludes conflicting polluted assistant context', () {
+    final filtered = excludeOutgoingModelConflicts([
+      {'direction': 'incoming', 'body': 'I mean TD630G'},
+      {
+        'direction': 'outgoing',
+        'body': 'The TD630 is the other printer model.'
+      },
+      {'direction': 'outgoing', 'body': 'The other model was M880.'},
+      {'direction': 'incoming', 'body': 'is it a printer?'},
+    ], {
+      'td630g'
+    });
+
+    expect(filtered.map((message) => message['body']), [
+      'I mean TD630G',
+      'The TD630 is the other printer model.',
+      'is it a printer?',
+    ]);
   });
 
   test('recognizes product catalog intent across follow-up context', () {
@@ -289,6 +379,55 @@ void main() {
     expect(video.reply, contains('video-guide request'));
   });
 
+  test('forces human requests, dissatisfaction, and no-solution replies', () {
+    final ordinary = service.parseResponse('''{
+      "reply":"I can continue troubleshooting.",
+      "decision":"draft",
+      "confidence":0.9,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+    final noSolution = service.parseResponse('''{
+      "reply":"I cannot find a reliable solution.",
+      "decision":"draft",
+      "confidence":0.4,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final human = service.enforceHumanReviewPolicy(
+        ordinary, 'Please connect me to a human agent');
+    final dissatisfied =
+        service.enforceHumanReviewPolicy(ordinary, 'This reply did not help');
+    final unresolved =
+        service.enforceHumanReviewPolicy(noSolution, 'My printer still fails');
+
+    expect(draftRequiresHumanReview(human), isTrue);
+    expect(draftHumanReviewReason(human), contains('explicitly requested'));
+    expect(draftRequiresHumanReview(dissatisfied), isTrue);
+    expect(draftHumanReviewReason(dissatisfied), contains('dissatisfied'));
+    expect(draftRequiresHumanReview(unresolved), isTrue);
+    expect(draftHumanReviewReason(unresolved), contains('reliable solution'));
+  });
+
   test('builds a useful human-review reason when model reason is null', () {
     final draft = service.parseResponse('''{
       "reply":"Please provide the order number.",
@@ -393,6 +532,26 @@ void main() {
     expect(buildTurnScopedRetrievalQuery(messages),
         'This is a portable printer, not an attendance machine.\nThe model is TP879.');
     expect(buildTurnScopedRetrievalQuery(messages), isNot(contains('M880')));
+  });
+
+  test('confirmation retrieval includes the question it answers', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'can i set date to the last year'},
+      {
+        'direction': 'outgoing',
+        'body': 'Do you mean setting the M880D date to 2025?'
+      },
+      {'direction': 'incoming', 'body': 'yes'},
+      {
+        'direction': 'incoming',
+        'body': 'you got it right 请尽快回复客户咨询，即将为客户推荐相似商品哦~'
+      },
+    ];
+
+    expect(
+      buildKnowledgeRetrievalQuery(messages),
+      contains('can i set date to the last year'),
+    );
   });
 
   test('detects an explicit product correction and model replacement', () {
@@ -517,6 +676,22 @@ void main() {
         records.any(
             (record) => record['id'] == 'attendance_product_selling_points'),
         isTrue);
+  });
+
+  test('retrieves M880D previous-year date instructions', () async {
+    final projectRoot = Directory.current;
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final records = await retriever.retrieve(
+      'Can I set the M880D system date to last year, 2025?',
+      limit: 5,
+    );
+
+    expect(
+      records
+          .any((record) => record['id'] == 'attendance_manual_date_time_setup'),
+      isTrue,
+    );
   });
 
   test('retrieves verified media paths linked by selected cards', () async {
