@@ -36,7 +36,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 7,
+        version: 8,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -70,6 +70,7 @@ class CaptureDatabase {
     await _createGeneratedDrafts(db);
     await _createTransferWelcomes(db);
     await _createSlaFallbacks(db);
+    await _createAnsweredCursors(db);
   }
 
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -94,6 +95,11 @@ class CaptureDatabase {
         user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
         SELECT user_id,newest_message_id,enqueued_at_ms + 120000,
           'pending',NULL,updated_at_ms FROM pending_customers''');
+    }
+    if (oldVersion < 8) {
+      await _createAnsweredCursors(db);
+      await _addColumnIfMissing(
+          db, 'generated_drafts', 'batch_end_message_id TEXT');
     }
   }
 
@@ -237,7 +243,15 @@ class CaptureDatabase {
       delivery_state TEXT NOT NULL DEFAULT 'ready',
       delivery_attempts INTEGER NOT NULL DEFAULT 0,
       retry_at_ms INTEGER,
-      last_error TEXT
+      last_error TEXT,
+      batch_end_message_id TEXT
+    )''');
+  }
+
+  Future<void> _createAnsweredCursors(Database db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS answered_cursors (
+      user_id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL
     )''');
   }
 
@@ -288,11 +302,23 @@ class CaptureDatabase {
     // that OCR notices late; its mere presence must not mark that new question
     // as answered.
     if (isCurrentViewport && result.lastInsertedDirection == 'outgoing') {
+      final document = await store.read(userId);
+      final lastIncoming = (document?['messages'] as List<Object?>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .where((message) => message['direction'] == 'incoming')
+          .lastOrNull;
       await db.transaction((txn) async {
         await txn.delete('pending_customers',
             where: 'user_id = ?', whereArgs: [userId]);
         await txn.delete('generated_drafts',
             where: 'user_id = ?', whereArgs: [userId]);
+        if (lastIncoming != null) {
+          await txn.rawInsert(
+              '''INSERT INTO answered_cursors(user_id,message_id)
+            VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
+            message_id=excluded.message_id''',
+              [userId, lastIncoming['id']?.toString() ?? '']);
+        }
         await txn.update(
           'sla_fallbacks',
           {
@@ -306,9 +332,8 @@ class CaptureDatabase {
       return result.changed;
     }
     if (result.insertedIncomingIds.isEmpty) return result.changed;
-    // A new customer turn invalidates any older unsent suggestion.
-    await db
-        .delete('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+    // A reply already generated for a frozen batch remains deliverable. The
+    // new message stays pending until that earlier batch has been sent.
     final controls = await db.query('conversation_control',
         where: 'user_id = ?', whereArgs: [userId], limit: 1);
     if (controls.isNotEmpty) {
@@ -332,17 +357,24 @@ class CaptureDatabase {
             whereArgs: [userId]);
       }
     }
-    await _upsertPending(capture);
+    await _upsertPending(capture, store);
     return result.changed;
   }
 
-  Future<void> _upsertPending(CapturedConversation capture) async {
+  Future<void> _upsertPending(
+      CapturedConversation capture, ConversationFileStore store) async {
     final userId = capture.customerExternalId ?? capture.customerName;
-    final newest = capture.messages.lastWhere(
-      (message) => message.direction == 'incoming',
-    );
+    // A viewport can contain an old image and newly arrived text. The image
+    // may be last in the capture list even though it was already stored. Use
+    // the actual durable tail so the pending cursor never moves backwards.
+    final document = await store.read(userId);
+    final newest = (document?['messages'] as List<Object?>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .lastWhere((message) => message['direction'] == 'incoming');
+    final newestId = newest['id']?.toString() ?? '';
     final now = capture.capturedAt.millisecondsSinceEpoch;
-    final slaStartedAt = _slaStartedAt(capture.capturedAt, newest.sentAt);
+    final slaStartedAt = _slaStartedAt(capture.capturedAt,
+        DateTime.tryParse(newest['sent_at']?.toString() ?? ''));
     final db = await database;
     await db.transaction((txn) async {
       await txn.rawInsert('''INSERT INTO pending_customers(
@@ -356,7 +388,7 @@ class CaptureDatabase {
         userId,
         capture.customerName,
         capture.stableKey,
-        newest.stableId,
+        newestId,
         now,
         now,
       ]);
@@ -373,7 +405,7 @@ class CaptureDatabase {
             THEN sla_fallbacks.sent_at_ms ELSE NULL END,
           updated_at_ms=excluded.updated_at_ms''', [
         userId,
-        newest.stableId,
+        newestId,
         slaStartedAt.millisecondsSinceEpoch +
             const Duration(minutes: 2).inMilliseconds,
         now,
@@ -440,11 +472,10 @@ class CaptureDatabase {
     final messages = (document['messages'] as List<Object?>? ?? const [])
         .whereType<Map<String, dynamic>>()
         .toList(growable: false);
+    final boundary = _answeredIndex(messages, await answeredMessageId(userId));
     final incomingIndex = messages
         .lastIndexWhere((message) => message['direction'] == 'incoming');
-    if (incomingIndex < 0) return false;
-    final answered = messages.skip(incomingIndex + 1).any(_isFinalOutgoing);
-    if (answered) return false;
+    if (incomingIndex <= boundary) return false;
     final incoming = messages[incomingIndex];
     final capturedAt =
         DateTime.tryParse(incoming['captured_at']?.toString() ?? '') ??
@@ -506,13 +537,12 @@ class CaptureDatabase {
         .toList(growable: false);
     final incomingIndex = messages
         .lastIndexWhere((message) => message['direction'] == 'incoming');
-    final answered = incomingIndex < 0 ||
-        messages.skip(incomingIndex + 1).any(_isFinalOutgoing);
+    final boundary = _answeredIndex(messages, await answeredMessageId(userId));
     final latestIncomingId =
         incomingIndex < 0 ? null : messages[incomingIndex]['id']?.toString();
     final queueMatchesLatest =
         rows.first['newest_message_id']?.toString() == latestIncomingId;
-    if (answered || !queueMatchesLatest) {
+    if (incomingIndex <= boundary || !queueMatchesLatest) {
       await db.delete('pending_customers',
           where: 'user_id = ?', whereArgs: [userId]);
       return false;
@@ -528,6 +558,24 @@ class CaptureDatabase {
         whereArgs: [userId],
         limit: 1);
     return rows.isEmpty ? null : rows.first['newest_message_id']?.toString();
+  }
+
+  Future<String?> answeredMessageId(String userId) async {
+    final rows = await (await database).query('answered_cursors',
+        columns: ['message_id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+        limit: 1);
+    return rows.isEmpty ? null : rows.first['message_id']?.toString();
+  }
+
+  int _answeredIndex(List<Map<String, dynamic>> messages, String? cursor) {
+    if (cursor != null) {
+      return messages.indexWhere((message) => message['id'] == cursor);
+    }
+    // Existing installations did not have a cursor. Their last delivered or
+    // manual reply is the best available boundary until the next send.
+    return messages.lastIndexWhere(_isFinalOutgoing);
   }
 
   bool _isFinalOutgoing(Map<String, dynamic> message) =>
@@ -648,31 +696,37 @@ class CaptureDatabase {
     );
   }
 
-  /// Saves an unsent Codex suggestion in transient SQLite, then removes the
-  /// user from the generation queue. JSON is unchanged until an actual send.
-  Future<int> saveDraft(int pendingId, AiDraft draft) async {
+  /// Saves the reply for a frozen batch. If later customer evidence arrived
+  /// during generation, its pending row remains for the next batch.
+  Future<int> saveDraft(int pendingId, AiDraft draft,
+      {String? expectedMessageId}) async {
     final db = await database;
-    final rows = await db.query('pending_customers',
-        where: 'id = ?', whereArgs: [pendingId], limit: 1);
-    if (rows.isEmpty) return 0;
-    final row = rows.first;
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction((txn) async {
+      final rows = await txn.query('pending_customers',
+          where: 'id = ?', whereArgs: [pendingId], limit: 1);
+      if (rows.isEmpty) return 0;
+      final row = rows.first;
+      final newerBatchPending = expectedMessageId != null &&
+          row['newest_message_id'] != expectedMessageId;
       await txn.rawInsert('''INSERT INTO generated_drafts(
         user_id,pending_id,reply,model,raw_json,created_at_ms,
-        delivery_state,delivery_attempts,retry_at_ms,last_error)
-        VALUES(?,?,?,?,?,?,'ready',0,NULL,NULL) ON CONFLICT(user_id) DO UPDATE SET
+        delivery_state,delivery_attempts,retry_at_ms,last_error,batch_end_message_id)
+        VALUES(?,?,?,?,?,?,'ready',0,NULL,NULL,?) ON CONFLICT(user_id) DO UPDATE SET
         pending_id=excluded.pending_id,reply=excluded.reply,
         model=excluded.model,raw_json=excluded.raw_json,
         created_at_ms=excluded.created_at_ms,delivery_state='ready',
-        delivery_attempts=0,retry_at_ms=NULL,last_error=NULL''', [
+        delivery_attempts=0,retry_at_ms=NULL,last_error=NULL,
+        batch_end_message_id=excluded.batch_end_message_id''', [
         row['user_id'],
         pendingId,
         draft.reply,
         draft.model,
         draft.rawJson,
         now,
+        expectedMessageId ?? row['newest_message_id'],
       ]);
+      if (newerBatchPending) return 1;
       return txn
           .delete('pending_customers', where: 'id = ?', whereArgs: [pendingId]);
     });
@@ -680,13 +734,19 @@ class CaptureDatabase {
 
   Future<StoredDraft?> latestDraft(int pendingId) async => null;
 
-  /// Returns the oldest generated reply only when no earlier customer is
-  /// still waiting for generation. This preserves first-arrival delivery
-  /// order while allowing later Codex jobs to finish in parallel.
+  Future<bool> hasUndeliveredDraft(String userId) async {
+    final rows = await (await database).query('generated_drafts',
+        columns: ['user_id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+        limit: 1);
+    return rows.isNotEmpty;
+  }
+
+  /// Sends the oldest ready reply without waiting for another customer's
+  /// generation. Each customer still has at most one undelivered draft.
   Future<QueuedDelivery?> nextReadyDelivery() async {
     final db = await database;
-    final pending = await db.query('pending_customers',
-        columns: ['id'], orderBy: 'id ASC', limit: 1);
     final now = DateTime.now().millisecondsSinceEpoch;
     final generated = await db.query(
       'generated_drafts',
@@ -699,9 +759,6 @@ class CaptureDatabase {
     if (generated.isEmpty) return null;
     final row = generated.first;
     final pendingId = row['pending_id']! as int;
-    if (pending.isNotEmpty && (pending.first['id']! as int) < pendingId) {
-      return null;
-    }
     final raw = jsonDecode(row['raw_json']! as String) as Map<String, dynamic>;
     return QueuedDelivery(
       pendingId: pendingId,
@@ -950,14 +1007,20 @@ class CaptureDatabase {
     await db.transaction((txn) async {
       await txn.delete('generated_drafts',
           where: 'user_id = ?', whereArgs: [userId]);
+      final batchEnd = row['batch_end_message_id']?.toString();
+      if (batchEnd != null && batchEnd.isNotEmpty) {
+        await txn.rawInsert('''INSERT INTO answered_cursors(user_id,message_id)
+          VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
+          message_id=excluded.message_id''', [userId, batchEnd]);
+      }
       await txn.update(
         'sla_fallbacks',
         {
           'state': 'completed',
           'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
         },
-        where: 'user_id = ?',
-        whereArgs: [userId],
+        where: 'user_id = ? AND message_id = ?',
+        whereArgs: [userId, batchEnd],
       );
     });
     return true;
@@ -987,7 +1050,7 @@ class CaptureDatabase {
       ],
     );
     await saveCapture(firstDemo);
-    await _upsertPending(firstDemo);
+    await _upsertPending(firstDemo, store);
     final secondDemo = CapturedConversation(
       stableKey: 'demo:tb32020',
       customerName: 'tb32020',
@@ -1012,7 +1075,7 @@ class CaptureDatabase {
       ],
     );
     await saveCapture(secondDemo);
-    await _upsertPending(secondDemo);
+    await _upsertPending(secondDemo, store);
   }
 
   Future<void> close() async {

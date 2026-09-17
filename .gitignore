@@ -74,3 +74,10 @@ tmp/
 *.so
 *.dylib
 **/flutter_assets/kernel_blob.bin
+
+# r21 knowledge package: keep text KB and rag_cards available for Git, but
+# leave the large archive, media originals, and generated index local.
+/Grozziie-KB-Consolidated-2026-09-15-r21.zip
+/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/assets/
+/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/sources/
+/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/rag_index/

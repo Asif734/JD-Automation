@@ -3,18 +3,36 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'semantic_knowledge_scorer.dart';
+
 class LocalKnowledgeRetriever {
-  LocalKnowledgeRetriever(this.knowledgeDirectory);
+  LocalKnowledgeRetriever(this.knowledgeDirectory,
+      {SemanticKnowledgeScorer? semanticScorer})
+      : _semanticScorer =
+            semanticScorer ?? const MacOSSemanticKnowledgeScorer();
 
   final Directory knowledgeDirectory;
-  static final Map<String, Future<List<Map<String, dynamic>>>> _cache = {};
+  final SemanticKnowledgeScorer _semanticScorer;
+  static final Map<String,
+          ({String revision, Future<List<Map<String, dynamic>>> records})>
+      _cache = {};
 
   Future<List<Map<String, Object?>>> retrieve(String query,
       {int limit = 5}) async {
-    final records = await _cache.putIfAbsent(
-      knowledgeDirectory.absolute.path,
-      () => _loadRecords(),
-    );
+    final key = knowledgeDirectory.absolute.path;
+    final revision = await _knowledgeRevision();
+    var cached = _cache[key];
+    if (cached == null || cached.revision != revision) {
+      cached = (revision: revision, records: _loadRecords());
+      _cache[key] = cached;
+    }
+    final List<Map<String, dynamic>> records;
+    try {
+      records = await cached.records;
+    } catch (_) {
+      if (identical(_cache[key]?.records, cached.records)) _cache.remove(key);
+      rethrow;
+    }
     final scored = <({double score, Map<String, dynamic> record})>[];
     for (final record in records) {
       final score = _score(query, record);
@@ -26,7 +44,50 @@ class LocalKnowledgeRetriever {
       return ((right.record['priority'] as num?) ?? 0)
           .compareTo((left.record['priority'] as num?) ?? 0);
     });
-    return scored.take(limit).map((item) => _compact(item.record)).toList();
+    // Keep lexical matching as the candidate gate and use local sentence
+    // similarity to rerank the strongest candidates. This bounds native work
+    // and prevents an unrelated semantic hit from replacing exact evidence.
+    final candidates =
+        scored.take(limit > 35 ? limit : 35).toList(growable: false);
+    final semanticScores = await _semanticScorer.score(
+        query, candidates.map((item) => item.record).toList(growable: false));
+    final hybrid = [
+      for (final item in candidates)
+        (
+          score: item.score +
+              ((semanticScores[item.record['id']?.toString()] ?? 0) - 0.4)
+                      .clamp(0.0, 1.0) *
+                  30,
+          record: item.record,
+        ),
+    ];
+    hybrid.sort((left, right) {
+      final byScore = right.score.compareTo(left.score);
+      if (byScore != 0) return byScore;
+      return ((right.record['priority'] as num?) ?? 0)
+          .compareTo((left.record['priority'] as num?) ?? 0);
+    });
+    return hybrid.take(limit).map((item) => _compact(item.record)).toList();
+  }
+
+  Future<String> _knowledgeRevision() async {
+    final files = <File>[
+      File(p.join(knowledgeDirectory.path, 'rag_cards',
+          'customer_service_rag_cards.jsonl')),
+      File(p.join(knowledgeDirectory.path, 'rag_cards', 'source_chunks.jsonl')),
+    ];
+    await for (final entry in knowledgeDirectory.list(followLinks: false)) {
+      if (entry is File && _isCustomerKnowledgeMarkdown(entry)) {
+        files.add(entry);
+      }
+    }
+    files.sort((left, right) => left.path.compareTo(right.path));
+    final metadata = await Future.wait(files.map((file) async {
+      final stat = await file.stat();
+      return '${file.path}:${stat.size}:${stat.modified.microsecondsSinceEpoch}:'
+          '${stat.changed.microsecondsSinceEpoch}';
+    }));
+    return metadata.join('|');
   }
 
   Future<List<Map<String, Object?>>> mediaForRecords(
@@ -38,9 +99,7 @@ class LocalKnowledgeRetriever {
       final models = (record['models'] as List<Object?>? ?? const [])
           .map((value) => value.toString())
           .toList(growable: false);
-      for (final rawSource
-          in (record['source_files'] as List<Object?>? ?? const [])) {
-        final relativePath = rawSource.toString();
+      for (final relativePath in _mediaPaths(record)) {
         if (!_isSupportedMedia(relativePath)) continue;
         final file = File(p.join(knowledgeDirectory.path, relativePath));
         if (!await file.exists()) continue;
@@ -74,10 +133,11 @@ class LocalKnowledgeRetriever {
       defaultPriority: 40,
     );
 
+    // The r21 package also contains plans, source evidence, and READMEs.
+    // Only root-level customer knowledge belongs in reply retrieval.
     final markdownFiles = await knowledgeDirectory
-        .list(recursive: true, followLinks: false)
-        .where((entry) =>
-            entry is File && p.extension(entry.path).toLowerCase() == '.md')
+        .list(followLinks: false)
+        .where((entry) => entry is File && _isCustomerKnowledgeMarkdown(entry))
         .cast<File>()
         .toList();
     markdownFiles.sort((left, right) => left.path.compareTo(right.path));
@@ -87,6 +147,13 @@ class LocalKnowledgeRetriever {
       records.addAll(_markdownRecords(relativePath, content));
     }
     return records;
+  }
+
+  bool _isCustomerKnowledgeMarkdown(File file) {
+    final name = p.basename(file.path).toLowerCase();
+    return name.endsWith('_kb.md') ||
+        name == 'customer_service_high_priority_issues.md' ||
+        name == 'tmall_customer_service_rules.md';
   }
 
   Future<void> _loadJsonLines(
@@ -165,18 +232,19 @@ class LocalKnowledgeRetriever {
   }
 
   double _score(String query, Map<String, dynamic> record) {
-    final normalizedQuery = _normalize(query);
+    final searchQuery = _expandEnglishTerms(query);
+    final normalizedQuery = _normalize(searchQuery);
     if (normalizedQuery.isEmpty) return 0;
     var score = 0.0;
-    score += _termScore(query, record['keywords'], 8);
-    score += _termScore(query, record['synonyms'], 7);
-    score += _termScore(query, record['models'], 10);
+    score += _termScore(searchQuery, record['keywords'], 8);
+    score += _termScore(searchQuery, record['synonyms'], 7);
+    score += _termScore(searchQuery, record['models'], 10);
     score += _textScore(normalizedQuery, record['issue']?.toString(), 4);
     score += _textScore(normalizedQuery, record['intent']?.toString(), 2);
     score += _textScore(normalizedQuery, record['id']?.toString(), 6);
     score += _textScore(normalizedQuery, record['title']?.toString(), 5);
     score += _textScore(normalizedQuery, record['content']?.toString(), 6);
-    score += _termScore(query, record['source_files'], 3);
+    score += _termScore(searchQuery, record['source_files'], 3);
     if (_isMediaQuery(normalizedQuery) && _hasSupportedMedia(record)) {
       score += 20;
     }
@@ -238,9 +306,34 @@ class LocalKnowledgeRetriever {
       ].any(query.contains);
 
   bool _hasSupportedMedia(Map<String, dynamic> record) {
+    return _mediaPaths(record).isNotEmpty;
+  }
+
+  List<String> _mediaPaths(Map<String, dynamic> record) {
+    final paths = <String>{};
     final sources = record['source_files'];
-    return sources is List<Object?> &&
-        sources.any((source) => _isSupportedMedia(source.toString()));
+    if (sources is List) {
+      paths.addAll(sources.map((source) => source.toString()));
+    }
+    final visualEvidence = record['visual_evidence'];
+    if (visualEvidence is Map) {
+      paths.addAll(visualEvidence.values.map((source) => source.toString()));
+    }
+    return paths.where(_isSupportedMedia).toList(growable: false);
+  }
+
+  String _expandEnglishTerms(String query) {
+    final lower = query.toLowerCase();
+    final terms = <String>[];
+    for (final (pattern, translation) in const [
+      (r'\bdate\b', '日期'),
+      (r'\byear\b', '年份'),
+      (r'\btime\b', '时间'),
+      (r'\bbattery\b', '电池'),
+    ]) {
+      if (RegExp(pattern).hasMatch(lower)) terms.add(translation);
+    }
+    return terms.isEmpty ? query : '$query ${terms.join(' ')}';
   }
 
   double _termScore(String query, Object? rawTerms, double weight) {
@@ -324,6 +417,7 @@ class LocalKnowledgeRetriever {
           'do_not_say',
           'escalation',
           'source_files',
+          'visual_evidence',
           'source_file',
           'content',
         ])

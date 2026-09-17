@@ -12,6 +12,7 @@ import 'capture/ocr_image_candidate_selector.dart';
 import 'capture/video_audio_extractor.dart';
 import 'capture/video_frame_extractor.dart';
 import 'codex/codex_reply_service.dart';
+import 'codex/holding_replies.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
 import 'storage/capture_database.dart';
@@ -53,10 +54,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   // Covers native window capture, Apple Vision recognition, and JD UI delays.
   static const _captureOperationTimeout = Duration(seconds: 90);
   static const _scanInterval = Duration(seconds: 2);
-  static const _customerBurstDebounce = Duration(seconds: 3);
+  static const _batchCollectionWindow = Duration(milliseconds: 2500);
   static const _draftFailureRetryDelay = Duration(seconds: 10);
   static const _deliveryFailureRetryDelay = Duration(seconds: 10);
-  static const _slaFallbackReply = '请稍等片刻。';
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
@@ -71,15 +71,18 @@ class _CaptureHomeState extends State<CaptureHome> {
   bool _autoCaptureRunning = false;
   bool _autoCaptureBusy = false;
   Timer? _autoCaptureTimer;
-  final Map<String, Timer> _draftDebounceTimers = {};
+  final Map<String, Timer> _draftRetryTimers = {};
+  final Map<String, Timer> _batchCollectionTimers = {};
   final Map<String, Timer> _slaFallbackTimers = {};
   Timer? _deliveryRetryTimer;
   final Set<String> _draftQueue = {};
-  // Each active customer owns a separate ephemeral Codex CLI process. Four
+  // Each active customer owns a separate Codex CLI turn. Twenty
   // workers let the normal multi-chat workload generate concurrently without
   // launching an unbounded number of local model processes.
-  static const int _maxConcurrentDraftWorkers = 4;
+  static const int _maxConcurrentDraftWorkers = 20;
   final Set<String> _activeDraftUsers = {};
+  final Map<String, CodexGenerationCancellation> _activeDraftCancellations = {};
+  final Map<String, String> _activeDraftMessageIds = {};
   Future<void> _jdUiTail = Future<void>.value();
   bool _deliveryWorkerRunning = false;
   bool _deliveryRequested = false;
@@ -137,7 +140,7 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   Future<void> _markContacting(HumanReviewTicket ticket) async {
     try {
-      _draftDebounceTimers.remove(ticket.conversationId)?.cancel();
+      _draftRetryTimers.remove(ticket.conversationId)?.cancel();
       _slaFallbackTimers.remove(ticket.conversationId)?.cancel();
       _draftQueue.remove(ticket.conversationId);
       await _database.markTicketContacting(ticket.id);
@@ -191,7 +194,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       _autoCaptureRunning = true;
       _error = null;
       _diagnostics =
-          'Automatic OCR capture started. The sidebar is checked every 2 seconds; each customer message burst waits for 3 quiet seconds.';
+          'Automatic OCR capture started. The sidebar is checked every 2 seconds; saved customer evidence is queued for drafting immediately.';
     });
     _autoCaptureTimer =
         Timer.periodic(_scanInterval, (_) => unawaited(_runAutoCaptureCycle()));
@@ -212,19 +215,38 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   void _scheduleDraftGeneration(String userId, {required bool newEvidence}) {
     unawaited(_scheduleSlaFallback(userId));
-    final existing = _draftDebounceTimers[userId];
-    if (!newEvidence && existing?.isActive == true) return;
-    if (newEvidence) existing?.cancel();
-    if (!newEvidence && _activeDraftUsers.contains(userId)) return;
-    _draftDebounceTimers[userId] = Timer(_customerBurstDebounce, () async {
-      _draftDebounceTimers.remove(userId);
-      if (!await _database.hasPendingUnanswered(userId) ||
-          await _database.isHumanContacting(userId)) {
-        return;
-      }
-      _draftQueue.add(userId);
-      _runDraftWorkers();
-    });
+    if (newEvidence) {
+      _draftRetryTimers.remove(userId)?.cancel();
+      _batchCollectionTimers.remove(userId)?.cancel();
+      _batchCollectionTimers[userId] = Timer(_batchCollectionWindow, () {
+        _batchCollectionTimers.remove(userId);
+        unawaited(_queueDraftIfPending(userId));
+      });
+      return;
+    }
+    if (_batchCollectionTimers.containsKey(userId)) return;
+    if (!newEvidence &&
+        (_draftRetryTimers.containsKey(userId) ||
+            _draftQueue.contains(userId) ||
+            _activeDraftUsers.contains(userId))) {
+      return;
+    }
+    unawaited(_queueDraftIfPending(userId));
+  }
+
+  Future<void> _queueDraftIfPending(String userId) async {
+    if (!await _database.hasPendingUnanswered(userId) ||
+        await _database.isHumanContacting(userId)) {
+      return;
+    }
+    if (_activeDraftUsers.contains(userId) ||
+        await _database.hasUndeliveredDraft(userId)) {
+      return;
+    }
+    final pendingMessageId = await _database.pendingMessageId(userId);
+    if (pendingMessageId == null) return;
+    _draftQueue.add(userId);
+    _runDraftWorkers();
   }
 
   Future<void> _scheduleSlaFallback(String userId) async {
@@ -249,6 +271,20 @@ class _CaptureHomeState extends State<CaptureHome> {
   Future<void> _sendSlaFallback(SlaFallbackJob job) async {
     if (!_autoCaptureRunning) return;
     try {
+      final document = await (await _database.history).read(job.userId);
+      final incomingBodies =
+          (document?['messages'] as List<Object?>? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .where((message) => message['direction'] == 'incoming')
+              .map((message) => message['body']?.toString() ?? '')
+              .where((body) => body.trim().isNotEmpty)
+              .toList(growable: false);
+      final latestCustomerText = incomingBodies
+              .where((body) => !body.startsWith('[Customer sent'))
+              .lastOrNull ??
+          incomingBodies.lastOrNull ??
+          '';
+      final holdingReply = chooseHoldingReply(latestCustomerText);
       await _withJdUiOperation(() async {
         if (!await _database.reserveSlaFallback(
             userId: job.userId, messageId: job.messageId)) {
@@ -260,17 +296,17 @@ class _CaptureHomeState extends State<CaptureHome> {
               .timeout(_captureOperationTimeout);
           await _adapter.sendDraftOnce(
             expectedCustomer: job.userId,
-            reply: _slaFallbackReply,
+            reply: holdingReply,
             mediaPaths: const [],
           );
           await _database.markSlaFallbackSent(
             userId: job.userId,
             messageId: job.messageId,
-            reply: _slaFallbackReply,
+            reply: holdingReply,
           );
           if (mounted) {
             setState(() => _diagnostics =
-                'Sent the two-minute SLA acknowledgement to ${job.userId}; the final answer remains queued.');
+                'Sent a holding message to ${job.userId}; the final answer remains queued.');
           }
         } on PlatformException catch (error) {
           if (error.code == 'send_unconfirmed') {
@@ -555,10 +591,10 @@ class _CaptureHomeState extends State<CaptureHome> {
       String? userId;
       for (final candidate in _draftQueue) {
         // One customer owns at most one active Codex process. A later turn
-        // from that customer remains queued until the current process exits,
-        // while up to four different customers generate in parallel. Every
-        // worker starts its own ephemeral Codex CLI process with its own input
-        // and output file; customer histories are never shared.
+        // waits until the frozen reply is delivered, while up to twenty
+        // different customers generate in parallel. Every
+        // worker starts its own Codex CLI turn with its own input and output
+        // file; customer sessions and histories are never shared.
         if (!_activeDraftUsers.contains(candidate)) {
           userId = candidate;
           break;
@@ -567,33 +603,56 @@ class _CaptureHomeState extends State<CaptureHome> {
       if (userId == null) break;
       _draftQueue.remove(userId);
       _activeDraftUsers.add(userId);
-      unawaited(_runDraftWorker(userId));
+      final cancellation = CodexGenerationCancellation();
+      _activeDraftCancellations[userId] = cancellation;
+      unawaited(_runDraftWorker(userId, cancellation));
     }
   }
 
-  Future<void> _runDraftWorker(String userId) async {
+  Future<void> _runDraftWorker(
+      String userId, CodexGenerationCancellation cancellation) async {
     try {
-      await _processDraftUser(userId);
+      await _processDraftUser(userId, cancellation);
+    } on CodexGenerationCancelled {
+      // A later saved customer message owns the queued replacement turn.
+    } on CodexGenerationTimedOut {
+      final messageId = _activeDraftMessageIds[userId];
+      final job = await _database.slaFallbackJob(userId);
+      if (job != null && job.messageId == messageId) {
+        _slaFallbackTimers.remove(userId)?.cancel();
+        await _sendSlaFallback(job);
+      }
+      _scheduleDraftRetry(userId);
     } catch (error) {
       if (mounted) setState(() => _error = error);
-      _draftDebounceTimers.remove(userId)?.cancel();
-      _draftDebounceTimers[userId] = Timer(_draftFailureRetryDelay, () async {
-        _draftDebounceTimers.remove(userId);
-        if (!await _database.hasPendingUnanswered(userId) ||
-            await _database.isHumanContacting(userId)) {
-          return;
-        }
-        _draftQueue.add(userId);
-        _runDraftWorkers();
-      });
+      _scheduleDraftRetry(userId);
     } finally {
+      if (identical(_activeDraftCancellations[userId], cancellation)) {
+        _activeDraftCancellations.remove(userId);
+        _activeDraftMessageIds.remove(userId);
+      }
       _activeDraftUsers.remove(userId);
       _runDraftWorkers();
       _requestDelivery();
     }
   }
 
-  Future<void> _processDraftUser(String userId) async {
+  void _scheduleDraftRetry(String userId) {
+    _draftRetryTimers.remove(userId)?.cancel();
+    _draftRetryTimers[userId] = Timer(_draftFailureRetryDelay, () async {
+      _draftRetryTimers.remove(userId);
+      if (!await _database.hasPendingUnanswered(userId) ||
+          await _database.isHumanContacting(userId)) {
+        return;
+      }
+      _draftQueue.add(userId);
+      _runDraftWorkers();
+    });
+  }
+
+  Future<void> _processDraftUser(
+      String userId, CodexGenerationCancellation cancellation) async {
+    cancellation.throwIfCancelled();
     final pending = await _database.conversations();
     final matches = pending
         .where((conversation) => conversation.userId == userId)
@@ -603,20 +662,21 @@ class _CaptureHomeState extends State<CaptureHome> {
     final conversation = matches.first;
     final messageIdAtGenerationStart = await _database.pendingMessageId(userId);
     if (messageIdAtGenerationStart == null) return;
+    _activeDraftMessageIds[userId] = messageIdAtGenerationStart;
     final service = await CodexReplyService.discover(_database);
-    final draft =
-        await service.generate(conversation: conversation, database: _database);
-    // More lines arrived during generation. The customer's debounce timer
-    // owns the newer burst, so this stale result must never be saved or sent.
-    if (await _database.pendingMessageId(userId) !=
-        messageIdAtGenerationStart) {
-      return;
-    }
+    cancellation.throwIfCancelled();
+    final draft = await service.generate(
+        conversation: conversation,
+        database: _database,
+        batchEndMessageId: messageIdAtGenerationStart,
+        cancellation: cancellation);
+    cancellation.throwIfCancelled();
     if (await _promoteCodexDetectedVideo(conversation, draft)) {
       _scheduleDraftGeneration(userId, newEvidence: true);
       return;
     }
-    final saved = await _database.saveDraft(conversation.id, draft);
+    final saved = await _database.saveDraft(conversation.id, draft,
+        expectedMessageId: messageIdAtGenerationStart);
     // Contacting or a manually observed seller reply may remove the queue
     // while Codex is generating. Never send a result from that stale turn.
     if (saved == 0 || await _database.isHumanContacting(userId)) return;
@@ -833,6 +893,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       );
       await _database.markReplySent(userId: userId, reply: draft.reply);
       _slaFallbackTimers.remove(userId)?.cancel();
+      _scheduleDraftGeneration(userId, newEvidence: false);
       final evidence = _processingUnreadEvidence[userId];
       if (evidence != null) _handledUnreadEvidence[userId] = evidence;
       if (mounted) {
@@ -862,16 +923,8 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     final textCapture = extraction.capture;
 
-    // A sender-bounded OCR body is already definitive text evidence. Saving
-    // it must not depend on clicking the bubble and copying from JD: passive
-    // monitoring intentionally leaves JD in the background, where clipboard
-    // classification returns `unavailable` and previously discarded valid
-    // Apple Vision text. This also prevents the cursor jumping on every scan.
-    if (extraction.latestIncomingHasText) {
-      _visibleMediaTrace =
-          'strict routing: verified incoming OCR text -> saved directly';
-      return textCapture;
-    }
+    // Keep verified OCR text, then inspect any customer-owned visual region in
+    // the same viewport. An image followed by text must not skip image capture.
     if (!extraction.latestVisibleSenderIsIncoming) {
       _visibleMediaTrace =
           'strict routing: newest visible sender is not the customer';
@@ -885,7 +938,8 @@ class _CaptureHomeState extends State<CaptureHome> {
     );
     final visibleMessages = textCapture?.messages ?? const [];
     final latestVisible = visibleMessages.isEmpty ? null : visibleMessages.last;
-    if (latestVisible?.direction == 'outgoing') {
+    if (latestVisible?.direction == 'outgoing' ||
+        extraction.latestIncomingHasText) {
       imageCandidates = imageCandidates.where((region) {
         final bottom = region.y + region.height;
         final sellerActivityBelow = inspection.observations.any((item) {
@@ -1157,7 +1211,10 @@ class _CaptureHomeState extends State<CaptureHome> {
   void dispose() {
     _autoCaptureTimer?.cancel();
     _deliveryRetryTimer?.cancel();
-    for (final timer in _draftDebounceTimers.values) {
+    for (final timer in _draftRetryTimers.values) {
+      timer.cancel();
+    }
+    for (final timer in _batchCollectionTimers.values) {
       timer.cancel();
     }
     for (final timer in _slaFallbackTimers.values) {

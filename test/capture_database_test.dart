@@ -385,7 +385,8 @@ void main() {
         'sent');
   });
 
-  test('parallel generation preserves first-arrival delivery order', () async {
+  test('ready replies can be delivered while another customer generates',
+      () async {
     final root = await Directory.systemTemp.createTemp('fifo_delivery_test_');
     final database = CaptureDatabase(storageRoot: root);
     addTearDown(() async {
@@ -428,9 +429,9 @@ void main() {
     final first = pending.firstWhere((item) => item.userId == 'customer-a');
     final second = pending.firstWhere((item) => item.userId == 'customer-b');
 
-    // B finishes generation first, but it cannot pass A in the send queue.
+    // B finishes first, so its ready reply does not wait for A's generation.
     await database.saveDraft(second.id, draft('customer-b'));
-    expect(await database.nextReadyDelivery(), isNull);
+    expect((await database.nextReadyDelivery())?.userId, 'customer-b');
 
     await database.saveDraft(first.id, draft('customer-a'));
     final deliveryA = await database.nextReadyDelivery();
@@ -442,8 +443,7 @@ void main() {
     expect(deliveryB?.userId, 'customer-b');
   });
 
-  test('failed earlier generation can be skipped without blocking FIFO',
-      () async {
+  test('a pending generation does not block a ready reply', () async {
     final root = await Directory.systemTemp.createTemp('fifo_failure_test_');
     final database = CaptureDatabase(storageRoot: root);
     addTearDown(() async {
@@ -482,7 +482,7 @@ void main() {
     final pending = await database.conversations();
     final second = pending.firstWhere((item) => item.userId == 'customer-b');
     await database.saveDraft(second.id, secondDraft);
-    expect(await database.nextReadyDelivery(), isNull);
+    expect((await database.nextReadyDelivery())?.userId, 'customer-b');
 
     await database.abandonPendingCustomer('customer-a');
     expect((await database.nextReadyDelivery())?.userId, 'customer-b');
@@ -517,6 +517,87 @@ void main() {
 
     await database.saveCapture(capture('line-2', 'over wifi', 2));
     expect(await database.pendingMessageId('burst'), 'line-2');
+  });
+
+  test('frozen image batch can be sent while later text stays pending',
+      () async {
+    final root = await Directory.systemTemp.createTemp('image_text_batch_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    CapturedConversation capture(CapturedMessage message, int time) =>
+        CapturedConversation(
+          stableKey: 'customer:buyer',
+          customerName: 'buyer',
+          customerExternalId: 'buyer',
+          capturedAt: DateTime.fromMillisecondsSinceEpoch(time),
+          messages: [message],
+        );
+    await database.saveCapture(capture(
+        const CapturedMessage(
+          stableId: 'image-1',
+          direction: 'incoming',
+          body: '[Customer sent an image]',
+          axPath: 'test',
+          media: [CapturedMedia(type: 'image', path: '/tmp/customer.png')],
+        ),
+        1));
+    final pending = (await database.conversations()).single;
+    // OCR sees the new text and the already saved image in one viewport.
+    // The old image is last in this capture list, but must not rewind pending.
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: DateTime.fromMillisecondsSinceEpoch(2),
+      messages: const [
+        CapturedMessage(
+          stableId: 'text-2',
+          direction: 'incoming',
+          body: 'What is this error?',
+          axPath: 'test',
+        ),
+        CapturedMessage(
+          stableId: 'image-1',
+          direction: 'incoming',
+          body: '[Customer sent an image]',
+          axPath: 'test',
+          media: [CapturedMedia(type: 'image', path: '/tmp/customer.png')],
+        ),
+      ],
+    ));
+    const draft = AiDraft(
+      reply: 'Old image-only answer',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson: '{"reply":"Old image-only answer","decision":"draft",'
+          '"confidence":1,"risk_level":"low","model":"test",'
+          '"used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    expect(
+        await database.saveDraft(pending.id, draft,
+            expectedMessageId: 'image-1'),
+        1);
+    expect(await database.pendingMessageId('buyer'), 'text-2');
+    expect(await database.hasUndeliveredDraft('buyer'), isTrue);
+    expect((await database.nextReadyDelivery())?.draft.reply,
+        'Old image-only answer');
+    expect(await database.markReplySent(userId: 'buyer', reply: draft.reply),
+        isTrue);
+    expect(await database.answeredMessageId('buyer'), 'image-1');
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
+    final messages = ((await (await database.history)
+            .read('buyer'))?['messages'] as List<Object?>? ??
+        const []);
+    expect(messages.map((message) => (message as Map<String, dynamic>)['id']),
+        containsAll(['image-1', 'text-2']));
   });
 
   test('human contacting pauses AI and contacted resumes only on next message',

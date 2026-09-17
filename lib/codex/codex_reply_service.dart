@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../domain/capture_models.dart';
 import '../storage/capture_database.dart';
+import 'customer_codex_session.dart';
 import 'local_knowledge_retriever.dart';
 import 'local_reply_router.dart';
 
@@ -105,11 +106,24 @@ bool hasProductCatalogIntent(String text) {
   final asksAboutProducts = RegExp(
           r'\b(what|which) products?\b|\b(what|which) models?\b|\bproducts? (?:do you have|do you sell|are available)\b|\b(recommend|suggest|should (?:i|we) buy|want to buy|need to buy)\b|有什么产品|有哪些产品|有什么型号|有哪些型号|推荐|建议|哪款|买哪|选哪|想买|需要买')
       .hasMatch(normalized);
-  return asksAboutProducts && hasProductContext(normalized);
+  return (asksAboutProducts || hasProductListIntent(normalized)) &&
+      hasProductContext(normalized);
+}
+
+bool hasProductListIntent(String text) {
+  final normalized = text.toLowerCase().replaceAll(RegExp(r'[._-]'), ' ');
+  return RegExp(
+          r'\bmodel list\b|\bmodels list\b|\blist of (?:the )?(?:current |available )?(?:models|printers)\b|\bwhat (?:are )?(?:the )?(?:other )?models?\b|\bwhat (?:are )?(?:the )?[a-z ]*printers? (?:you have|do you have)\b|型号(?:列表|清单|有哪些)|(?:有哪些|有什么).*型号|(?:热敏|针式).*打印机有哪些|所有.*型号|全部.*型号')
+      .hasMatch(normalized);
 }
 
 bool hasProductSuggestionIntent(String text) => RegExp(
       r'\b(recommend|recommendation|suggest|suggestion|should (?:i|we) buy|which (?:one|model)|what (?:should|would) (?:i|we) (?:buy|choose))\b|推荐|建议|哪款|买哪|选哪|怎么选',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool hasProductFeatureIntent(String text) => RegExp(
+      r'\b(features?|specs?|specifications?|parameters?|capabilities|paper width|print width|resolution|dpi|connectivity|interfaces?|compatible|compatibility|supports?|tell me about)\b|\bwork(?:s)? with\b|功能|参数|规格|配置|特点|纸宽|分辨率|接口|连接方式|兼容|支持',
       caseSensitive: false,
     ).hasMatch(text);
 
@@ -121,7 +135,8 @@ bool hasProductContext(String text) => RegExp(
 bool hasProductCatalogIntentWithContext(
         String currentTurnText, String recentCustomerContext) =>
     hasProductCatalogIntent(currentTurnText) ||
-    (hasProductSuggestionIntent(currentTurnText) &&
+    ((hasProductSuggestionIntent(currentTurnText) ||
+            hasProductListIntent(currentTurnText)) &&
         hasProductContext(recentCustomerContext));
 
 class ProductRetrievalConstraints {
@@ -160,6 +175,46 @@ Future<String> loadProductRecommendationCatalog(
   return catalog;
 }
 
+/// Keep the exact source rows for a named model beside the full catalog. A
+/// grouped row is evidence for each model in its model cell, but a substring
+/// match (TP730 in TP730S, for example) is not evidence.
+List<Map<String, String>> verifiedCatalogRowsForModels(
+    String catalog, Set<String> models) {
+  if (models.isEmpty) return const [];
+  final matches = <Map<String, String>>[];
+  var section = '';
+  for (final line in const LineSplitter().convert(catalog)) {
+    if (line.startsWith('## ')) section = line.substring(3).trim();
+    if (!line.startsWith('|')) continue;
+    final cells = line
+        .split('|')
+        .skip(1)
+        .take(line.split('|').length - 2)
+        .map((cell) => cell.trim())
+        .toList(growable: false);
+    if (cells.length < 3 ||
+        cells.every((cell) => RegExp(r'^[-: ]+$').hasMatch(cell))) {
+      continue;
+    }
+    // These catalog tables put model identifiers in column one or two. The
+    // Current inventory row is only a list, not a model specification.
+    if (section.contains('Current 型号清单')) continue;
+    final modelCells = cells.take(2).join(' ');
+    final matched = models.where((model) => RegExp(
+          r'(^|[^A-Za-z0-9])' + RegExp.escape(model) + r'(?=$|[^A-Za-z0-9])',
+          caseSensitive: false,
+        ).hasMatch(modelCells));
+    if (matched.isEmpty) continue;
+    matches.add({
+      'source_file': productRecommendationCatalogFileName,
+      'section': section,
+      'models': matched.join(', '),
+      'source_row': line,
+    });
+  }
+  return matches;
+}
+
 List<Map<String, dynamic>> latestCustomerTurn(
     List<Map<String, dynamic>> messages) {
   final reversed = <Map<String, dynamic>>[];
@@ -174,6 +229,29 @@ List<Map<String, dynamic>> latestCustomerTurn(
     if (foundIncoming && direction == 'outgoing') break;
   }
   return reversed.reversed.toList(growable: false);
+}
+
+/// Selects the frozen unanswered customer batch by durable message IDs.
+/// A reply to an earlier batch can be appended after these messages while a
+/// later batch is waiting; outgoing position alone is not a safe boundary.
+List<Map<String, dynamic>> customerBatchThroughMessage(
+  List<Map<String, dynamic>> messages, {
+  required String endMessageId,
+  String? answeredMessageId,
+}) {
+  final end = messages.indexWhere((message) => message['id'] == endMessageId);
+  if (end < 0) return const [];
+  final answered = answeredMessageId == null
+      ? messages.take(end + 1).toList().lastIndexWhere((message) =>
+          message['direction'] == 'outgoing' &&
+          message['source'] != 'sla_fallback')
+      : messages.indexWhere((message) => message['id'] == answeredMessageId);
+  if (answered >= end) return const [];
+  return messages
+      .skip(answered + 1)
+      .take(end - answered)
+      .where((message) => message['direction'] == 'incoming')
+      .toList(growable: false);
 }
 
 /// Returns the newest customer requirements without allowing generated replies
@@ -373,6 +451,23 @@ List<String> parseKnowledgeSearchPlan(String source) {
   return queries;
 }
 
+/// `codex exec --json` announces the durable session before generating output.
+String? parseCodexThreadId(String stdoutText) {
+  for (final line in const LineSplitter().convert(stdoutText)) {
+    try {
+      final value = jsonDecode(line);
+      if (value is Map<String, dynamic> &&
+          value['type'] == 'thread.started' &&
+          value['thread_id'] is String) {
+        return value['thread_id'] as String;
+      }
+    } on FormatException {
+      continue;
+    }
+  }
+  return null;
+}
+
 List<Map<String, Object?>> mergeKnowledgeResults(
   List<List<Map<String, Object?>>> resultSets, {
   int limit = 8,
@@ -394,13 +489,14 @@ List<Map<String, Object?>> mergeKnowledgeResults(
   return merged;
 }
 
-Set<String> explicitProductModels(String text) =>
-    RegExp(r'\b(?:m|t|tp|td|ak|tg|tm|th|kd|kb)[\s-]?\d{2,5}[a-z]{0,3}\b',
-            caseSensitive: false)
-        .allMatches(text)
-        .map((match) =>
-            match.group(0)!.toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
-        .toSet();
+Set<String> explicitProductModels(String text) => RegExp(
+        r'\b[a-z]{1,5}\d{2,5}[a-z]{0,3}\b',
+        caseSensitive: false)
+    .allMatches(text)
+    .map((match) =>
+        match.group(0)!.toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
+    .where((model) => !RegExp(r'^(?:ios|macos|usb|dpi|wifi)\d').hasMatch(model))
+    .toSet();
 
 bool isProductContextResetText(String text) => RegExp(
       r'\b(different|another|other|new)\s+(?:product|model|printer|machine|one)\b|\bnot\s+(?:this|that|the|an?)\s+(?:one|product|model|printer|machine)\b|不同的(?:产品|型号|打印机|机器)|另一个(?:产品|型号|打印机|机器)|其他(?:产品|型号|打印机|机器)|换(?:一个|款)|不是这个',
@@ -555,12 +651,11 @@ List<Map<String, Object?>> filterKnowledgeForLatestProduct(
       ...recordModels,
     ].whereType<Object>().join(' ').toLowerCase();
     final isAttendance =
-        RegExp(r'attendance|paper.?card|考勤|打卡|m880').hasMatch(recordText);
-    final isThermalLabel = RegExp(
-            r'thermal|shipping.?label|label.?printer|热敏|标签|面单|tp(?:518|730|732|733|874)')
-        .hasMatch(recordText);
-    final isDotMatrix = RegExp(r'dot.?matrix|针式|多联|td630|ak8|ak9|tg6|tg8|tm690')
-        .hasMatch(recordText);
+        RegExp(r'attendance|paper.?card|考勤|打卡').hasMatch(recordText);
+    final isThermalLabel =
+        RegExp(r'thermal|shipping.?label|label.?printer|热敏|标签|面单')
+            .hasMatch(recordText);
+    final isDotMatrix = RegExp(r'dot.?matrix|针式|多联').hasMatch(recordText);
 
     if ((portablePrinter ||
             rejectsAttendance ||
@@ -653,6 +748,45 @@ String draftHumanReviewReason(AiDraft draft) {
       : 'Human review required ($classification): ${details.join('. ')}';
 }
 
+/// Stops a superseded Codex turn when a newer customer capture is saved.
+class CodexGenerationCancellation {
+  bool _cancelled = false;
+  final Set<void Function()> _listeners = {};
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    for (final listener in _listeners.toList(growable: false)) {
+      listener();
+    }
+    _listeners.clear();
+  }
+
+  void throwIfCancelled() {
+    if (_cancelled) throw const CodexGenerationCancelled();
+  }
+
+  void addListener(void Function() listener) {
+    if (_cancelled) {
+      listener();
+    } else {
+      _listeners.add(listener);
+    }
+  }
+
+  void removeListener(void Function() listener) => _listeners.remove(listener);
+}
+
+class CodexGenerationCancelled implements Exception {
+  const CodexGenerationCancelled();
+}
+
+class CodexGenerationTimedOut implements Exception {
+  const CodexGenerationTimedOut();
+}
+
 class CodexReplyService {
   CodexReplyService({
     required this.executable,
@@ -662,6 +796,7 @@ class CodexReplyService {
     this.model = 'gpt-5.6-sol',
     this.timeout = const Duration(seconds: 90),
     this.enforceProductPhotoReviewPolicy = false,
+    this.sessionStore,
   });
 
   final String executable;
@@ -671,6 +806,7 @@ class CodexReplyService {
   final String model;
   final Duration timeout;
   final bool enforceProductPhotoReviewPolicy;
+  final CustomerCodexSessionStore? sessionStore;
 
   File get searchPlanSchema =>
       File(p.join(workspace.path, 'search_plan.schema.json'));
@@ -682,7 +818,7 @@ class CodexReplyService {
     final workspace = Directory(environment['QIANNIU_CODEX_WORKSPACE'] ??
         p.join(projectRoot.path, 'codex_workspace'));
     final knowledge = Directory(environment['QIANNIU_KNOWLEDGE_DIR'] ??
-        p.join(projectRoot.path, '格志中国市场客服完整知识库-2026-08-16'));
+        p.join(projectRoot.path, '格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final schema = File(p.join(workspace.path, 'reply.schema.json'));
     final executable = await _findExecutable(environment['CODEX_EXECUTABLE']);
 
@@ -703,6 +839,8 @@ class CodexReplyService {
       workspace: workspace,
       knowledgeDirectory: knowledge,
       outputSchema: schema,
+      sessionStore: CustomerCodexSessionStore(
+          Directory(p.join(dataRoot.path, 'codex_sessions'))),
       model: environment['JD_CODEX_MODEL'] ??
           environment['QIANNIU_CODEX_MODEL'] ??
           'gpt-5.6-sol',
@@ -712,7 +850,10 @@ class CodexReplyService {
   Future<AiDraft> generate({
     required ConversationSummary conversation,
     required CaptureDatabase database,
+    String? batchEndMessageId,
+    CodexGenerationCancellation? cancellation,
   }) async {
+    cancellation?.throwIfCancelled();
     final store = await database.history;
     final document = await store.read(conversation.userId);
     if (document == null) {
@@ -723,13 +864,32 @@ class CodexReplyService {
         (document['messages'] as List<Object?>? ?? const [])
             .whereType<Map<String, dynamic>>()
             .toList(growable: false);
-    final rawMessages = persistedMessages
+    final allMessages = persistedMessages
         .where((message) =>
             message['source'] != 'sla_fallback' &&
             !isLikelySidebarPreviewLeak(message))
         .toList(growable: false);
+    final endIndex = batchEndMessageId == null
+        ? allMessages.length - 1
+        : allMessages
+            .indexWhere((message) => message['id'] == batchEndMessageId);
+    if (endIndex < 0) {
+      throw const CodexReplyException('Frozen customer batch is missing.');
+    }
+    // Keep previously sent replies as context, while excluding customer
+    // messages captured after this batch was frozen.
+    final rawMessages = <Map<String, dynamic>>[
+      ...allMessages.take(endIndex + 1),
+      for (final message in allMessages.skip(endIndex + 1))
+        if (message['direction'] == 'outgoing') message,
+    ];
     if (rawMessages.isEmpty) {
       throw const CodexReplyException('No customer messages are available.');
+    }
+    var session = await sessionStore?.read(conversation.userId);
+    if (session != null && !session.canResume(rawMessages, model)) {
+      await sessionStore?.invalidate(conversation.userId);
+      session = null;
     }
     // Keep enough bounded history for follow-up pronouns and product context.
     // The previous five-record window was easily consumed by one OCR copy of
@@ -741,9 +901,24 @@ class CodexReplyService {
       throw const CodexReplyException(
           'No incoming customer message is available.');
     }
-    final currentCustomerTurn = latestCustomerTurn(rawMessages);
+    final currentCustomerTurn = batchEndMessageId == null
+        ? latestCustomerTurn(rawMessages)
+        : customerBatchThroughMessage(
+            rawMessages,
+            endMessageId: batchEndMessageId,
+            answeredMessageId:
+                await database.answeredMessageId(conversation.userId),
+          );
+    if (currentCustomerTurn.isEmpty) {
+      throw const CodexReplyException('Frozen customer batch is empty.');
+    }
+    // OCR can append a captured image after the text it accompanied, even
+    // when the customer sent the image first. Keep the latest real text as the
+    // question while passing every image in the unanswered turn separately.
     final latestCustomerMessage = currentCustomerTurn.lastWhere(
-        (message) => (message['body']?.toString() ?? '').isNotEmpty,
+        (message) =>
+            (message['body']?.toString() ?? '').isNotEmpty &&
+            (message['media'] as List<Object?>? ?? const []).isEmpty,
         orElse: () => currentCustomerTurn.last);
     final latestCustomerText = latestCustomerMessage['body']?.toString() ?? '';
     final productPhotoRequested = isProductPhotoRequest(latestCustomerText);
@@ -767,6 +942,8 @@ class CodexReplyService {
     final assistantReplyContext = lastAssistantReply(rawMessages);
     final categoryConstraints =
         inferProductRetrievalConstraints(retrievalCustomerTurns);
+    final productListRequested = hasProductListIntent(currentTurnText) &&
+        hasProductContext('$currentTurnText $recentCustomerContext');
     final productCatalogRequested = hasProductCatalogIntentWithContext(
             currentTurnText, recentCustomerContext) ||
         retrievalCustomerTurns.any((message) =>
@@ -781,12 +958,18 @@ class CodexReplyService {
         .join('\n');
     final productContextReset =
         resetsPreviousProductContext(currentTurnText, earlierCustomerText);
+    if (productContextReset && session != null) {
+      await sessionStore?.invalidate(conversation.userId);
+      session = null;
+    }
     final modelResolution = resolveProductModels(
       recentConversation: recent,
       currentCustomerText: currentTurnText,
       productContextReset: productContextReset,
     );
     final activeModels = modelResolution.models;
+    final productFeatureRequested =
+        activeModels.isNotEmpty && hasProductFeatureIntent(currentTurnText);
     final promptRecent = excludeOutgoingModelConflicts(recent, activeModels);
     final clarificationCount = clarificationQuestionsUsed(rawMessages);
     final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
@@ -824,28 +1007,16 @@ class CodexReplyService {
       confirmedModels: activeModels,
       categoryConstraints: categoryConstraints,
     );
-    final plannedQueries = await planKnowledgeQueries(
-      recentConversation: retrievalConversation,
-      latestMessage: currentTurnText,
-      confirmedModels: activeModels,
-      lastAssistantReply: assistantReplyContext,
-      categoryConstraints: categoryConstraints,
-    );
-    final focusedQuery = plannedQueries.isEmpty
-        ? fallbackQuery
-        : buildFocusedRetrievalQuery(
-            customerTurns: [
-              {
-                'direction': 'incoming',
-                'body': plannedQueries.first,
-              }
-            ],
-            confirmedModels: activeModels,
-            categoryConstraints: categoryConstraints,
-          );
+    final focusedQuery = assistantReplyContext != null &&
+            isShortAnswerToClarification(currentTurnText,
+                assistantReplyContext['body']?.toString() ?? '')
+        ? '$fallbackQuery\nPrevious clarification question: '
+            '${assistantReplyContext['body']}'
+        : fallbackQuery;
     final retriever = LocalKnowledgeRetriever(knowledgeDirectory);
     final rawRetrievedRecords =
         await retriever.retrieve(focusedQuery, limit: 8);
+    cancellation?.throwIfCancelled();
     final retrievedRecords = filterKnowledgeForLatestProduct(
             rawRetrievedRecords,
             '$retrievalCustomerContext ${activeModels.join(' ')}',
@@ -855,19 +1026,33 @@ class CodexReplyService {
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
     const knowledgeMedia = <Map<String, Object?>>[];
-    final productRecommendationCatalog = productCatalogRequested
-        ? await loadProductRecommendationCatalog(knowledgeDirectory)
-        : null;
+    final productRecommendationCatalog =
+        productCatalogRequested || productFeatureRequested
+            ? await loadProductRecommendationCatalog(knowledgeDirectory)
+            : null;
+    final verifiedModelFacts =
+        productFeatureRequested && productRecommendationCatalog != null
+            ? verifiedCatalogRowsForModels(
+                productRecommendationCatalog, activeModels)
+            : const <Map<String, String>>[];
+    final sessionMessages = session == null
+        ? promptRecent
+        : rawMessages.sublist(session.historyCount);
 
     final request = {
       'task': 'Generate one review-only customer-service reply.',
       'knowledge_directory': knowledgeDirectory.absolute.path,
       'user_id': conversation.userId,
       'latest_message': latestCustomerMessage,
-      'previous_context': productContextReset || promptRecent.length == 1
+      'target_customer_batch': currentCustomerTurn,
+      'target_batch_end_message_id': batchEndMessageId,
+      'previous_context': productContextReset || sessionMessages.length <= 1
           ? const <Object?>[]
-          : promptRecent.sublist(0, promptRecent.length - 1),
-      'conversation': productContextReset ? currentCustomerTurn : promptRecent,
+          : sessionMessages.sublist(0, sessionMessages.length - 1),
+      'conversation':
+          productContextReset ? currentCustomerTurn : sessionMessages,
+      'session_mode': session == null ? 'new' : 'resumed',
+      'delivered_conversation_is_authoritative': true,
       'product_context_reset': productContextReset,
       'explicit_product_models': modelResolution.comesFromAssistantContext
           ? const <String>[]
@@ -887,6 +1072,10 @@ class CodexReplyService {
       'attached_video_frame_paths': videoFrames.toList(growable: false),
       'image_analysis_required': images.isNotEmpty,
       'product_catalog_requested': productCatalogRequested,
+      'product_feature_requested': productFeatureRequested,
+      'product_list_requested': productListRequested,
+      if (productFeatureRequested)
+        'verified_model_catalog_rows': verifiedModelFacts,
       if (productRecommendationCatalog != null)
         'product_model_feature_catalog': {
           'record_id': 'product_model_feature_catalog',
@@ -896,7 +1085,8 @@ class CodexReplyService {
       'clarification_questions_already_asked': clarificationCount,
       'clarification_questions_remaining': clarificationBudget,
       'requirements': [
-        'Be polite, concise, and answer the latest message in the customer’s language.',
+        'Be polite and concise. Answer every unanswered question in target_customer_batch in one reply, using the customer’s latest language. Treat attached images and video frames as part of that batch.',
+        'The target_customer_batch is the frozen unanswered work. A seller reply appearing later in the stored timeline may belong to an earlier batch; it does not answer this target batch.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Do not invent product specifications, availability, or policies.',
         'Treat the latest customer-stated product or model as authoritative. Never continue referencing an older product after the customer corrects or changes it.',
@@ -914,8 +1104,12 @@ class CodexReplyService {
           'You may ask at most $clarificationBudget more decisive clarification question(s) for this topic.',
         if (clarificationBudget == 0)
           'The two-question clarification limit is exhausted. Do not ask another question. Give the best useful answer or next step from known context and state any necessary assumption briefly.',
-        if (productCatalogRequested)
+        if (productCatalogRequested && !productFeatureRequested)
           'The customer wants a product suggestion. Use product_model_feature_catalog as the primary source and evaluate every stated hard requirement against one confirmed model/SKU. If one model fully matches, recommend it directly with concise confirmed reasons. If several fully match, briefly state the confirmed options and ask one decisive preference only when needed to distinguish them. If none fully matches, say that no specific model can currently be confirmed and identify the missing field. Never combine capabilities from different models/SKUs, never turn "unconfirmed" into support or non-support, and never invent a link, price, stock, size, connection method, or compatibility. Include product_model_feature_catalog in used_record_ids.',
+        if (productFeatureRequested)
+          'The customer asks about features of ${activeModels.join(', ')}. Use verified_model_catalog_rows as primary evidence. State the confirmed model facts that answer the question, including confirmed paper width, interface, resolution or system support where those facts appear. A grouped table row applies to the named model in that row. Do not describe a documented fact as unknown or ask for a product link to verify it. Keep SKU-dependent or undocumented facts separate and label only those as unconfirmed. Do not infer Android or iOS support from Bluetooth. Include product_model_feature_catalog in used_record_ids.',
+        if (productListRequested)
+          'The customer asked for a model list. Give the complete r21 Current model list for the requested product category from product_model_feature_catalog before asking about preferences. Current is a catalog status, not a stock promise. If the customer also specified hard requirements, clearly separate the full category list from models verified to meet every requirement; never imply unverified models are compatible.',
         if (images.isNotEmpty)
           'Inspect attached customer images and use only clearly visible evidence.',
         if (images.isNotEmpty)
@@ -927,15 +1121,21 @@ class CodexReplyService {
       ],
     };
 
+    cancellation?.throwIfCancelled();
     final temporary = await Directory.systemTemp.createTemp('jd_codex_');
+    void Function()? cancelProcess;
     try {
       final output = File(p.join(temporary.path, 'reply.json'));
       final arguments = buildArguments(
         outputPath: output.path,
         imagePaths: images.toList(growable: false),
+        sessionId: session?.threadId,
       );
       final process = await Process.start(executable, arguments,
           workingDirectory: workspace.path);
+      cancelProcess = () => process.kill();
+      cancellation?.addListener(cancelProcess);
+      cancellation?.throwIfCancelled();
       final stdoutFuture = process.stdout.transform(utf8.decoder).join();
       final stderrFuture = process.stderr.transform(utf8.decoder).join();
       process.stdin.write('''
@@ -951,15 +1151,18 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         exitCode = await process.exitCode.timeout(timeout);
       } on TimeoutException {
         process.kill();
-        return contextAwareFallback(
-          promptRecent,
-          hasImage: images.isNotEmpty,
-          failure: CodexFallbackFailure.timeout,
-        );
+        cancellation?.throwIfCancelled();
+        await sessionStore?.invalidate(conversation.userId);
+        throw const CodexGenerationTimedOut();
       }
+      cancellation?.throwIfCancelled();
       final stdoutText = await stdoutFuture;
       final stderrText = await stderrFuture;
+      cancellation?.throwIfCancelled();
       if (exitCode != 0) {
+        if (session != null) {
+          await sessionStore?.invalidate(conversation.userId);
+        }
         return contextAwareFallback(
           promptRecent,
           hasImage: images.isNotEmpty,
@@ -969,6 +1172,7 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         );
       }
       if (!await output.exists()) {
+        await sessionStore?.invalidate(conversation.userId);
         throw const CodexReplyException(
             'Codex completed without writing its structured response.');
       }
@@ -980,6 +1184,7 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
           approvedImagePaths: images,
         );
       } on CodexReplyException {
+        await sessionStore?.invalidate(conversation.userId);
         // A completed process can still produce malformed or unusably short
         // output. Never send that output (for example, a lone "1"); use the
         // same safe response used when the generation deadline is exceeded.
@@ -997,17 +1202,47 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
               productPhotoRequested
           ? enforceProductPhotoReview(reviewGuardedDraft, latestCustomerText)
           : reviewGuardedDraft;
+      cancellation?.throwIfCancelled();
       await store.updateMediaDescriptions(
           conversation.userId, guardedDraft.imageDescriptions);
+      final threadId = parseCodexThreadId(stdoutText) ?? session?.threadId;
+      if (guardedDraft.reply != draft.reply ||
+          guardedDraft.decision != draft.decision) {
+        await sessionStore?.invalidate(conversation.userId);
+      } else if (threadId != null && threadId.isNotEmpty) {
+        try {
+          await sessionStore?.write(
+            conversation.userId,
+            CustomerCodexSession(
+              threadId: threadId,
+              model: model,
+              historyCount: rawMessages.length,
+              historyFingerprint: CustomerCodexSession.fingerprint(rawMessages),
+              lastReply: guardedDraft.reply,
+              updatedAt: DateTime.now(),
+            ),
+          );
+        } on FileSystemException {
+          // Session persistence is an optimization, not a reason to lose a
+          // completed customer reply.
+        }
+      }
+      cancellation?.throwIfCancelled();
       return guardedDraft;
     } on ProcessException catch (error) {
+      cancellation?.throwIfCancelled();
+      await sessionStore?.invalidate(conversation.userId);
       return contextAwareFallback(
         promptRecent,
         hasImage: images.isNotEmpty,
         failure: CodexFallbackFailure.processError,
         detail: error.message,
       );
+    } catch (_) {
+      cancellation?.throwIfCancelled();
+      rethrow;
     } finally {
+      if (cancelProcess != null) cancellation?.removeListener(cancelProcess);
       if (await temporary.exists()) await temporary.delete(recursive: true);
     }
   }
@@ -1240,29 +1475,28 @@ ${jsonEncode({
   List<String> buildArguments({
     required String outputPath,
     List<String> imagePaths = const [],
+    String? sessionId,
   }) =>
       [
         'exec',
-        '--ephemeral',
+        if (sessionId != null) 'resume',
         '--ignore-user-config',
         '--skip-git-repo-check',
-        '--sandbox',
-        'read-only',
+        if (sessionId == null) ...['--sandbox', 'read-only'],
         '--model',
         model,
         '--config',
         'model_reasoning_effort="low"',
         '--config',
         'model_verbosity="low"',
-        '--color',
-        'never',
+        '--json',
         '--output-schema',
         outputSchema.absolute.path,
         '--output-last-message',
         outputPath,
-        '--cd',
-        workspace.absolute.path,
+        if (sessionId == null) ...['--cd', workspace.absolute.path],
         for (final path in imagePaths) ...['--image', path],
+        if (sessionId != null) sessionId,
         '-',
       ];
 

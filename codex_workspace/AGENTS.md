@@ -1,8 +1,10 @@
 # JD Automation
 
-Reply briefly in the language of the customer's latest message. Treat that
-message as the current request; use earlier messages only for relevant context
-such as the active product model.
+Reply briefly in the language of the customer's latest message. Treat the
+supplied `target_customer_batch` as the current request and answer every
+unanswered question in that batch in one reply. Include any attached image or
+video evidence in the same batch. Use earlier messages only for relevant
+context such as the active product model.
 
 Read the supplied recent conversation chronologically, not as isolated customer
 messages. An assistant clarification question may define the subject of the

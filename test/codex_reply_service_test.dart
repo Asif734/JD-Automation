@@ -1,11 +1,14 @@
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/codex/codex_reply_service.dart';
 import 'package:jd_automation/codex/local_knowledge_retriever.dart';
 import 'package:jd_automation/codex/local_reply_router.dart';
+import 'package:jd_automation/codex/semantic_knowledge_scorer.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory root;
   late CodexReplyService service;
 
@@ -21,14 +24,26 @@ void main() {
 
   tearDown(() => root.delete(recursive: true));
 
-  test('uses ephemeral read-only execution and structured output', () {
+  test('frozen batch uses answered cursor even if earlier reply is last', () {
+    final messages = <Map<String, dynamic>>[
+      {'id': 'image-1', 'direction': 'incoming', 'body': '[image]'},
+      {'id': 'text-2', 'direction': 'incoming', 'body': 'What is this?'},
+      {'id': 'reply-1', 'direction': 'outgoing', 'body': 'Image reply'},
+    ];
+    final batch = customerBatchThroughMessage(messages,
+        endMessageId: 'text-2', answeredMessageId: 'image-1');
+    expect(batch.map((message) => message['id']), ['text-2']);
+  });
+
+  test('creates a durable read-only session with structured output', () {
     expect(service.timeout, const Duration(seconds: 90));
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],
     );
-    expect(arguments,
-        containsAllInOrder(['--ephemeral', '--sandbox', 'read-only']));
+    expect(arguments, containsAllInOrder(['--sandbox', 'read-only']));
+    expect(arguments, isNot(contains('--ephemeral')));
+    expect(arguments, contains('--json'));
     expect(arguments, contains('--ignore-user-config'));
     expect(arguments, contains('--skip-git-repo-check'));
     expect(arguments, containsAllInOrder(['--model', 'gpt-5.6-sol']));
@@ -41,6 +56,22 @@ void main() {
     expect(
         arguments, containsAllInOrder(['--image', '/tmp/customer image.png']));
     expect(arguments.last, '-');
+  });
+
+  test('resumes only the specified customer session', () {
+    final arguments = service.buildArguments(
+      outputPath: '${root.path}/reply.json',
+      sessionId: 'customer-thread-id',
+    );
+    expect(arguments.take(2), ['exec', 'resume']);
+    expect(arguments, isNot(contains('--ephemeral')));
+    expect(arguments, isNot(contains('--cd')));
+    expect(arguments, containsAllInOrder(['customer-thread-id', '-']));
+    expect(
+        parseCodexThreadId(
+            '{"type":"thread.started","thread_id":"customer-thread-id"}\n'
+            '{"type":"turn.completed"}\n'),
+        'customer-thread-id');
   });
 
   test('uses a fast bounded model for contextual query planning', () {
@@ -259,16 +290,50 @@ void main() {
           'Which printer do you recommend?',
         ),
         isFalse);
+    expect(hasProductCatalogIntent('what are the thermal printer you have?'),
+        isTrue);
+    expect(hasProductCatalogIntent('can i get a model.list?'), isTrue);
+    expect(hasProductListIntent('热敏打印机有哪些型号？'), isTrue);
+    expect(
+        hasProductCatalogIntentWithContext(
+            'what are the other model?', 'I need a thermal printer.'),
+        isTrue);
   });
 
   test('loads the dedicated product recommendation catalog', () async {
     final projectRoot = Directory.current;
-    final catalog = await loadProductRecommendationCatalog(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final catalog = await loadProductRecommendationCatalog(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
 
     expect(catalog, contains('knowledge_base: product_model_feature_catalog'));
-    expect(catalog, contains('## 2. 快速选型结论'));
+    expect(catalog, contains('## r21 Current 型号清单'));
     expect(catalog, contains('TD630G'));
+  });
+
+  test('model feature questions use exact r21 catalog evidence', () async {
+    final catalog = await loadProductRecommendationCatalog(Directory(
+        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    expect(hasProductFeatureIntent('what are the features for tp730?'), isTrue);
+    expect(hasProductFeatureIntent('what features tp874 offers?'), isTrue);
+    expect(hasProductFeatureIntent('TP874 打印参数和纸宽？'), isTrue);
+    expect(hasProductFeatureIntent('Does TP874 support Android?'), isTrue);
+    expect(hasProductFeatureIntent('Tell me about TP730'), isTrue);
+    expect(hasProductFeatureIntent('My TP874 is not connecting'), isFalse);
+
+    final tp730 = verifiedCatalogRowsForModels(catalog, {'tp730'});
+    expect(
+        tp730.map((row) => row['source_row']).join('\n'), contains('30–100mm'));
+    expect(
+        verifiedCatalogRowsForModels(
+            '## test\n| TP730S | 30–80mm | other SKU |', {'tp730'}),
+        isEmpty);
+
+    final tp874 = verifiedCatalogRowsForModels(catalog, {'tp874'});
+    final evidence = tp874.map((row) => row['source_row']).join('\n');
+    expect(evidence, contains('30–80mm'));
+    expect(evidence, contains('USB+蓝牙'));
+    expect(evidence, contains('203DPI'));
+    expect(evidence, contains('macOS USB'));
   });
 
   test('counts clarification slots across the current topic only', () {
@@ -608,6 +673,8 @@ void main() {
     expect(explicitProductModels('nor 300'), isEmpty);
     expect(explicitProductModels('not 300'), isEmpty);
     expect(explicitProductModels('TP874 and M880D'), {'tp874', 'm880d'});
+    expect(explicitProductModels('GZP510 and JPW760S'), {'gzp510', 'jpw760s'});
+    expect(explicitProductModels('macOS 26 and iOS18 with 203DPI'), isEmpty);
   });
 
   test('conversation resolves this and clarification answers to TP874', () {
@@ -799,15 +866,16 @@ void main() {
 
   test('retrieves compact curated knowledge before Codex', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final records = await retriever.retrieve('我要退款', limit: 3);
     expect(records, isNotEmpty);
     expect(records.first['id'], 'global_refund_return_high_risk');
     expect(records.first, isNot(contains('keywords')));
   });
 
-  test('retrieves every Markdown file and both RAG JSONL stores', () async {
+  test('retrieves customer knowledge without indexing planning documents',
+      () async {
     final knowledge = Directory('${root.path}/knowledge');
     final ragCards = Directory('${knowledge.path}/rag_cards');
     await ragCards.create(recursive: true);
@@ -815,9 +883,9 @@ void main() {
         '{"id":"card_zephyr","status":"active","issue":"zephyrcardtoken","reply_template":"card answer"}\n');
     await File('${ragCards.path}/source_chunks.jsonl').writeAsString(
         '{"id":"chunk_orbit","type":"source_chunk","source_file":"source.md","content":"orbitchunktoken"}\n');
-    await File('${knowledge.path}/first.md')
+    await File('${knowledge.path}/first_kb.md')
         .writeAsString('# First\n\nzirconmarkdownone');
-    final nestedMarkdownFile = File('${knowledge.path}/nested/second.md');
+    final nestedMarkdownFile = File('${knowledge.path}/docs/plan.md');
     await nestedMarkdownFile.create(recursive: true);
     await nestedMarkdownFile.writeAsString('# Second\n\nquasarmarkdowntwo');
 
@@ -831,17 +899,19 @@ void main() {
 
     expect(card.single['id'], 'card_zephyr');
     expect(sourceChunk.single['id'], 'chunk_orbit');
-    expect(firstMarkdown.single['source_file'], 'first.md');
+    expect(firstMarkdown.single['source_file'], 'first_kb.md');
     expect(firstMarkdown.single['content'], contains('zirconmarkdownone'));
-    expect(nestedMarkdown.single['source_file'], 'nested/second.md');
-    expect(nestedMarkdown.single['content'], contains('quasarmarkdowntwo'));
+    expect(
+      nestedMarkdown.any((record) => record['source_file'] == 'docs/plan.md'),
+      isFalse,
+    );
   });
 
   test('retrieves an available attendance product for a buying conversation',
       () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final records = await retriever.retrieve(
       'I need to buy an attendance machine. Which model should we buy? '
       'Paper card, 4,000 employees, one site.',
@@ -854,10 +924,78 @@ void main() {
         isTrue);
   });
 
+  test('semantic similarity reranks matching lexical candidates', () async {
+    final knowledge = Directory('${root.path}/semantic_knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    await File('${ragCards.path}/customer_service_rag_cards.jsonl').writeAsString(
+        '{"id":"card_a","status":"active","keywords":["printer"],"issue":"alpha"}\n'
+        '{"id":"card_b","status":"active","keywords":["printer"],"issue":"beta"}\n');
+    final lexical = await LocalKnowledgeRetriever(knowledge,
+            semanticScorer: _FixedSemanticScorer(const {}))
+        .retrieve('printer', limit: 2);
+    final hybrid = await LocalKnowledgeRetriever(knowledge,
+            semanticScorer: _FixedSemanticScorer(const {'card_b': 0.95}))
+        .retrieve('printer', limit: 2);
+
+    expect(lexical.map((record) => record['id']), ['card_a', 'card_b']);
+    expect(hybrid.map((record) => record['id']), ['card_b', 'card_a']);
+  });
+
+  test('semantic scorer maps an English thermal model list to Chinese terms',
+      () async {
+    const channel =
+        MethodChannel('com.grozziie.jdAutomation/semanticRetrieval');
+    Map<Object?, Object?>? request;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      request = (call.arguments as Map).cast<Object?, Object?>();
+      return {'thermal_models': 0.8};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    final scores = await const MacOSSemanticKnowledgeScorer().score(
+      'what are the thermal printer you have?',
+      [
+        {'id': 'thermal_models', 'issue': '热敏打印机型号清单'}
+      ],
+    );
+
+    expect(request?['query'], contains('热敏打印机'));
+    expect(request?['query'], contains('清单'));
+    expect(scores['thermal_models'], 0.8);
+  });
+
+  test('reloads edited knowledge files without restarting the retriever',
+      () async {
+    final knowledge = Directory('${root.path}/live_knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    final cardFile = File('${ragCards.path}/customer_service_rag_cards.jsonl');
+    await cardFile.writeAsString(
+        '{"id":"live_card","status":"active","keywords":["refreshmarker"],"reply_template":"old answer"}\n');
+    final retriever = LocalKnowledgeRetriever(knowledge,
+        semanticScorer: _FixedSemanticScorer(const {}));
+
+    final first = await retriever.retrieve('refreshmarker', limit: 1);
+    expect(first.single['reply_template'], 'old answer');
+
+    await cardFile.writeAsString(
+        '{"id":"live_card","status":"active","keywords":["refreshmarker"],"reply_template":"updated answer from raw text"}\n');
+    final updated = await retriever.retrieve('refreshmarker', limit: 1);
+    expect(updated.single['reply_template'], 'updated answer from raw text');
+
+    await File('${knowledge.path}/new_kb.md')
+        .writeAsString('# New section\n\nnewknowledgeuniquetoken');
+    final added = await retriever.retrieve('newknowledgeuniquetoken', limit: 2);
+    expect(added.any((record) => record['source_file'] == 'new_kb.md'), isTrue);
+  });
+
   test('retrieves M880D previous-year date instructions', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final records = await retriever.retrieve(
       'Can I set the M880D system date to last year, 2025?',
       limit: 5,
@@ -872,8 +1010,8 @@ void main() {
 
   test('retrieves verified media paths linked by selected cards', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final records = await retriever
         .retrieve('Show the 20-slot attendance-card rack', limit: 5);
     final media = await retriever.mediaForRecords(records);
@@ -891,12 +1029,12 @@ void main() {
   test('retains model context for a short comparison-photo follow-up',
       () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(
-        Directory('${projectRoot.path}/格志中国市场客服完整知识库-2026-08-16'));
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final records = await retriever.retrieve(
         'M880 paper-card attendance machine\n'
         'Let us continue with M880D\n'
-        'send the comparison photo',
+        'send the battery comparison photo',
         limit: 5);
     final media = await retriever.mediaForRecords(records);
 
@@ -994,4 +1132,15 @@ void main() {
     expect(draftHumanReviewReason(guarded),
         contains('Customer requested product photos'));
   });
+}
+
+class _FixedSemanticScorer implements SemanticKnowledgeScorer {
+  const _FixedSemanticScorer(this.scores);
+
+  final Map<String, double> scores;
+
+  @override
+  Future<Map<String, double>> score(
+          String query, List<Map<String, dynamic>> records) async =>
+      scores;
 }

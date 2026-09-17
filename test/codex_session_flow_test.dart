@@ -1,0 +1,329 @@
+import 'dart:io';
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:jd_automation/codex/codex_reply_service.dart';
+import 'package:jd_automation/codex/customer_codex_session.dart';
+import 'package:jd_automation/domain/capture_models.dart';
+import 'package:jd_automation/storage/capture_database.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  test('Codex timeout leaves the customer batch pending for retry', () async {
+    final root = await Directory.systemTemp.createTemp('jd_codex_timeout_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final photo = File('${root.path}/customer.png');
+    await photo.writeAsBytes([1, 2, 3]);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: DateTime.now(),
+      messages: [
+        CapturedMessage(
+          stableId: 'image-first',
+          direction: 'incoming',
+          body: '[Customer sent an image]',
+          axPath: 'test',
+          media: [CapturedMedia(type: 'image', path: photo.path)],
+        ),
+      ],
+    ));
+    final fakeCodex = File('${root.path}/slow-codex.sh');
+    await fakeCodex.writeAsString('#!/bin/sh\nexec sleep 3\n');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+      timeout: const Duration(milliseconds: 100),
+    );
+    await expectLater(
+      service.generate(
+        conversation: (await database.conversations()).single,
+        database: database,
+      ),
+      throwsA(isA<CodexGenerationTimedOut>()),
+    );
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
+    final job = (await database.slaFallbackJob('buyer'))!;
+    expect(await database.hasUndeliveredDraft('buyer'), isFalse);
+    expect(
+        await database.reserveSlaFallback(
+            userId: 'buyer', messageId: job.messageId),
+        isTrue);
+    await database.markSlaFallbackSent(
+      userId: 'buyer',
+      messageId: job.messageId,
+      reply: 'One moment, please. We are checking your question.',
+    );
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
+    expect(await database.slaFallbackJob('buyer'), isNull);
+
+    await expectLater(
+      service.generate(
+        conversation: (await database.conversations()).single,
+        database: database,
+      ),
+      throwsA(isA<CodexGenerationTimedOut>()),
+    );
+    expect(await database.slaFallbackJob('buyer'), isNull);
+    expect(
+        await database.reserveSlaFallback(
+            userId: 'buyer', messageId: job.messageId),
+        isFalse);
+
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+cat >/dev/null
+printf '%s\\n' '{"reply":"Here is the verified answer.","decision":"draft","confidence":0.9,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+''');
+    final recovered = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+      timeout: const Duration(seconds: 2),
+    );
+    final pending = (await database.conversations()).single;
+    final finalDraft = await recovered.generate(
+      conversation: pending,
+      database: database,
+    );
+    expect(
+        await database.saveDraft(pending.id, finalDraft,
+            expectedMessageId: job.messageId),
+        1);
+    expect(
+        await database.markReplySent(userId: 'buyer', reply: finalDraft.reply),
+        isTrue);
+    expect(await database.hasPendingUnanswered('buyer'), isFalse);
+    final history = await (await database.history).read('buyer');
+    expect((history!['messages'] as List<Object?>), hasLength(3));
+  });
+
+  test('feature replies receive exact r21 model evidence', () async {
+    final root = await Directory.systemTemp.createTemp('jd_model_evidence_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final requestFile = File('${root.path}/request.txt');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+cat > "${requestFile.path}"
+printf '%s\\n' '{"reply":"The documented paper width is available.","decision":"draft","confidence":0.9,"used_record_ids":["product_model_feature_catalog"],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: Directory(
+          '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'),
+      outputSchema: File('${root.path}/reply.schema.json'),
+    );
+
+    for (final (model, question, expectedWidth) in [
+      ('TP730', 'what are the features for tp730?', '30–100mm'),
+      ('TP874', 'what features tp874 offers?', '30–80mm'),
+    ]) {
+      await database.saveCapture(CapturedConversation(
+        stableKey: 'customer:$model',
+        customerName: model,
+        customerExternalId: model,
+        capturedAt: DateTime.now(),
+        messages: [
+          CapturedMessage(
+              stableId: 'question-$model',
+              direction: 'incoming',
+              body: question,
+              axPath: 'test'),
+        ],
+      ));
+      final conversation = (await database.conversations())
+          .firstWhere((conversation) => conversation.userId == model);
+      await service.generate(conversation: conversation, database: database);
+      final requestText = await requestFile.readAsString();
+      final payload = jsonDecode(requestText
+          .split('<request_json>')[1]
+          .split('</request_json>')[0]) as Map<String, dynamic>;
+      expect(payload['product_feature_requested'], isTrue);
+      final rows = (payload['verified_model_catalog_rows'] as List<Object?>)
+          .whereType<Map<String, dynamic>>()
+          .map((row) => row['source_row'].toString())
+          .join('\n');
+      expect(rows, contains(expectedWidth));
+      expect(payload['product_model_feature_catalog'], isNotNull);
+    }
+  });
+
+  test('explicit cancellation stops a Codex process promptly', () async {
+    final root = await Directory.systemTemp.createTemp('jd_codex_cancel_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final photo = File('${root.path}/customer.png');
+    await photo.writeAsBytes([1, 2, 3]);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: DateTime.now(),
+      messages: [
+        CapturedMessage(
+          stableId: 'image-first',
+          direction: 'incoming',
+          body: '[Customer sent an image]',
+          axPath: 'test',
+          media: [CapturedMedia(type: 'image', path: photo.path)],
+        ),
+      ],
+    ));
+    final started = File('${root.path}/started');
+    final fakeCodex = File('${root.path}/slow-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+: > "${started.path}"
+exec sleep 30
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+    );
+    final cancellation = CodexGenerationCancellation();
+    final generation = service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+      cancellation: cancellation,
+    );
+    for (var attempt = 0; attempt < 200 && !await started.exists(); attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(await started.exists(), isTrue);
+    cancellation.cancel();
+    await expectLater(
+      generation.timeout(const Duration(seconds: 4)),
+      throwsA(isA<CodexGenerationCancelled>()),
+    );
+  });
+
+  test('one Codex call per reply resumes only after actual delivery', () async {
+    final root = await Directory.systemTemp.createTemp('jd_codex_flow_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final log = File('${root.path}/codex-arguments.txt');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+printf '%s\\n' "\$*" >> "${log.path}"
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+printf '%s\\n' '{"reply":"Check the date settings.","decision":"draft","confidence":0.9,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+printf '%s\\n' '{"type":"thread.started","thread_id":"thread-for-customer"}'
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+      sessionStore: CustomerCodexSessionStore(
+          Directory('${root.path}/data/codex_sessions')),
+    );
+
+    Future<void> capture(String id, String body) => database
+        .saveCapture(
+          CapturedConversation(
+            stableKey: 'customer:buyer',
+            customerName: 'buyer',
+            customerExternalId: 'buyer',
+            capturedAt: DateTime.now(),
+            messages: [
+              CapturedMessage(
+                stableId: id,
+                direction: 'incoming',
+                body: body,
+                axPath: 'test',
+              ),
+            ],
+          ),
+        )
+        .then((_) {});
+
+    await capture('question-1', 'How do I change the product date?');
+    final first = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+    await (await database.history).appendSentReply(
+      userId: 'buyer',
+      displayName: 'buyer',
+      stableKey: 'customer:buyer',
+      draft: first,
+    );
+
+    await capture('question-2', 'Where is that date setting?');
+    await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+
+    // The second suggestion was generated, but never delivered.
+    await capture('question-3', 'Can you explain the step?');
+    await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+
+    final invocations = await log.readAsLines();
+    expect(invocations, hasLength(3));
+    expect(invocations[0], isNot(contains('exec resume')));
+    expect(invocations[1], contains('exec resume'));
+    expect(invocations[1], contains('thread-for-customer'));
+    expect(invocations[2], isNot(contains('exec resume')));
+  });
+}
