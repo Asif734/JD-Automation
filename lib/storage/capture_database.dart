@@ -8,9 +8,9 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../domain/capture_models.dart';
 import 'conversation_file_store.dart';
 
-/// SQLite contains only customers waiting for processing. Durable messages and
-/// sent replies live in per-user JSON documents managed by [history]. Unsent
-/// generated drafts are transient SQLite state, never conversation history.
+/// SQLite contains the durable processing, delivery, and SLA state. Messages
+/// and confirmed sent replies live in per-user JSON documents managed by
+/// [history]. Unsent generated drafts remain outside conversation history.
 class CaptureDatabase {
   CaptureDatabase({Directory? storageRoot}) : _storageRoot = storageRoot;
 
@@ -36,7 +36,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 6,
+        version: 7,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -69,6 +69,7 @@ class CaptureDatabase {
     await _createHumanReview(db);
     await _createGeneratedDrafts(db);
     await _createTransferWelcomes(db);
+    await _createSlaFallbacks(db);
   }
 
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -79,6 +80,42 @@ class CaptureDatabase {
     if (oldVersion < 4) await _createHumanReview(db);
     if (oldVersion < 5) await _createGeneratedDrafts(db);
     if (oldVersion < 6) await _createTransferWelcomes(db);
+    if (oldVersion < 7) {
+      await _createSlaFallbacks(db);
+      await _addColumnIfMissing(db, 'generated_drafts',
+          "delivery_state TEXT NOT NULL DEFAULT 'ready'");
+      await _addColumnIfMissing(db, 'generated_drafts',
+          'delivery_attempts INTEGER NOT NULL DEFAULT 0');
+      await _addColumnIfMissing(db, 'generated_drafts', 'retry_at_ms INTEGER');
+      await _addColumnIfMissing(db, 'generated_drafts', 'last_error TEXT');
+      // Protect customers who were already waiting when the app upgraded.
+      // Their original queue time is the safest available SLA anchor.
+      await db.rawInsert('''INSERT OR IGNORE INTO sla_fallbacks(
+        user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
+        SELECT user_id,newest_message_id,enqueued_at_ms + 120000,
+          'pending',NULL,updated_at_ms FROM pending_customers''');
+    }
+  }
+
+  Future<void> _addColumnIfMissing(
+      Database db, String table, String definition) async {
+    final column = definition.split(' ').first;
+    final columns = await db.rawQuery('PRAGMA table_info($table)');
+    if (columns.any((row) => row['name'] == column)) return;
+    await db.execute('ALTER TABLE $table ADD COLUMN $definition');
+  }
+
+  Future<void> _createSlaFallbacks(Database db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS sla_fallbacks (
+      user_id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      due_at_ms INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      sent_at_ms INTEGER,
+      updated_at_ms INTEGER NOT NULL
+    )''');
+    await db.execute('''CREATE INDEX IF NOT EXISTS sla_fallbacks_due
+      ON sla_fallbacks(state, due_at_ms)''');
   }
 
   Future<void> _createTransferWelcomes(Database db) async {
@@ -196,7 +233,11 @@ class CaptureDatabase {
       reply TEXT NOT NULL,
       model TEXT NOT NULL,
       raw_json TEXT NOT NULL,
-      created_at_ms INTEGER NOT NULL
+      created_at_ms INTEGER NOT NULL,
+      delivery_state TEXT NOT NULL DEFAULT 'ready',
+      delivery_attempts INTEGER NOT NULL DEFAULT 0,
+      retry_at_ms INTEGER,
+      last_error TEXT
     )''');
   }
 
@@ -247,10 +288,21 @@ class CaptureDatabase {
     // that OCR notices late; its mere presence must not mark that new question
     // as answered.
     if (isCurrentViewport && result.lastInsertedDirection == 'outgoing') {
-      await db.delete('pending_customers',
-          where: 'user_id = ?', whereArgs: [userId]);
-      await db.delete('generated_drafts',
-          where: 'user_id = ?', whereArgs: [userId]);
+      await db.transaction((txn) async {
+        await txn.delete('pending_customers',
+            where: 'user_id = ?', whereArgs: [userId]);
+        await txn.delete('generated_drafts',
+            where: 'user_id = ?', whereArgs: [userId]);
+        await txn.update(
+          'sla_fallbacks',
+          {
+            'state': 'cancelled',
+            'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+          },
+          where: 'user_id = ?',
+          whereArgs: [userId],
+        );
+      });
       return result.changed;
     }
     if (result.insertedIncomingIds.isEmpty) return result.changed;
@@ -290,22 +342,78 @@ class CaptureDatabase {
       (message) => message.direction == 'incoming',
     );
     final now = capture.capturedAt.millisecondsSinceEpoch;
+    final slaStartedAt = _slaStartedAt(capture.capturedAt, newest.sentAt);
     final db = await database;
-    await db.rawInsert('''INSERT INTO pending_customers(
-      user_id, display_name, stable_key, newest_message_id, enqueued_at_ms, updated_at_ms)
-      VALUES(?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET
-        display_name=excluded.display_name,
-        stable_key=excluded.stable_key,
-        newest_message_id=excluded.newest_message_id,
-        updated_at_ms=excluded.updated_at_ms''', [
-      userId,
-      capture.customerName,
-      capture.stableKey,
-      newest.stableId,
-      now,
-      now,
-    ]);
+    await db.transaction((txn) async {
+      await txn.rawInsert('''INSERT INTO pending_customers(
+        user_id, display_name, stable_key, newest_message_id, enqueued_at_ms, updated_at_ms)
+        VALUES(?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          display_name=excluded.display_name,
+          stable_key=excluded.stable_key,
+          newest_message_id=excluded.newest_message_id,
+          updated_at_ms=excluded.updated_at_ms''', [
+        userId,
+        capture.customerName,
+        capture.stableKey,
+        newest.stableId,
+        now,
+        now,
+      ]);
+      await txn.rawInsert('''INSERT INTO sla_fallbacks(
+        user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
+        VALUES(?,?,?,'pending',NULL,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          message_id=excluded.message_id,
+          due_at_ms=CASE WHEN sla_fallbacks.message_id=excluded.message_id
+            THEN sla_fallbacks.due_at_ms ELSE excluded.due_at_ms END,
+          state=CASE WHEN sla_fallbacks.message_id=excluded.message_id
+            THEN sla_fallbacks.state ELSE 'pending' END,
+          sent_at_ms=CASE WHEN sla_fallbacks.message_id=excluded.message_id
+            THEN sla_fallbacks.sent_at_ms ELSE NULL END,
+          updated_at_ms=excluded.updated_at_ms''', [
+        userId,
+        newest.stableId,
+        slaStartedAt.millisecondsSinceEpoch +
+            const Duration(minutes: 2).inMilliseconds,
+        now,
+      ]);
+    });
+  }
+
+  /// JD displays message clocks in China Standard Time even when this app is
+  /// running in another system timezone. OCR supplies only the displayed
+  /// clock, so reconstruct today's Asia/Shanghai instant and accept it only
+  /// when it is close to the capture. This avoids both a late SLA timer and an
+  /// immediate fallback caused by a wrongly inferred previous-day timestamp.
+  DateTime _slaStartedAt(DateTime capturedAt, DateTime? observedSentAt) {
+    if (observedSentAt == null) return capturedAt;
+    final capturedUtc = capturedAt.toUtc();
+    final observedUtc = observedSentAt.toUtc();
+    final directAge = capturedUtc.difference(observedUtc);
+    if (!directAge.isNegative && directAge <= const Duration(minutes: 10)) {
+      return observedUtc;
+    }
+
+    const chinaOffset = Duration(hours: 8);
+    final chinaCapture = capturedUtc.add(chinaOffset);
+    final displayedClock = observedSentAt.toLocal();
+    var reconstructed = DateTime.utc(
+      chinaCapture.year,
+      chinaCapture.month,
+      chinaCapture.day,
+      displayedClock.hour,
+      displayedClock.minute,
+      displayedClock.second,
+    ).subtract(chinaOffset);
+    if (reconstructed.isAfter(capturedUtc.add(const Duration(minutes: 1)))) {
+      reconstructed = reconstructed.subtract(const Duration(days: 1));
+    }
+    final reconstructedAge = capturedUtc.difference(reconstructed);
+    return !reconstructedAge.isNegative &&
+            reconstructedAge <= const Duration(minutes: 10)
+        ? reconstructed
+        : capturedAt;
   }
 
   /// Requeues a durable incoming message only when no generated reply appears
@@ -335,9 +443,7 @@ class CaptureDatabase {
     final incomingIndex = messages
         .lastIndexWhere((message) => message['direction'] == 'incoming');
     if (incomingIndex < 0) return false;
-    final answered = messages
-        .skip(incomingIndex + 1)
-        .any((message) => message['direction'] == 'outgoing');
+    final answered = messages.skip(incomingIndex + 1).any(_isFinalOutgoing);
     if (answered) return false;
     final incoming = messages[incomingIndex];
     final capturedAt =
@@ -359,6 +465,11 @@ class CaptureDatabase {
       capturedAt.millisecondsSinceEpoch,
       now,
     ]);
+    await _ensureSlaFallback(
+      userId: userId,
+      messageId: incoming['id']?.toString() ?? '',
+      capturedAt: capturedAt,
+    );
     return true;
   }
 
@@ -396,9 +507,7 @@ class CaptureDatabase {
     final incomingIndex = messages
         .lastIndexWhere((message) => message['direction'] == 'incoming');
     final answered = incomingIndex < 0 ||
-        messages
-            .skip(incomingIndex + 1)
-            .any((message) => message['direction'] == 'outgoing');
+        messages.skip(incomingIndex + 1).any(_isFinalOutgoing);
     final latestIncomingId =
         incomingIndex < 0 ? null : messages[incomingIndex]['id']?.toString();
     final queueMatchesLatest =
@@ -421,6 +530,124 @@ class CaptureDatabase {
     return rows.isEmpty ? null : rows.first['newest_message_id']?.toString();
   }
 
+  bool _isFinalOutgoing(Map<String, dynamic> message) =>
+      message['direction'] == 'outgoing' && message['source'] != 'sla_fallback';
+
+  Future<void> _ensureSlaFallback({
+    required String userId,
+    required String messageId,
+    required DateTime capturedAt,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.rawInsert('''INSERT INTO sla_fallbacks(
+      user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
+      VALUES(?,?,?,'pending',NULL,?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        message_id=excluded.message_id,
+        due_at_ms=excluded.due_at_ms,
+        state='pending',sent_at_ms=NULL,updated_at_ms=excluded.updated_at_ms
+      WHERE sla_fallbacks.message_id != excluded.message_id''', [
+      userId,
+      messageId,
+      capturedAt.millisecondsSinceEpoch +
+          const Duration(minutes: 2).inMilliseconds,
+      now,
+    ]);
+  }
+
+  Future<SlaFallbackJob?> slaFallbackJob(String userId) async {
+    final db = await database;
+    final rows = await db.query(
+      'sla_fallbacks',
+      where: "user_id = ? AND state = 'pending'",
+      whereArgs: [userId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : SlaFallbackJob.fromRow(rows.first);
+  }
+
+  Future<List<SlaFallbackJob>> pendingSlaFallbackJobs() async {
+    final db = await database;
+    final rows = await db.query(
+      'sla_fallbacks',
+      where: "state = 'pending'",
+      orderBy: 'due_at_ms ASC',
+    );
+    return rows.map(SlaFallbackJob.fromRow).toList(growable: false);
+  }
+
+  Future<bool> reserveSlaFallback(
+      {required String userId, required String messageId}) async {
+    final db = await database;
+    final changed = await db.update(
+      'sla_fallbacks',
+      {
+        'state': 'sending',
+        'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: "user_id = ? AND message_id = ? AND state = 'pending'",
+      whereArgs: [userId, messageId],
+    );
+    return changed == 1;
+  }
+
+  Future<void> releaseSlaFallback({
+    required String userId,
+    required String messageId,
+    Duration retryDelay = const Duration(seconds: 5),
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (await database).update(
+      'sla_fallbacks',
+      {
+        'state': 'pending',
+        'due_at_ms': now + retryDelay.inMilliseconds,
+        'updated_at_ms': now,
+      },
+      where: "user_id = ? AND message_id = ? AND state = 'sending'",
+      whereArgs: [userId, messageId],
+    );
+  }
+
+  Future<void> markSlaFallbackDeliveryUnknown({
+    required String userId,
+    required String messageId,
+  }) async {
+    await (await database).update(
+      'sla_fallbacks',
+      {
+        'state': 'delivery_unknown',
+        'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'user_id = ? AND message_id = ?',
+      whereArgs: [userId, messageId],
+    );
+  }
+
+  Future<void> markSlaFallbackSent({
+    required String userId,
+    required String messageId,
+    required String reply,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (await database).update(
+      'sla_fallbacks',
+      {
+        'state': 'sent',
+        'sent_at_ms': now,
+        'updated_at_ms': now,
+      },
+      where: "user_id = ? AND message_id = ? AND state = 'sending'",
+      whereArgs: [userId, messageId],
+    );
+    await (await history).appendSlaFallbackSent(
+      userId: userId,
+      messageId: messageId,
+      reply: reply,
+    );
+  }
+
   /// Saves an unsent Codex suggestion in transient SQLite, then removes the
   /// user from the generation queue. JSON is unchanged until an actual send.
   Future<int> saveDraft(int pendingId, AiDraft draft) async {
@@ -432,11 +659,13 @@ class CaptureDatabase {
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction((txn) async {
       await txn.rawInsert('''INSERT INTO generated_drafts(
-        user_id,pending_id,reply,model,raw_json,created_at_ms)
-        VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
+        user_id,pending_id,reply,model,raw_json,created_at_ms,
+        delivery_state,delivery_attempts,retry_at_ms,last_error)
+        VALUES(?,?,?,?,?,?,'ready',0,NULL,NULL) ON CONFLICT(user_id) DO UPDATE SET
         pending_id=excluded.pending_id,reply=excluded.reply,
         model=excluded.model,raw_json=excluded.raw_json,
-        created_at_ms=excluded.created_at_ms''', [
+        created_at_ms=excluded.created_at_ms,delivery_state='ready',
+        delivery_attempts=0,retry_at_ms=NULL,last_error=NULL''', [
         row['user_id'],
         pendingId,
         draft.reply,
@@ -458,8 +687,15 @@ class CaptureDatabase {
     final db = await database;
     final pending = await db.query('pending_customers',
         columns: ['id'], orderBy: 'id ASC', limit: 1);
-    final generated =
-        await db.query('generated_drafts', orderBy: 'pending_id ASC', limit: 1);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final generated = await db.query(
+      'generated_drafts',
+      where:
+          "delivery_state = 'ready' OR (delivery_state = 'retry' AND retry_at_ms <= ?)",
+      whereArgs: [now],
+      orderBy: 'pending_id ASC',
+      limit: 1,
+    );
     if (generated.isEmpty) return null;
     final row = generated.first;
     final pendingId = row['pending_id']! as int;
@@ -488,6 +724,23 @@ class CaptureDatabase {
     final db = await database;
     await db
         .delete('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+  }
+
+  Future<void> markGeneratedDraftDeliveryFailure({
+    required String userId,
+    required String error,
+    required bool deliveryUnknown,
+    Duration retryDelay = const Duration(seconds: 10),
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (await database).rawUpdate('''UPDATE generated_drafts
+      SET delivery_state=?,delivery_attempts=delivery_attempts+1,
+          retry_at_ms=?,last_error=? WHERE user_id=?''', [
+      deliveryUnknown ? 'delivery_unknown' : 'retry',
+      deliveryUnknown ? null : now + retryDelay.inMilliseconds,
+      error,
+      userId,
+    ]);
   }
 
   Future<List<HumanReviewTicket>> humanReviewTickets() async {
@@ -623,6 +876,14 @@ class CaptureDatabase {
           where: 'user_id = ?', whereArgs: [userId]);
       await txn.delete('generated_drafts',
           where: 'user_id = ?', whereArgs: [userId]);
+      await txn.update(
+          'sla_fallbacks',
+          {
+            'state': 'cancelled',
+            'updated_at_ms': now,
+          },
+          where: 'user_id = ?',
+          whereArgs: [userId]);
     });
   }
 
@@ -686,8 +947,19 @@ class CaptureDatabase {
       stableKey: userId,
       draft: draft,
     );
-    await db
-        .delete('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+    await db.transaction((txn) async {
+      await txn.delete('generated_drafts',
+          where: 'user_id = ?', whereArgs: [userId]);
+      await txn.update(
+        'sla_fallbacks',
+        {
+          'state': 'completed',
+          'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+    });
     return true;
   }
 
@@ -786,6 +1058,24 @@ class QueuedDelivery {
   final int pendingId;
   final String userId;
   final AiDraft draft;
+}
+
+class SlaFallbackJob {
+  const SlaFallbackJob({
+    required this.userId,
+    required this.messageId,
+    required this.dueAt,
+  });
+
+  factory SlaFallbackJob.fromRow(Map<String, Object?> row) => SlaFallbackJob(
+        userId: row['user_id']! as String,
+        messageId: row['message_id']! as String,
+        dueAt: DateTime.fromMillisecondsSinceEpoch(row['due_at_ms']! as int),
+      );
+
+  final String userId;
+  final String messageId;
+  final DateTime dueAt;
 }
 
 extension<T> on Iterable<T> {

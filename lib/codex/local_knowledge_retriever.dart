@@ -168,15 +168,15 @@ class LocalKnowledgeRetriever {
     final normalizedQuery = _normalize(query);
     if (normalizedQuery.isEmpty) return 0;
     var score = 0.0;
-    score += _termScore(normalizedQuery, record['keywords'], 8);
-    score += _termScore(normalizedQuery, record['synonyms'], 7);
-    score += _termScore(normalizedQuery, record['models'], 10);
+    score += _termScore(query, record['keywords'], 8);
+    score += _termScore(query, record['synonyms'], 7);
+    score += _termScore(query, record['models'], 10);
     score += _textScore(normalizedQuery, record['issue']?.toString(), 4);
     score += _textScore(normalizedQuery, record['intent']?.toString(), 2);
     score += _textScore(normalizedQuery, record['id']?.toString(), 6);
     score += _textScore(normalizedQuery, record['title']?.toString(), 5);
     score += _textScore(normalizedQuery, record['content']?.toString(), 6);
-    score += _termScore(normalizedQuery, record['source_files'], 3);
+    score += _termScore(query, record['source_files'], 3);
     if (_isMediaQuery(normalizedQuery) && _hasSupportedMedia(record)) {
       score += 20;
     }
@@ -245,10 +245,19 @@ class LocalKnowledgeRetriever {
 
   double _termScore(String query, Object? rawTerms, double weight) {
     if (rawTerms is! List<Object?>) return 0;
+    final normalizedQuery = _normalize(query);
+    final lowerQuery = query.toLowerCase();
     var score = 0.0;
     for (final raw in rawTerms) {
       final term = _normalize(raw.toString());
-      if (term.length >= 2 && query.contains(term)) score += weight;
+      if (term.length < 2) continue;
+      final shortAsciiTerm =
+          term.length <= 3 && RegExp(r'^[a-z0-9]+$').hasMatch(term);
+      final matches = shortAsciiTerm
+          ? RegExp('(?:^|[^a-z0-9])${RegExp.escape(term)}(?:[^a-z0-9]|\$)')
+              .hasMatch(lowerQuery)
+          : normalizedQuery.contains(term);
+      if (matches) score += weight;
     }
     return score;
   }

@@ -111,9 +111,10 @@ class ConversationFileStore {
               knownIds.add(message.stableId);
               inserted++;
               lastInsertedDirection = 'incoming';
-              final alreadyAnswered = messages
-                  .skip(upgradeIndex + 1)
-                  .any((item) => item['direction'] == 'outgoing');
+              final alreadyAnswered = messages.skip(upgradeIndex + 1).any(
+                  (item) =>
+                      item['direction'] == 'outgoing' &&
+                      item['source'] != 'sla_fallback');
               if (!alreadyAnswered) {
                 insertedIncomingIds.add(message.stableId);
               }
@@ -151,17 +152,18 @@ class ConversationFileStore {
               .add(message.body);
         }
         if (message.direction == 'outgoing') {
-          final matchingDraft = messages.reversed
+          final matchingAutomatedReply = messages.reversed
               .where((item) =>
                   item['direction'] == 'outgoing' &&
-                  item['source'] == 'generated_reply' &&
+                  (item['source'] == 'generated_reply' ||
+                      item['source'] == 'sla_fallback') &&
                   (_sameReply(item['body']?.toString() ?? '', message.body) ||
                       _sameBubbleTime(item['sent_at'], message.sentAt)))
               .firstOrNull;
-          if (matchingDraft != null) {
-            if (matchingDraft['delivery_status'] != 'sent') {
-              matchingDraft['delivery_status'] = 'sent';
-              matchingDraft['sent_at'] =
+          if (matchingAutomatedReply != null) {
+            if (matchingAutomatedReply['delivery_status'] != 'sent') {
+              matchingAutomatedReply['delivery_status'] = 'sent';
+              matchingAutomatedReply['sent_at'] =
                   capture.capturedAt.toUtc().toIso8601String();
               inserted++;
             }
@@ -251,6 +253,43 @@ class ConversationFileStore {
     }
     return false;
   }
+
+  /// Records the one-time SLA acknowledgement without marking the customer's
+  /// request answered. The final generated reply remains independently queued.
+  Future<void> appendSlaFallbackSent({
+    required String userId,
+    required String messageId,
+    required String reply,
+  }) =>
+      _serialized(userId, () async {
+        final document = await _readOrCreate(
+          userId: userId,
+          displayName: userId,
+          stableKey: userId,
+        );
+        final messages = (document['messages'] as List<Object?>)
+            .cast<Map<String, Object?>>();
+        if (messages.any((message) =>
+            message['source'] == 'sla_fallback' &&
+            message['sla_message_id'] == messageId)) {
+          return;
+        }
+        final now = DateTime.now().toUtc();
+        messages.add({
+          'id':
+              'sla:${sha256.convert(utf8.encode('$userId\u001f$messageId\u001f$reply'))}',
+          'direction': 'outgoing',
+          'body': reply,
+          'sender': 'jd-sla-fallback-v1',
+          'sent_at': now.toIso8601String(),
+          'captured_at': now.toIso8601String(),
+          'source': 'sla_fallback',
+          'sla_message_id': messageId,
+          'delivery_status': 'sent',
+          'media': <Object?>[],
+        });
+        await _write(document, userId);
+      });
 
   /// Appends a generated reply only after Qianniu confirms the send action.
   /// Unsent drafts intentionally never become conversation history.

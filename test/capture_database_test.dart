@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/domain/capture_models.dart';
 import 'package:jd_automation/storage/capture_database.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
   test('transfer welcome reservation rejects the same exact event', () async {
@@ -41,6 +42,268 @@ void main() {
             eventKey: 'ocr-shape-a',
             now: now.add(const Duration(minutes: 1))),
         isTrue);
+  });
+
+  test('SLA fallback stays separate and final reply remains queued', () async {
+    final root = await Directory.systemTemp.createTemp('sla_fallback_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final capturedAt = DateTime(2026, 9, 16, 10);
+    const userId = 'sla-customer';
+    const messageId = 'customer-message-1';
+    const fallback = '请稍等片刻。';
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: capturedAt,
+      messages: const [
+        CapturedMessage(
+          stableId: messageId,
+          direction: 'incoming',
+          body: 'Please check this for me.',
+          axPath: 'test',
+        ),
+      ],
+    ));
+
+    final job = await database.slaFallbackJob(userId);
+    expect(job?.messageId, messageId);
+    expect(job?.dueAt, capturedAt.add(const Duration(minutes: 2)));
+    expect(
+        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        isTrue);
+    expect(
+        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        isFalse);
+    await database.markSlaFallbackSent(
+      userId: userId,
+      messageId: messageId,
+      reply: fallback,
+    );
+
+    expect(await database.hasPendingUnanswered(userId), isTrue);
+    expect(await database.pendingMessageId(userId), messageId);
+    final afterFallback = await (await database.history).read(userId);
+    final fallbackMessages = afterFallback!['messages'] as List<Object?>;
+    expect(fallbackMessages, hasLength(2));
+    expect((fallbackMessages.last as Map<String, dynamic>)['source'],
+        'sla_fallback');
+
+    // OCR will later see the fallback in JD. It must be deduplicated instead
+    // of being mistaken for a manual seller answer that cancels AI work.
+    final changed = await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: capturedAt.add(const Duration(minutes: 2, seconds: 2)),
+      messages: const [
+        CapturedMessage(
+          stableId: messageId,
+          direction: 'incoming',
+          body: 'Please check this for me.',
+          axPath: 'test',
+        ),
+        CapturedMessage(
+          stableId: 'ocr-fallback',
+          direction: 'outgoing',
+          body: fallback,
+          axPath: 'test',
+        ),
+      ],
+    ));
+    expect(changed, 0);
+    expect(await database.hasPendingUnanswered(userId), isTrue);
+
+    final pending = (await database.conversations()).single;
+    const finalDraft = AiDraft(
+      reply: 'Here is the verified answer.',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"Here is the verified answer.","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    await database.saveDraft(pending.id, finalDraft);
+    expect((await database.nextReadyDelivery())?.userId, userId);
+    expect(
+        await database.markReplySent(userId: userId, reply: finalDraft.reply),
+        isTrue);
+
+    final completed = await (await database.history).read(userId);
+    final completedMessages = completed!['messages'] as List<Object?>;
+    expect(completedMessages, hasLength(3));
+    expect((completedMessages.last as Map<String, dynamic>)['body'],
+        finalDraft.reply);
+    final slaRows = await (await database.database)
+        .query('sla_fallbacks', where: 'user_id = ?', whereArgs: [userId]);
+    expect(slaRows.single['state'], 'completed');
+  });
+
+  test('delivery failures retain drafts for retry or reconciliation', () async {
+    final root = await Directory.systemTemp.createTemp('delivery_retry_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    const userId = 'retry-customer';
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: DateTime(2026, 9, 16, 10),
+      messages: const [
+        CapturedMessage(
+          stableId: 'retry-message',
+          direction: 'incoming',
+          body: 'Need an answer',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'Retained answer',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"Retained answer","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    await database.saveDraft(pending.id, draft);
+    await database.markGeneratedDraftDeliveryFailure(
+      userId: userId,
+      error: 'pre-click verification failed',
+      deliveryUnknown: false,
+      retryDelay: Duration.zero,
+    );
+    expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
+
+    await database.markGeneratedDraftDeliveryFailure(
+      userId: userId,
+      error: 'send click was not confirmed',
+      deliveryUnknown: true,
+    );
+    expect(await database.nextReadyDelivery(), isNull);
+    final rows = await (await database.database)
+        .query('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+    expect(rows, hasLength(1));
+    expect(rows.single['delivery_state'], 'delivery_unknown');
+  });
+
+  test('SLA deadline uses the JD China-time message clock', () async {
+    final root = await Directory.systemTemp.createTemp('sla_clock_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    // JD displayed 13:37:40 China time. On a UTC+6 workstation the OCR
+    // parser may initially infer the previous local day because 13:37 looks
+    // later than the 11:38 local capture clock.
+    final capturedAt = DateTime.utc(2026, 9, 16, 5, 38, 52).toLocal();
+    final observedClock = DateTime(2026, 9, 15, 13, 37, 40);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:clock',
+      customerName: 'clock',
+      customerExternalId: 'clock',
+      capturedAt: capturedAt,
+      messages: [
+        CapturedMessage(
+          stableId: 'clock-message',
+          direction: 'incoming',
+          body: 'Please check this.',
+          sentAt: observedClock,
+          axPath: 'test',
+        ),
+      ],
+    ));
+
+    final job = await database.slaFallbackJob('clock');
+    expect(job?.dueAt.toUtc(), DateTime.utc(2026, 9, 16, 5, 39, 40));
+  });
+
+  test('version 7 migration protects customers already waiting', () async {
+    final root = await Directory.systemTemp.createTemp('sla_migration_test_');
+    final path = '${root.path}/jd_automation.sqlite3';
+    sqfliteFfiInit();
+    final legacy = await databaseFactoryFfi.openDatabase(
+      path,
+      options: OpenDatabaseOptions(
+        version: 6,
+        onCreate: (db, _) async {
+          await db.execute('''CREATE TABLE pending_customers (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            stable_key TEXT NOT NULL,
+            newest_message_id TEXT NOT NULL,
+            enqueued_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+          )''');
+          await db.execute('''CREATE TABLE generated_drafts (
+            user_id TEXT PRIMARY KEY,
+            pending_id INTEGER NOT NULL,
+            reply TEXT NOT NULL,
+            model TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL
+          )''');
+          await db.execute('''CREATE TABLE conversation_control (
+            user_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            resume_after_message_id TEXT,
+            updated_at_ms INTEGER NOT NULL
+          )''');
+        },
+      ),
+    );
+    const enqueuedAt = 1800000000000;
+    await legacy.insert('pending_customers', {
+      'user_id': 'waiting-at-upgrade',
+      'display_name': 'Waiting customer',
+      'stable_key': 'customer:waiting-at-upgrade',
+      'newest_message_id': 'existing-message',
+      'enqueued_at_ms': enqueuedAt,
+      'updated_at_ms': enqueuedAt,
+    });
+    await legacy.close();
+
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final db = await database.database;
+    final slaRows = await db.query('sla_fallbacks');
+    expect(slaRows, hasLength(1));
+    expect(slaRows.single['message_id'], 'existing-message');
+    expect(slaRows.single['due_at_ms'], enqueuedAt + 120000);
+    expect(slaRows.single['state'], 'pending');
+
+    final columns = await db.rawQuery('PRAGMA table_info(generated_drafts)');
+    final names = columns.map((row) => row['name']).toSet();
+    expect(
+        names,
+        containsAll(<String>{
+          'delivery_state',
+          'delivery_attempts',
+          'retry_at_ms',
+          'last_error',
+        }));
   });
 
   test('demo data uses JSON history and SQLite only as pending queue',

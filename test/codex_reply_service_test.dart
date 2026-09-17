@@ -52,11 +52,11 @@ void main() {
     expect(arguments.last, '-');
   });
 
-  test('parses and bounds planned knowledge queries', () {
+  test('parses exactly one focused knowledge query', () {
     expect(
       parseKnowledgeSearchPlan(
           '{"queries":["M880D previous year","M880D 去年日期","third","fourth"]}'),
-      ['M880D previous year', 'M880D 去年日期', 'third'],
+      ['M880D previous year'],
     );
   });
 
@@ -534,6 +534,119 @@ void main() {
     expect(buildTurnScopedRetrievalQuery(messages), isNot(contains('M880')));
   });
 
+  test('focused retrieval uses the latest three customer turns only', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'An unrelated older question'},
+      {'direction': 'outgoing', 'body': 'An old assistant reply'},
+      {
+        'direction': 'incoming',
+        'body': 'can you suggest me a printer that can print labels'
+      },
+      {
+        'direction': 'outgoing',
+        'body': 'TP874 may work, but compatibility needs checking.'
+      },
+      {'direction': 'incoming', 'body': 'phone and MacBook too'},
+      {'direction': 'outgoing', 'body': 'Incorrectly mentioned M880DT.'},
+      {
+        'direction': 'incoming',
+        'body': "I don't require an attendance machine; I need a label printer."
+      },
+    ];
+
+    final turns = latestRelevantCustomerTurns(messages);
+    expect(turns.map((message) => message['body']), [
+      'can you suggest me a printer that can print labels',
+      'phone and MacBook too',
+      "I don't require an attendance machine; I need a label printer.",
+    ]);
+    expect(
+        lastAssistantReply(messages)?['body'], 'Incorrectly mentioned M880DT.');
+
+    final constraints = inferProductRetrievalConstraints(turns);
+    expect(constraints.requiredCategories, contains('thermal_label_printer'));
+    expect(constraints.excludedCategories, contains('attendance_machine'));
+
+    final query = buildFocusedRetrievalQuery(
+      customerTurns: turns,
+      confirmedModels: const <String>{},
+      categoryConstraints: constraints,
+    );
+    expect(query, contains('phone and MacBook too'));
+    expect(query, contains('thermal_label_printer'));
+    expect(query, contains('Exclude product category: attendance_machine'));
+    expect(query, isNot(contains('Incorrectly mentioned M880DT')));
+  });
+
+  test('retrieval conversation keeps clarification questions with answers', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'Unrelated older request'},
+      {'direction': 'outgoing', 'body': 'Unrelated older reply'},
+      {'direction': 'incoming', 'body': 'I need a thermal label printer'},
+      {
+        'direction': 'outgoing',
+        'body': 'I recommend TP874. Will you use Windows or Android?',
+        'source': 'generated_reply',
+      },
+      {'direction': 'incoming', 'body': 'Android'},
+    ];
+
+    final conversation =
+        latestRelevantConversation(messages, customerTurnLimit: 2);
+
+    expect(conversation.map((message) => message['body']), [
+      'I need a thermal label printer',
+      'I recommend TP874. Will you use Windows or Android?',
+      'Android',
+    ]);
+    expect(conversation[1]['context_role'], 'untrusted_assistant_context');
+    expect(conversation[2]['context_role'], 'customer_requirement');
+  });
+
+  test('model parser rejects ordinary words followed by quantities', () {
+    expect(explicitProductModels('for 300 employees'), isEmpty);
+    expect(explicitProductModels('nor 300'), isEmpty);
+    expect(explicitProductModels('not 300'), isEmpty);
+    expect(explicitProductModels('TP874 and M880D'), {'tp874', 'm880d'});
+  });
+
+  test('conversation resolves this and clarification answers to TP874', () {
+    final base = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'I need other model'},
+      {'direction': 'incoming', 'body': 'I require a thermal printer'},
+      {
+        'direction': 'outgoing',
+        'body': 'I recommend TP874 for thermal labels.',
+      },
+    ];
+
+    final reference = resolveProductModels(
+      recentConversation: [
+        ...base,
+        {'direction': 'incoming', 'body': 'how to use this'},
+      ],
+      currentCustomerText: 'how to use this',
+      productContextReset: false,
+    );
+    expect(reference.models, {'tp874'});
+    expect(reference.source, 'assistant_reference');
+
+    final answer = resolveProductModels(
+      recentConversation: [
+        ...base,
+        {
+          'direction': 'outgoing',
+          'body': 'For TP874, will you use Windows or Android?',
+        },
+        {'direction': 'incoming', 'body': 'Android'},
+      ],
+      currentCustomerText: 'Android',
+      productContextReset: false,
+    );
+    expect(answer.models, {'tp874'});
+    expect(answer.source, 'assistant_reference');
+  });
+
   test('confirmation retrieval includes the question it answers', () {
     final messages = <Map<String, dynamic>>[
       {'direction': 'incoming', 'body': 'can i set date to the last year'},
@@ -588,6 +701,17 @@ void main() {
     expect(activeProductModels(messages), isEmpty);
   });
 
+  test('other model resets inherited product memory', () {
+    final messages = <Map<String, dynamic>>[
+      {'direction': 'incoming', 'body': 'my old printer is TP732'},
+      {'direction': 'outgoing', 'body': 'Understood'},
+      {'direction': 'incoming', 'body': 'I need other model'},
+      {'direction': 'incoming', 'body': 'which one should I buy?'},
+    ];
+
+    expect(activeProductModels(messages), isEmpty);
+  });
+
   test('filters conflicting attendance knowledge after printer correction', () {
     final filtered = filterKnowledgeForLatestProduct(
       <Map<String, Object?>>[
@@ -615,6 +739,58 @@ void main() {
 
     expect(filtered.map((record) => record['id']),
         ['portable_printer_tp879', 'global_refund_return_high_risk']);
+  });
+
+  test('category constraints reject the Mac-address attendance false match',
+      () {
+    final constraints = inferProductRetrievalConstraints([
+      {
+        'direction': 'incoming',
+        'body': 'can you suggest me a printer that can print labels'
+      },
+      {'direction': 'incoming', 'body': 'phone and MacBook too'},
+      {
+        'direction': 'incoming',
+        'body': 'shipping labels, size does not matter'
+      },
+    ]);
+    final filtered = filterKnowledgeForLatestProduct(
+      <Map<String, Object?>>[
+        {
+          'id': 'attendance_manual_bluetooth_app_connect',
+          'product_line': 'attendance_machine',
+          'models': ['M880UT'],
+          'issue': 'Attendance machine Bluetooth App and MAC address',
+        },
+        {
+          'id': 'thermal_product_selling_points',
+          'product_line': 'thermal_printer',
+          'models': ['TP874'],
+          'issue': 'Shipping-label thermal printer',
+        },
+      ],
+      'phone and MacBook too',
+      categoryConstraints: constraints,
+    );
+
+    expect(filtered.map((record) => record['id']),
+        ['thermal_product_selling_points']);
+  });
+
+  test('short MAC keyword does not match MacBook as a substring', () async {
+    final knowledge = Directory('${root.path}/mac-boundary-knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    await File('${ragCards.path}/customer_service_rag_cards.jsonl')
+        .writeAsString(
+      '{"id":"attendance_mac","status":"active","keywords":["MAC"],"issue":"Attendance machine MAC address","priority":100}\n'
+      '{"id":"computer_compatibility","status":"active","keywords":["MacBook"],"issue":"Computer compatibility","priority":1}\n',
+    );
+
+    final records =
+        await LocalKnowledgeRetriever(knowledge).retrieve('MacBook', limit: 2);
+
+    expect(records.first['id'], 'computer_compatibility');
   });
 
   test('catalog intent does not persist into a later courtesy turn', () {

@@ -54,6 +54,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   static const _captureOperationTimeout = Duration(seconds: 90);
   static const _scanInterval = Duration(seconds: 2);
   static const _customerBurstDebounce = Duration(seconds: 3);
+  static const _draftFailureRetryDelay = Duration(seconds: 10);
+  static const _deliveryFailureRetryDelay = Duration(seconds: 10);
+  static const _slaFallbackReply = '请稍等片刻。';
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
@@ -69,6 +72,8 @@ class _CaptureHomeState extends State<CaptureHome> {
   bool _autoCaptureBusy = false;
   Timer? _autoCaptureTimer;
   final Map<String, Timer> _draftDebounceTimers = {};
+  final Map<String, Timer> _slaFallbackTimers = {};
+  Timer? _deliveryRetryTimer;
   final Set<String> _draftQueue = {};
   // Each active customer owns a separate ephemeral Codex CLI process. Four
   // workers let the normal multi-chat workload generate concurrently without
@@ -133,6 +138,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   Future<void> _markContacting(HumanReviewTicket ticket) async {
     try {
       _draftDebounceTimers.remove(ticket.conversationId)?.cancel();
+      _slaFallbackTimers.remove(ticket.conversationId)?.cancel();
       _draftQueue.remove(ticket.conversationId);
       await _database.markTicketContacting(ticket.id);
       await _coordinator.refresh();
@@ -198,10 +204,14 @@ class _CaptureHomeState extends State<CaptureHome> {
     for (final conversation in pending) {
       _scheduleDraftGeneration(conversation.userId, newEvidence: true);
     }
+    for (final job in await _database.pendingSlaFallbackJobs()) {
+      _armSlaFallback(job);
+    }
     _requestDelivery();
   }
 
   void _scheduleDraftGeneration(String userId, {required bool newEvidence}) {
+    unawaited(_scheduleSlaFallback(userId));
     final existing = _draftDebounceTimers[userId];
     if (!newEvidence && existing?.isActive == true) return;
     if (newEvidence) existing?.cancel();
@@ -215,6 +225,80 @@ class _CaptureHomeState extends State<CaptureHome> {
       _draftQueue.add(userId);
       _runDraftWorkers();
     });
+  }
+
+  Future<void> _scheduleSlaFallback(String userId) async {
+    final job = await _database.slaFallbackJob(userId);
+    if (job == null) {
+      _slaFallbackTimers.remove(userId)?.cancel();
+      return;
+    }
+    _armSlaFallback(job);
+  }
+
+  void _armSlaFallback(SlaFallbackJob job) {
+    _slaFallbackTimers.remove(job.userId)?.cancel();
+    final remaining = job.dueAt.difference(DateTime.now());
+    final delay = remaining.isNegative ? Duration.zero : remaining;
+    _slaFallbackTimers[job.userId] = Timer(delay, () {
+      _slaFallbackTimers.remove(job.userId);
+      unawaited(_sendSlaFallback(job));
+    });
+  }
+
+  Future<void> _sendSlaFallback(SlaFallbackJob job) async {
+    if (!_autoCaptureRunning) return;
+    try {
+      await _withJdUiOperation(() async {
+        if (!await _database.reserveSlaFallback(
+            userId: job.userId, messageId: job.messageId)) {
+          return;
+        }
+        try {
+          await _adapter
+              .openConversation(job.userId, allowActivation: true)
+              .timeout(_captureOperationTimeout);
+          await _adapter.sendDraftOnce(
+            expectedCustomer: job.userId,
+            reply: _slaFallbackReply,
+            mediaPaths: const [],
+          );
+          await _database.markSlaFallbackSent(
+            userId: job.userId,
+            messageId: job.messageId,
+            reply: _slaFallbackReply,
+          );
+          if (mounted) {
+            setState(() => _diagnostics =
+                'Sent the two-minute SLA acknowledgement to ${job.userId}; the final answer remains queued.');
+          }
+        } on PlatformException catch (error) {
+          if (error.code == 'send_unconfirmed') {
+            await _database.markSlaFallbackDeliveryUnknown(
+              userId: job.userId,
+              messageId: job.messageId,
+            );
+          } else {
+            await _database.releaseSlaFallback(
+              userId: job.userId,
+              messageId: job.messageId,
+            );
+            unawaited(_scheduleSlaFallback(job.userId));
+          }
+          rethrow;
+        } catch (_) {
+          await _database.releaseSlaFallback(
+            userId: job.userId,
+            messageId: job.messageId,
+          );
+          unawaited(_scheduleSlaFallback(job.userId));
+          rethrow;
+        }
+      });
+      await _coordinator.refresh();
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    }
   }
 
   Future<void> _runAutoCaptureCycle() async {
@@ -491,8 +575,17 @@ class _CaptureHomeState extends State<CaptureHome> {
     try {
       await _processDraftUser(userId);
     } catch (error) {
-      await _database.abandonPendingCustomer(userId);
       if (mounted) setState(() => _error = error);
+      _draftDebounceTimers.remove(userId)?.cancel();
+      _draftDebounceTimers[userId] = Timer(_draftFailureRetryDelay, () async {
+        _draftDebounceTimers.remove(userId);
+        if (!await _database.hasPendingUnanswered(userId) ||
+            await _database.isHumanContacting(userId)) {
+          return;
+        }
+        _draftQueue.add(userId);
+        _runDraftWorkers();
+      });
     } finally {
       _activeDraftUsers.remove(userId);
       _runDraftWorkers();
@@ -672,10 +765,27 @@ class _CaptureHomeState extends State<CaptureHome> {
             await _withJdUiOperation(() =>
                 _sendAutomaticallyUnlocked(delivery.userId, delivery.draft));
           } catch (error) {
-            // A send click is never retried because delivery may have occurred
-            // even when JD failed to confirm it. Advance FIFO and surface the
-            // failure for an operator instead of blocking later customers.
-            await _database.discardGeneratedDraft(delivery.userId);
+            final deliveryUnknown =
+                error is PlatformException && error.code == 'send_unconfirmed';
+            await _database.markGeneratedDraftDeliveryFailure(
+              userId: delivery.userId,
+              error: error.toString(),
+              deliveryUnknown: deliveryUnknown,
+              retryDelay: _deliveryFailureRetryDelay,
+            );
+            if (deliveryUnknown) {
+              await _database.createHumanReviewTicket(
+                userId: delivery.userId,
+                customerRequest: delivery.draft.reply,
+                reason:
+                    'JD clicked Send but did not confirm delivery. Verify the conversation before any retry.',
+              );
+              await _refreshTickets();
+            } else {
+              _deliveryRetryTimer?.cancel();
+              _deliveryRetryTimer =
+                  Timer(_deliveryFailureRetryDelay, _requestDelivery);
+            }
             if (mounted) setState(() => _error = error);
           }
           await _coordinator.refresh();
@@ -722,6 +832,7 @@ class _CaptureHomeState extends State<CaptureHome> {
         mediaPaths: mediaPaths,
       );
       await _database.markReplySent(userId: userId, reply: draft.reply);
+      _slaFallbackTimers.remove(userId)?.cancel();
       final evidence = _processingUnreadEvidence[userId];
       if (evidence != null) _handledUnreadEvidence[userId] = evidence;
       if (mounted) {
@@ -1045,7 +1156,11 @@ class _CaptureHomeState extends State<CaptureHome> {
   @override
   void dispose() {
     _autoCaptureTimer?.cancel();
+    _deliveryRetryTimer?.cancel();
     for (final timer in _draftDebounceTimers.values) {
+      timer.cancel();
+    }
+    for (final timer in _slaFallbackTimers.values) {
       timer.cancel();
     }
     _updateSubscription?.cancel();
