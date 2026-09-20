@@ -183,6 +183,72 @@ printf '%s\\n' '{"reply":"The documented paper width is available.","decision":"
     }
   });
 
+  test('an unresolved technical answer gets one fresh second investigation',
+      () async {
+    final root = await Directory.systemTemp.createTemp('jd_second_pass_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final counter = File('${root.path}/attempt-count');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+cat >/dev/null
+count=0
+if [ -f "${counter.path}" ]; then count=\$(cat "${counter.path}"); fi
+count=\$((count + 1))
+printf '%s' "\$count" > "${counter.path}"
+if [ "\$count" -eq 1 ]; then
+  printf '%s\\n' '{"reply":"I cannot resolve this technical printer issue.","decision":"human_review_required","confidence":0.4,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"high","risk_triggers":["unresolved printer issue"],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":true,"reason":"No solution found"}' > "\$output"
+else
+  printf '%s\\n' '{"reply":"Restart the printer, then reconnect the USB cable and print one test page.","decision":"draft","confidence":0.8,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+fi
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:second-pass',
+      customerName: 'second-pass',
+      customerExternalId: 'second-pass',
+      capturedAt: DateTime.now(),
+      messages: const [
+        CapturedMessage(
+          stableId: 'technical-question',
+          direction: 'incoming',
+          body: 'My printer is not working. How can I fix it?',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+    );
+
+    final draft = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+
+    expect(await counter.readAsString(), '2');
+    expect(draft.decision, 'draft');
+    expect(draft.reply, contains('Restart the printer'));
+    expect(draftRequiresHumanReview(draft), isFalse);
+  });
+
   test('explicit cancellation stops a Codex process promptly', () async {
     final root = await Directory.systemTemp.createTemp('jd_codex_cancel_');
     final database =

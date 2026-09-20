@@ -19,6 +19,7 @@ class CaptureDatabase {
   ConversationFileStore? _history;
   bool _legacyDraftsPurged = false;
   bool _reviewControlsSynced = false;
+  static const slaFallbackDelay = Duration(seconds: 20);
 
   Future<Directory> get storageRoot async =>
       _storageRoot ?? await _resolveDefaultStorageRoot();
@@ -36,7 +37,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 8,
+        version: 10,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -93,13 +94,20 @@ class CaptureDatabase {
       // Their original queue time is the safest available SLA anchor.
       await db.rawInsert('''INSERT OR IGNORE INTO sla_fallbacks(
         user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
-        SELECT user_id,newest_message_id,enqueued_at_ms + 120000,
+        SELECT user_id,newest_message_id,enqueued_at_ms + 20000,
           'pending',NULL,updated_at_ms FROM pending_customers''');
     }
     if (oldVersion < 8) {
       await _createAnsweredCursors(db);
       await _addColumnIfMissing(
           db, 'generated_drafts', 'batch_end_message_id TEXT');
+    }
+    if (oldVersion == 9) {
+      // Version 9 stored a 35-second deadline. Restore pending work to the
+      // 20-second JD response window while preserving the original anchor.
+      await db.rawUpdate('''UPDATE sla_fallbacks
+        SET due_at_ms=due_at_ms-15000
+        WHERE state='pending' ''');
     }
   }
 
@@ -303,10 +311,35 @@ class CaptureDatabase {
     // as answered.
     if (isCurrentViewport && result.lastInsertedDirection == 'outgoing') {
       final document = await store.read(userId);
-      final lastIncoming = (document?['messages'] as List<Object?>? ?? const [])
+      final messages = (document?['messages'] as List<Object?>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
+      final lastIncoming = messages
           .whereType<Map<String, dynamic>>()
           .where((message) => message['direction'] == 'incoming')
           .lastOrNull;
+      final insertedOutgoingIds = result.insertedOutgoingIds.toSet();
+      final lastInsertedOutgoing = messages.reversed
+          .where((message) =>
+              message['direction'] == 'outgoing' &&
+              insertedOutgoingIds.contains(message['id']?.toString()))
+          .firstOrNull;
+      // OCR may discover an older seller bubble after saving a newer customer
+      // message. Its position in the append-only file does not make it a reply
+      // to that newer message; preserve the pending customer in that case.
+      final incomingSentAt =
+          DateTime.tryParse(lastIncoming?['sent_at']?.toString() ?? '');
+      final outgoingSentAt =
+          DateTime.tryParse(lastInsertedOutgoing?['sent_at']?.toString() ?? '');
+      final outgoingPredatesLatestIncoming = incomingSentAt != null &&
+          outgoingSentAt != null &&
+          outgoingSentAt.isBefore(incomingSentAt);
+      if (outgoingPredatesLatestIncoming) {
+        if (result.insertedIncomingIds.isNotEmpty) {
+          await _upsertPending(capture, store);
+        }
+        return result.changed;
+      }
       await db.transaction((txn) async {
         await txn.delete('pending_customers',
             where: 'user_id = ?', whereArgs: [userId]);
@@ -368,13 +401,25 @@ class CaptureDatabase {
     // may be last in the capture list even though it was already stored. Use
     // the actual durable tail so the pending cursor never moves backwards.
     final document = await store.read(userId);
-    final newest = (document?['messages'] as List<Object?>? ?? const [])
+    final messages = (document?['messages'] as List<Object?>? ?? const [])
         .whereType<Map<String, dynamic>>()
-        .lastWhere((message) => message['direction'] == 'incoming');
+        .toList(growable: false);
+    final newest =
+        messages.lastWhere((message) => message['direction'] == 'incoming');
     final newestId = newest['id']?.toString() ?? '';
     final now = capture.capturedAt.millisecondsSinceEpoch;
-    final slaStartedAt = _slaStartedAt(capture.capturedAt,
-        DateTime.tryParse(newest['sent_at']?.toString() ?? ''));
+    final answeredBoundary =
+        _answeredIndex(messages, await answeredMessageId(userId));
+    final firstUnanswered = messages
+        .skip(answeredBoundary + 1)
+        .where((message) => message['direction'] == 'incoming')
+        .firstOrNull;
+    // One unanswered batch starts with its first customer message. Later
+    // messages update the batch tail but must never restart its SLA clock.
+    final slaStartedAt = _slaStartedAt(
+      capture.capturedAt,
+      DateTime.tryParse(firstUnanswered?['sent_at']?.toString() ?? ''),
+    );
     final db = await database;
     await db.transaction((txn) async {
       await txn.rawInsert('''INSERT INTO pending_customers(
@@ -396,18 +441,25 @@ class CaptureDatabase {
         user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
         VALUES(?,?,?,'pending',NULL,?)
         ON CONFLICT(user_id) DO UPDATE SET
-          message_id=excluded.message_id,
-          due_at_ms=CASE WHEN sla_fallbacks.message_id=excluded.message_id
-            THEN sla_fallbacks.due_at_ms ELSE excluded.due_at_ms END,
-          state=CASE WHEN sla_fallbacks.message_id=excluded.message_id
-            THEN sla_fallbacks.state ELSE 'pending' END,
-          sent_at_ms=CASE WHEN sla_fallbacks.message_id=excluded.message_id
-            THEN sla_fallbacks.sent_at_ms ELSE NULL END,
+          message_id=CASE
+            WHEN sla_fallbacks.state='sending' THEN sla_fallbacks.message_id
+            ELSE excluded.message_id END,
+          due_at_ms=CASE
+            WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+              THEN MIN(sla_fallbacks.due_at_ms, excluded.due_at_ms)
+            ELSE excluded.due_at_ms END,
+          state=CASE
+            WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+              THEN sla_fallbacks.state
+            ELSE 'pending' END,
+          sent_at_ms=CASE
+            WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+              THEN sla_fallbacks.sent_at_ms
+            ELSE NULL END,
           updated_at_ms=excluded.updated_at_ms''', [
         userId,
         newestId,
-        slaStartedAt.millisecondsSinceEpoch +
-            const Duration(minutes: 2).inMilliseconds,
+        slaStartedAt.millisecondsSinceEpoch + slaFallbackDelay.inMilliseconds,
         now,
       ]);
     });
@@ -477,9 +529,20 @@ class CaptureDatabase {
         .lastIndexWhere((message) => message['direction'] == 'incoming');
     if (incomingIndex <= boundary) return false;
     final incoming = messages[incomingIndex];
+    final firstUnanswered = messages
+        .skip(boundary + 1)
+        .where((message) => message['direction'] == 'incoming')
+        .first;
     final capturedAt =
         DateTime.tryParse(incoming['captured_at']?.toString() ?? '') ??
             DateTime.now().toUtc();
+    final firstCapturedAt =
+        DateTime.tryParse(firstUnanswered['captured_at']?.toString() ?? '') ??
+            capturedAt;
+    final slaStartedAt = _slaStartedAt(
+      firstCapturedAt,
+      DateTime.tryParse(firstUnanswered['sent_at']?.toString() ?? ''),
+    );
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.rawInsert('''INSERT INTO pending_customers(
       user_id, display_name, stable_key, newest_message_id, enqueued_at_ms, updated_at_ms)
@@ -493,13 +556,13 @@ class CaptureDatabase {
       document['display_name']?.toString() ?? userId,
       document['stable_key']?.toString() ?? userId,
       incoming['id']?.toString() ?? '',
-      capturedAt.millisecondsSinceEpoch,
+      capturedAt.millisecondsSinceEpoch + slaFallbackDelay.inMilliseconds,
       now,
     ]);
     await _ensureSlaFallback(
       userId: userId,
       messageId: incoming['id']?.toString() ?? '',
-      capturedAt: capturedAt,
+      startedAt: slaStartedAt,
     );
     return true;
   }
@@ -574,8 +637,40 @@ class CaptureDatabase {
       return messages.indexWhere((message) => message['id'] == cursor);
     }
     // Existing installations did not have a cursor. Their last delivered or
-    // manual reply is the best available boundary until the next send.
-    return messages.lastIndexWhere(_isFinalOutgoing);
+    // manual reply is the best available boundary until the next send. OCR
+    // discovery order can differ from chat order, so match dated seller
+    // messages only to customer messages that are not newer than them.
+    var boundary = -1;
+    for (var outgoingIndex = 0;
+        outgoingIndex < messages.length;
+        outgoingIndex++) {
+      final outgoing = messages[outgoingIndex];
+      if (!_isFinalOutgoing(outgoing)) continue;
+      final outgoingSentAt =
+          DateTime.tryParse(outgoing['sent_at']?.toString() ?? '');
+      if (outgoingSentAt == null) {
+        final precedingIncoming = messages
+            .take(outgoingIndex)
+            .toList(growable: false)
+            .lastIndexWhere((message) => message['direction'] == 'incoming');
+        if (precedingIncoming > boundary) boundary = precedingIncoming;
+        continue;
+      }
+      for (var incomingIndex = 0;
+          incomingIndex < messages.length;
+          incomingIndex++) {
+        final incoming = messages[incomingIndex];
+        if (incoming['direction'] != 'incoming') continue;
+        final incomingSentAt =
+            DateTime.tryParse(incoming['sent_at']?.toString() ?? '');
+        if (incomingSentAt != null &&
+            !incomingSentAt.isAfter(outgoingSentAt) &&
+            incomingIndex > boundary) {
+          boundary = incomingIndex;
+        }
+      }
+    }
+    return boundary;
   }
 
   bool _isFinalOutgoing(Map<String, dynamic> message) =>
@@ -584,7 +679,7 @@ class CaptureDatabase {
   Future<void> _ensureSlaFallback({
     required String userId,
     required String messageId,
-    required DateTime capturedAt,
+    required DateTime startedAt,
   }) async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -592,14 +687,26 @@ class CaptureDatabase {
       user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
       VALUES(?,?,?,'pending',NULL,?)
       ON CONFLICT(user_id) DO UPDATE SET
-        message_id=excluded.message_id,
-        due_at_ms=excluded.due_at_ms,
-        state='pending',sent_at_ms=NULL,updated_at_ms=excluded.updated_at_ms
+        message_id=CASE
+          WHEN sla_fallbacks.state='sending' THEN sla_fallbacks.message_id
+          ELSE excluded.message_id END,
+        due_at_ms=CASE
+          WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+            THEN MIN(sla_fallbacks.due_at_ms, excluded.due_at_ms)
+          ELSE excluded.due_at_ms END,
+        state=CASE
+          WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+            THEN sla_fallbacks.state
+          ELSE 'pending' END,
+        sent_at_ms=CASE
+          WHEN sla_fallbacks.state IN ('pending','sending','reserved','sent')
+            THEN sla_fallbacks.sent_at_ms
+          ELSE NULL END,
+        updated_at_ms=excluded.updated_at_ms
       WHERE sla_fallbacks.message_id != excluded.message_id''', [
       userId,
       messageId,
-      capturedAt.millisecondsSinceEpoch +
-          const Duration(minutes: 2).inMilliseconds,
+      startedAt.millisecondsSinceEpoch + slaFallbackDelay.inMilliseconds,
       now,
     ]);
   }
@@ -640,6 +747,21 @@ class CaptureDatabase {
     return changed == 1;
   }
 
+  /// Rechecks a reserved holding message immediately before the Send click.
+  /// A real or manually observed reply changes this row out of `sending`, so
+  /// a timer that was already queued cannot send afterward.
+  Future<bool> isSlaFallbackReservedForSend(
+      {required String userId, required String messageId}) async {
+    final rows = await (await database).query(
+      'sla_fallbacks',
+      columns: ['user_id'],
+      where: "user_id = ? AND message_id = ? AND state = 'sending'",
+      whereArgs: [userId, messageId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
   Future<void> releaseSlaFallback({
     required String userId,
     required String messageId,
@@ -673,13 +795,13 @@ class CaptureDatabase {
     );
   }
 
-  Future<void> markSlaFallbackSent({
+  Future<bool> markSlaFallbackSent({
     required String userId,
     required String messageId,
     required String reply,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    await (await database).update(
+    final changed = await (await database).update(
       'sla_fallbacks',
       {
         'state': 'sent',
@@ -689,11 +811,13 @@ class CaptureDatabase {
       where: "user_id = ? AND message_id = ? AND state = 'sending'",
       whereArgs: [userId, messageId],
     );
+    if (changed != 1) return false;
     await (await history).appendSlaFallbackSent(
       userId: userId,
       messageId: messageId,
       reply: reply,
     );
+    return true;
   }
 
   /// Saves the reply for a frozen batch. If later customer evidence arrived
@@ -998,7 +1122,32 @@ class CaptureDatabase {
     final row = rows.first;
     final raw = jsonDecode(row['raw_json']! as String) as Map<String, dynamic>;
     final draft = AiDraft.fromJson(raw, mediaBaseUrl: Uri());
-    await (await history).appendSentReply(
+    final batchEnd = row['batch_end_message_id']?.toString();
+    final store = await history;
+    String? remainingNewestMessageId;
+    DateTime? remainingDueAt;
+    if (batchEnd != null && batchEnd.isNotEmpty) {
+      final document = await store.read(userId);
+      final messages = (document?['messages'] as List<Object?>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
+      final batchEndIndex =
+          messages.indexWhere((message) => message['id'] == batchEnd);
+      if (batchEndIndex >= 0) {
+        final remainingIncoming = messages
+            .skip(batchEndIndex + 1)
+            .where((message) => message['direction'] == 'incoming')
+            .toList(growable: false);
+        if (remainingIncoming.isNotEmpty) {
+          remainingNewestMessageId = remainingIncoming.last['id']?.toString();
+          // A real reply resets the holding-message clock for any newer frozen
+          // batch. The customer has just received service, so no holding reply
+          // is due until another full 20 seconds pass without a real reply.
+          remainingDueAt = DateTime.now().add(slaFallbackDelay);
+        }
+      }
+    }
+    await store.appendSentReply(
       userId: userId,
       displayName: userId,
       stableKey: userId,
@@ -1007,21 +1156,37 @@ class CaptureDatabase {
     await db.transaction((txn) async {
       await txn.delete('generated_drafts',
           where: 'user_id = ?', whereArgs: [userId]);
-      final batchEnd = row['batch_end_message_id']?.toString();
       if (batchEnd != null && batchEnd.isNotEmpty) {
         await txn.rawInsert('''INSERT INTO answered_cursors(user_id,message_id)
           VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
           message_id=excluded.message_id''', [userId, batchEnd]);
       }
-      await txn.update(
-        'sla_fallbacks',
-        {
-          'state': 'completed',
-          'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
-        },
-        where: 'user_id = ? AND message_id = ?',
-        whereArgs: [userId, batchEnd],
-      );
+      final updatedAt = DateTime.now().millisecondsSinceEpoch;
+      if (remainingNewestMessageId != null && remainingDueAt != null) {
+        // A frozen reply can cover an older message while a later customer
+        // line remains pending. That remaining batch starts its own SLA at its
+        // first unanswered message; it must not inherit the older deadline.
+        await txn.rawUpdate('''UPDATE sla_fallbacks SET
+          message_id=?, due_at_ms=?,
+          state='pending', sent_at_ms=NULL,
+          updated_at_ms=?
+          WHERE user_id=?''', [
+          remainingNewestMessageId,
+          remainingDueAt.millisecondsSinceEpoch,
+          updatedAt,
+          userId,
+        ]);
+      } else {
+        await txn.update(
+          'sla_fallbacks',
+          {
+            'state': 'completed',
+            'updated_at_ms': updatedAt,
+          },
+          where: 'user_id = ? AND message_id = ?',
+          whereArgs: [userId, batchEnd],
+        );
+      }
     });
     return true;
   }

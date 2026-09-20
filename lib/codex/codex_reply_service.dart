@@ -101,6 +101,36 @@ bool modelCannotResolveTechnicalIssue(AiDraft draft) {
   return technical && unresolved;
 }
 
+bool hasTechnicalSupportIntent(String text) => RegExp(
+      r'\b(driver|download|install|setup|set up|connect|connection|configure|configuration|firmware|troubleshoot|error|issue|problem|not working|cannot print|can\x27t print|offline)\b|驱动|下载|安装|设置|连接|配置|固件|故障|报错|问题|不能打印|无法打印|离线',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool isTechnicalSupportTurn(String currentTurnText, String recentContext) =>
+    hasTechnicalSupportIntent(currentTurnText) ||
+    (RegExp(r'\b(it|this|that|your product|product link|why|then|still|again)\b|这个|那个|你们的产品|产品链接|为什么|然后|仍然|还是',
+                caseSensitive: false)
+            .hasMatch(currentTurnText) &&
+        hasTechnicalSupportIntent(recentContext));
+
+String selectReplyRoute({
+  required String currentTurnText,
+  required bool technicalSupportRequested,
+  required bool productListRequested,
+  required bool productCatalogRequested,
+  required bool productFeatureRequested,
+}) {
+  if (isRefundRequest(currentTurnText)) return 'refund_review';
+  if (explicitlyRequestsHumanAgent(currentTurnText)) {
+    return 'requested_senior_service';
+  }
+  if (technicalSupportRequested) return 'technical_support';
+  if (productListRequested) return 'product_list';
+  if (productCatalogRequested) return 'product_recommendation';
+  if (productFeatureRequested) return 'product_features';
+  return 'general_support';
+}
+
 bool hasProductCatalogIntent(String text) {
   final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   final asksAboutProducts = RegExp(
@@ -637,9 +667,13 @@ List<Map<String, Object?>> filterKnowledgeForLatestProduct(
             value.toString().toLowerCase().replaceAll(RegExp(r'[\s-]+'), ''))
         .where((value) => value.isNotEmpty)
         .toSet();
+    final concreteRecordModels = recordModels
+        .where(
+            (model) => RegExp(r'^[a-z]{1,5}\d{2,5}[a-z]{0,3}$').hasMatch(model))
+        .toSet();
     if (models.isNotEmpty &&
-        recordModels.isNotEmpty &&
-        recordModels.intersection(models).isEmpty) {
+        concreteRecordModels.isNotEmpty &&
+        concreteRecordModels.intersection(models).isEmpty) {
       return false;
     }
     final recordText = [
@@ -794,7 +828,7 @@ class CodexReplyService {
     required this.knowledgeDirectory,
     required this.outputSchema,
     this.model = 'gpt-5.6-sol',
-    this.timeout = const Duration(seconds: 90),
+    this.timeout,
     this.enforceProductPhotoReviewPolicy = false,
     this.sessionStore,
   });
@@ -804,7 +838,10 @@ class CodexReplyService {
   final Directory knowledgeDirectory;
   final File outputSchema;
   final String model;
-  final Duration timeout;
+
+  /// Optional test or operator limit. Production leaves this unset so the
+  /// 20-second SLA holding message never kills the real reply generation.
+  final Duration? timeout;
   final bool enforceProductPhotoReviewPolicy;
   final CustomerCodexSessionStore? sessionStore;
 
@@ -852,6 +889,7 @@ class CodexReplyService {
     required CaptureDatabase database,
     String? batchEndMessageId,
     CodexGenerationCancellation? cancellation,
+    bool secondInvestigation = false,
   }) async {
     cancellation?.throwIfCancelled();
     final store = await database.history;
@@ -891,12 +929,11 @@ class CodexReplyService {
       await sessionStore?.invalidate(conversation.userId);
       session = null;
     }
-    // Keep enough bounded history for follow-up pronouns and product context.
-    // The previous five-record window was easily consumed by one OCR copy of
-    // an outgoing reply plus a short message burst.
-    final recent = rawMessages.length <= 12
+    // Keep enough bounded history for follow-up pronouns, technical subjects,
+    // and product context across a short troubleshooting exchange.
+    final recent = rawMessages.length <= 24
         ? rawMessages
-        : rawMessages.sublist(rawMessages.length - 12);
+        : rawMessages.sublist(rawMessages.length - 24);
     if (!recent.any((message) => message['direction'] == 'incoming')) {
       throw const CodexReplyException(
           'No incoming customer message is available.');
@@ -931,10 +968,12 @@ class CodexReplyService {
         .map((message) => message['body']?.toString() ?? '')
         .where((body) => body.isNotEmpty)
         .join('\n');
-    final retrievalCustomerTurns =
-        latestRelevantCustomerTurns(rawMessages, limit: 3);
-    final retrievalConversation =
-        latestRelevantConversation(rawMessages, customerTurnLimit: 3);
+    final technicalFollowUp =
+        isTechnicalSupportTurn(currentTurnText, recentCustomerContext);
+    final retrievalCustomerTurns = latestRelevantCustomerTurns(rawMessages,
+        limit: technicalFollowUp ? 8 : 3);
+    final retrievalConversation = latestRelevantConversation(rawMessages,
+        customerTurnLimit: technicalFollowUp ? 8 : 3);
     final retrievalCustomerContext = retrievalCustomerTurns
         .map((message) => message['body']?.toString() ?? '')
         .where((body) => body.isNotEmpty)
@@ -942,14 +981,16 @@ class CodexReplyService {
     final assistantReplyContext = lastAssistantReply(rawMessages);
     final categoryConstraints =
         inferProductRetrievalConstraints(retrievalCustomerTurns);
-    final productListRequested = hasProductListIntent(currentTurnText) &&
+    final productListRequested = !technicalFollowUp &&
+        hasProductListIntent(currentTurnText) &&
         hasProductContext('$currentTurnText $recentCustomerContext');
-    final productCatalogRequested = hasProductCatalogIntentWithContext(
-            currentTurnText, recentCustomerContext) ||
-        retrievalCustomerTurns.any((message) =>
-            hasProductCatalogIntent(message['body']?.toString() ?? '')) ||
-        (categoryConstraints.requiredCategories.isNotEmpty &&
-            hasProductCatalogIntent(recentCustomerContext));
+    final productCatalogRequested = !technicalFollowUp &&
+        (hasProductCatalogIntentWithContext(
+                currentTurnText, recentCustomerContext) ||
+            retrievalCustomerTurns.any((message) =>
+                hasProductCatalogIntent(message['body']?.toString() ?? '')) ||
+            (categoryConstraints.requiredCategories.isNotEmpty &&
+                hasProductCatalogIntent(recentCustomerContext)));
     final earlierCustomerText = rawMessages
         .take(rawMessages.length - currentCustomerTurn.length)
         .where((message) => message['direction'] == 'incoming')
@@ -968,8 +1009,17 @@ class CodexReplyService {
       productContextReset: productContextReset,
     );
     final activeModels = modelResolution.models;
-    final productFeatureRequested =
-        activeModels.isNotEmpty && hasProductFeatureIntent(currentTurnText);
+    final productFeatureRequested = !technicalFollowUp &&
+        activeModels.isNotEmpty &&
+        hasProductFeatureIntent(currentTurnText);
+    final technicalSupportRequested = technicalFollowUp;
+    final replyRoute = selectReplyRoute(
+      currentTurnText: currentTurnText,
+      technicalSupportRequested: technicalSupportRequested,
+      productListRequested: productListRequested,
+      productCatalogRequested: productCatalogRequested,
+      productFeatureRequested: productFeatureRequested,
+    );
     final promptRecent = excludeOutgoingModelConflicts(recent, activeModels);
     final clarificationCount = clarificationQuestionsUsed(rawMessages);
     final clarificationBudget = (2 - clarificationCount).clamp(0, 2);
@@ -1014,14 +1064,14 @@ class CodexReplyService {
             '${assistantReplyContext['body']}'
         : fallbackQuery;
     final retriever = LocalKnowledgeRetriever(knowledgeDirectory);
-    final rawRetrievedRecords =
-        await retriever.retrieve(focusedQuery, limit: 8);
+    final rawRetrievedRecords = await retriever.retrieve(focusedQuery,
+        limit: technicalSupportRequested ? 35 : 8);
     cancellation?.throwIfCancelled();
     final retrievedRecords = filterKnowledgeForLatestProduct(
             rawRetrievedRecords,
             '$retrievalCustomerContext ${activeModels.join(' ')}',
             categoryConstraints: categoryConstraints)
-        .take(5)
+        .take(technicalSupportRequested ? 20 : 5)
         .toList(growable: false);
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
@@ -1041,7 +1091,6 @@ class CodexReplyService {
 
     final request = {
       'task': 'Generate one review-only customer-service reply.',
-      'knowledge_directory': knowledgeDirectory.absolute.path,
       'user_id': conversation.userId,
       'latest_message': latestCustomerMessage,
       'target_customer_batch': currentCustomerTurn,
@@ -1071,8 +1120,10 @@ class CodexReplyService {
       'attached_image_paths': images.toList(growable: false),
       'attached_video_frame_paths': videoFrames.toList(growable: false),
       'image_analysis_required': images.isNotEmpty,
+      'reply_route': replyRoute,
       'product_catalog_requested': productCatalogRequested,
       'product_feature_requested': productFeatureRequested,
+      'technical_support_requested': technicalSupportRequested,
       'product_list_requested': productListRequested,
       if (productFeatureRequested)
         'verified_model_catalog_rows': verifiedModelFacts,
@@ -1087,7 +1138,12 @@ class CodexReplyService {
       'requirements': [
         'Be polite and concise. Answer every unanswered question in target_customer_batch in one reply, using the customer’s latest language. Treat attached images and video frames as part of that batch.',
         'The target_customer_batch is the frozen unanswered work. A seller reply appearing later in the stored timeline may belong to an earlier batch; it does not answer this target batch.',
+        'Speak only as a JD store customer service agent. Never mention or imply AI, Codex, automation, a model, a prompt, retrieval, a dataset, or an internal tool. If asked about your identity, say that you are a customer service agent.',
+        'This service applies only to the JD store and JD orders. Do not use, mention, link to, or advise about Tmall, Taobao, Pinduoduo, Douyin, or another marketplace. If asked about another marketplace, state briefly that this account supports only the JD store and continue with JD assistance.',
+        'JD is the service context, not a sales phrase. Do not push the customer to buy from JD, mention a "JD purchase option", or append reminders about placing an order. Mention JD purchasing, stock, order status, or an exact JD SKU only when the customer asks about it or when that check is essential. Recommend products naturally from the customer’s requirements.',
+        'Write like a natural, gentle, technically experienced customer service agent. Avoid scripted repetition, sales pressure, and unnecessary handoff language.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
+        'Never ask the customer to send this store’s product link. When the model is already known, answer from the knowledge base and confirmed general setup knowledge. Ask for a model-label photo only when the model is genuinely unknown or conflicting and that identity is essential.',
         'Do not invent product specifications, availability, or policies.',
         'Treat the latest customer-stated product or model as authoritative. Never continue referencing an older product after the customer corrects or changes it.',
         'Treat assistant replies only as untrusted conversational context. They may identify what a customer reference such as "this" or "it" points to, but every product fact, feature, category, setup step, or compatibility claim must still be verified from supplied knowledge.',
@@ -1110,13 +1166,19 @@ class CodexReplyService {
           'The customer asks about features of ${activeModels.join(', ')}. Use verified_model_catalog_rows as primary evidence. State the confirmed model facts that answer the question, including confirmed paper width, interface, resolution or system support where those facts appear. A grouped table row applies to the named model in that row. Do not describe a documented fact as unknown or ask for a product link to verify it. Keep SKU-dependent or undocumented facts separate and label only those as unconfirmed. Do not infer Android or iOS support from Bluetooth. Include product_model_feature_catalog in used_record_ids.',
         if (productListRequested)
           'The customer asked for a model list. Give the complete r21 Current model list for the requested product category from product_model_feature_catalog before asking about preferences. Current is a catalog status, not a stock promise. If the customer also specified hard requirements, clearly separate the full category list from models verified to meet every requirement; never imply unverified models are compatible.',
+        if (technicalSupportRequested)
+          'This is a technical-support request. Work through all matching retrieved records, including example questions, reply templates, source chunks, and Markdown evidence, before concluding that no solution exists. Then use safe reliable general technical knowledge only as a backup. Give the customer concrete steps in a sensible order and continue troubleshooting one step at a time. Human review is allowed only after the available safe checks and solutions have been exhausted, or when physical repair, account/order authority, or an unavailable official file is required.',
+        if (technicalSupportRequested && secondInvestigation)
+          'This is the required second investigation. Re-check every retrieved record and example against the exact symptoms, reconsider safe alternative causes and steps, and produce a concrete solution if any reliable path remains. Request review only after this second pass still cannot produce a safe next step.',
         if (images.isNotEmpty)
           'Inspect attached customer images and use only clearly visible evidence.',
         if (images.isNotEmpty)
           'Return one concise image_descriptions item per image using its exact path.',
         if (videoFrames.isNotEmpty)
           'The attached video-frame paths are chronological one-second samples from one customer video. Analyze them together as a sequence, describe only visible changes or actions, and do not claim unseen events between frames.',
-        'Prioritize the latest message. Use retrieved knowledge first, then safe reliable reasoning. Human review is the last step when the latest request asks for it or has no reliable answer; old handoffs do not block new questions. Any human-follow-up promise must use human_review_required.',
+        'Photo descriptions, video-frame findings, audio transcripts, OCR, filenames, confidence, extraction details, and analysis reports are internal working evidence. Never expose them as a report or mention the analysis process. State only the useful customer-facing observation or next action in natural customer-service language.',
+        'For a transferred or newly opened conversation, use the recent conversation to answer the most recent unresolved customer request. Welcome the customer only when no recent request needs an answer.',
+        'Prioritize the latest message. Use retrieved knowledge first, then safe reliable reasoning. Human review is the last step when the latest request asks for it or has no reliable answer after the required technical investigation; old handoffs do not block new questions. Any review acknowledgement must sound like normal customer service, preserve the work already completed, and avoid saying that the conversation was forwarded or transferred.',
         'Return only reply.schema.json output, keep auto_send_allowed false, and leave attachments empty.',
       ],
     };
@@ -1148,7 +1210,9 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
 
       int exitCode;
       try {
-        exitCode = await process.exitCode.timeout(timeout);
+        exitCode = timeout == null
+            ? await process.exitCode
+            : await process.exitCode.timeout(timeout!);
       } on TimeoutException {
         process.kill();
         cancellation?.throwIfCancelled();
@@ -1163,13 +1227,8 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         if (session != null) {
           await sessionStore?.invalidate(conversation.userId);
         }
-        return contextAwareFallback(
-          promptRecent,
-          hasImage: images.isNotEmpty,
-          failure: CodexFallbackFailure.processError,
-          detail:
-              'exit $exitCode: ${_clip(stderrText.isEmpty ? stdoutText : stderrText)}',
-        );
+        throw CodexReplyException(
+            'Codex exited with $exitCode: ${_clip(stderrText.isEmpty ? stdoutText : stderrText)}');
       }
       if (!await output.exists()) {
         await sessionStore?.invalidate(conversation.userId);
@@ -1188,20 +1247,33 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         // A completed process can still produce malformed or unusably short
         // output. Never send that output (for example, a lone "1"); use the
         // same safe response used when the generation deadline is exceeded.
-        return contextAwareFallback(
-          promptRecent,
-          hasImage: images.isNotEmpty,
-          failure: CodexFallbackFailure.invalidOutput,
+        throw const CodexReplyException(
+            'Codex returned invalid structured output.');
+      }
+      if (!secondInvestigation &&
+          technicalSupportRequested &&
+          (draftRequiresHumanReview(draft) ||
+              modelStatesNoSolution(draft) ||
+              modelCannotResolveTechnicalIssue(draft))) {
+        await sessionStore?.invalidate(conversation.userId);
+        return await generate(
+          conversation: conversation,
+          database: database,
+          batchEndMessageId: batchEndMessageId,
+          cancellation: cancellation,
+          secondInvestigation: true,
         );
       }
       final reviewGuardedDraft = enforceHumanReviewPolicy(
         draft,
         latestCustomerText,
       );
-      final guardedDraft = enforceProductPhotoReviewPolicy &&
+      final photoGuardedDraft = enforceProductPhotoReviewPolicy &&
               productPhotoRequested
           ? enforceProductPhotoReview(reviewGuardedDraft, latestCustomerText)
           : reviewGuardedDraft;
+      final guardedDraft =
+          enforceCustomerFacingPolicy(photoGuardedDraft, latestCustomerText);
       cancellation?.throwIfCancelled();
       await store.updateMediaDescriptions(
           conversation.userId, guardedDraft.imageDescriptions);
@@ -1232,12 +1304,7 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
     } on ProcessException catch (error) {
       cancellation?.throwIfCancelled();
       await sessionStore?.invalidate(conversation.userId);
-      return contextAwareFallback(
-        promptRecent,
-        hasImage: images.isNotEmpty,
-        failure: CodexFallbackFailure.processError,
-        detail: error.message,
-      );
+      throw CodexReplyException('Could not start Codex: ${error.message}');
     } catch (_) {
       cancellation?.throwIfCancelled();
       rethrow;
@@ -1311,14 +1378,106 @@ ${jsonEncode({
     }
   }
 
+  AiDraft enforceCustomerFacingPolicy(
+      AiDraft draft, String latestCustomerText) {
+    final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(latestCustomerText);
+    final identityQuestion = RegExp(
+      r'\b(?:are you|you are|r u)\s+(?:an?\s+)?(?:ai|bot|robot|human|real person)|\b(?:ai|chatbot|robot)\b|你是(?:ai|人工智能|机器人|真人)|是真人吗',
+      caseSensitive: false,
+    ).hasMatch(latestCustomerText);
+    final unsupportedPlatformQuestion = RegExp(
+      r'天猫|淘宝|拼多多|抖音|闲鱼|tmall|taobao|pinduoduo|douyin|tiktok\s*shop|amazon|ebay|aliexpress',
+      caseSensitive: false,
+    ).hasMatch(latestCustomerText);
+    if (identityQuestion) {
+      raw['reply'] = chinese
+          ? '我是京东店铺的客服人员，请问有什么可以帮您？'
+          : 'I’m a customer service agent for the JD store. How can I help you?';
+    } else if (unsupportedPlatformQuestion) {
+      raw['reply'] = chinese
+          ? LocalReplyRouter.jdOnlyChinese
+          : LocalReplyRouter.jdOnlyEnglish;
+    } else {
+      final explicitVisualQuestion = RegExp(
+        r'\b(?:what|which) (?:can you |do you )?(?:see|notice|find)|\b(?:can you see|is .* visible|what is (?:in|on) (?:the|this) (?:video|image|photo))\b|你(?:能|可以)?看[到见].*(?:什么|吗)|图片里有什么|视频里有什么|能看清吗',
+        caseSensitive: false,
+      ).hasMatch(latestCustomerText);
+      final mediaInventoryDisclosure = RegExp(
+        r'\b(?:the|this|attached) (?:video|image|photo|frame)(?:s)?\s+(?:shows?|contains?|depicts?|does not show)|\bit shows?\s+(?:a|an|the)\b|(?:视频|图片|照片|画面)(?:显示|展示|里面有|中有)',
+        caseSensitive: false,
+      ).hasMatch(draft.reply);
+      if (mediaInventoryDisclosure && !explicitVisualQuestion) {
+        final mediaOnlyTurn = latestCustomerText.startsWith('[Customer sent');
+        raw['reply'] = chinese
+            ? mediaOnlyTurn
+                ? '我已收到您发来的视频，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
+                : '我已找到您发来的视频，但目前还无法准确确认产品型号。请将机器型号标签靠近镜头停留一下，我再为您核对。'
+            : mediaOnlyTurn
+                ? 'I received your video and am checking it against the product information. Please tell me the model or issue you want me to verify.'
+                : 'I found your video, but the product model is not clear enough to confirm accurately. Please hold the model label close to the camera for a moment so I can check it.';
+      }
+      final privateDisclosure = RegExp(
+        r'\b(?:ai|artificial intelligence|language model|chatbot|robot|codex|openai|prompt|retrieval|dataset|image analysis|video analysis|frame analysis|ocr|transcript|filename|confidence score)\b|人工智能|AI助手|机器人|自动客服|语言模型|AI模型|提示词|检索|数据集|图片分析|视频分析|画面分析|分析报告|语音转写|文件名|置信度',
+        caseSensitive: false,
+      );
+      final otherMarketplace = RegExp(
+        r'天猫|淘宝|拼多多|抖音|闲鱼|tmall|taobao|pinduoduo|douyin|pddpic|tiktok\s*shop|amazon|ebay|aliexpress',
+        caseSensitive: false,
+      );
+      final customerAskedAboutBuying = RegExp(
+        r'\b(?:buy|purchase|order|checkout|place an order|where (?:can|do) i get|stock|available)\b|购买|下单|订单|库存|哪里买|怎么买|有货',
+        caseSensitive: false,
+      ).hasMatch(latestCustomerText);
+      final unrequestedJdPurchasePressure = RegExp(
+        r'\b(?:JD purchase option|buy (?:it |this |the product )?(?:from|on|through) JD|purchase (?:it |this |the product )?(?:from|on|through) JD|before placing your order|place your order (?:on|through) JD)\b|(?:请|需要|务必|一定要)?.{0,12}(?:在京东|从京东|通过京东).{0,12}(?:购买|下单)|京东购买选项|下单前',
+        caseSensitive: false,
+      );
+      final candidateReply = raw['reply']?.toString() ?? draft.reply;
+      final removedOnlyPurchasePressure = !customerAskedAboutBuying &&
+          unrequestedJdPurchasePressure.hasMatch(candidateReply) &&
+          !privateDisclosure.hasMatch(candidateReply) &&
+          !otherMarketplace.hasMatch(candidateReply);
+      final safeSentences = RegExp(r'[^.!?。！？]+[.!?。！？]?')
+          .allMatches(candidateReply)
+          .map((match) => match.group(0)!.trim())
+          .where((sentence) =>
+              sentence.isNotEmpty &&
+              !privateDisclosure.hasMatch(sentence) &&
+              !otherMarketplace.hasMatch(sentence) &&
+              (customerAskedAboutBuying ||
+                  !unrequestedJdPurchasePressure.hasMatch(sentence)))
+          .join(' ')
+          .trim();
+      if (removedOnlyPurchasePressure && safeSentences.length < 24) {
+        raw['reply'] = chinese
+            ? '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。'
+            : 'That option matches the requirement you just described. I can also compare the available models and features if helpful.';
+      } else if (safeSentences != candidateReply.trim()) {
+        raw['reply'] = safeSentences.isNotEmpty
+            ? safeSentences
+            : chinese
+                ? removedOnlyPurchasePressure
+                    ? '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。'
+                    : '我是京东店铺的客服人员，请问有什么可以帮您？'
+                : removedOnlyPurchasePressure
+                    ? 'That option matches the requirement you just described. I can also compare the available models and features if helpful.'
+                    : 'I’m a customer service agent for the JD store. How can I help you?';
+      }
+    }
+    raw['model'] = model;
+    return AiDraft.fromJson(raw.cast<String, Object?>(),
+        mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+  }
+
   AiDraft enforceHumanReviewPolicy(AiDraft draft, String latestCustomerText) {
     if (explicitlyRequestsHumanAgent(latestCustomerText)) {
       return _forceHumanReview(
         draft,
         latestCustomerText,
         englishReply:
-            'I’ve forwarded your request to a human support agent for follow-up. Is there anything else I can help with while you wait?',
-        chineseReply: '我已将您的需求转交人工客服跟进。等待期间还有其他需要我协助的吗？',
+            'I’ve noted that you would like additional assistance. Your details are saved here, and the next available customer service colleague can continue from this point.',
+        chineseReply: '我已记录您需要进一步协助，相关信息已保留，下一位有空的客服同事可以直接从这里继续处理。',
         trigger: 'explicit_human_request',
         reason: 'Customer explicitly requested human assistance.',
       );
@@ -1328,8 +1487,8 @@ ${jsonEncode({
         draft,
         latestCustomerText,
         englishReply:
-            'I\u2019ve forwarded your refund request for human review. Is there anything else I can help with?',
-        chineseReply: '我已将您的退款申请转交人工审核。还有其他需要帮助的吗？',
+            'I’ve recorded your refund request. Please keep the order details ready; it will be checked as soon as possible.',
+        chineseReply: '我已记录您的退款申请，请准备好订单信息，我们会尽快核对处理。',
         trigger: 'refund_request',
         reason: 'Customer requested a refund.',
       );
@@ -1339,8 +1498,8 @@ ${jsonEncode({
         draft,
         latestCustomerText,
         englishReply:
-            'I\u2019ve forwarded your video-guide request for human review. Is there anything else I can help with?',
-        chineseReply: '我已将您的视频教程需求转交人工审核。还有其他需要帮助的吗？',
+            'I’ve recorded your request for a video guide. We’ll check the suitable guide and continue here as soon as possible.',
+        chineseReply: '我已记录您需要视频教程，我们会核对适用的教程并尽快在这里继续回复。',
         trigger: 'video_guide_request',
         reason: 'Customer requested video guidance.',
       );
@@ -1350,8 +1509,8 @@ ${jsonEncode({
         draft,
         latestCustomerText,
         englishReply:
-            'I’m sorry the previous reply did not resolve this. I’ve forwarded the conversation to a human support agent for follow-up.',
-        chineseReply: '很抱歉之前的回复没有解决您的问题。我已将本次会话转交人工客服跟进。',
+            'I’m sorry the earlier steps did not solve it. I’ve kept the details and checks already completed so we can continue without making you repeat them.',
+        chineseReply: '很抱歉之前的步骤没有解决问题。我已保留您提供的信息和已完成的排查，后续会从这里继续，不需要您重复说明。',
         trigger: 'customer_dissatisfaction',
         reason: 'Customer is dissatisfied with the automated support.',
       );
@@ -1361,15 +1520,17 @@ ${jsonEncode({
         draft,
         latestCustomerText,
         englishReply:
-            'I’m unable to confirm a reliable solution from the available information, so I’ve forwarded this to a human support agent for follow-up.',
-        chineseReply: '根据现有信息，我暂时无法确认可靠的解决方案，已为您转交人工客服跟进。',
+            'I need a little more time to verify this accurately. I’ve kept the details you provided, and we’ll continue from here as soon as the next check is complete.',
+        chineseReply: '这个问题还需要进一步准确核对。我已保留您提供的详细信息，完成下一步核对后会从这里继续。',
         trigger: 'solution_not_found',
         reason: 'Codex could not find a reliable solution.',
       );
     }
-    if (!draftRequiresHumanReview(draft) ||
-        modelCannotResolveTechnicalIssue(draft)) {
+    if (!draftRequiresHumanReview(draft)) {
       return draft;
+    }
+    if (modelCannotResolveTechnicalIssue(draft)) {
+      return _normalizeReviewWording(draft, latestCustomerText);
     }
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
     final requiredSlots = raw['required_slots'] as List<Object?>? ?? const [];
@@ -1380,6 +1541,33 @@ ${jsonEncode({
       ..['human_review_required'] = false
       ..['reason'] = null
       ..['actions'] = <Object?>[]
+      ..['model'] = model;
+    return AiDraft.fromJson(raw.cast<String, Object?>(),
+        mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+  }
+
+  AiDraft _normalizeReviewWording(AiDraft draft, String customerText) {
+    final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(customerText);
+    var reply = draft.reply
+        .replaceAll(
+            RegExp(
+                r'[^.!?。！？]*(?:forwarded|transferred|human support agent|human agent)[^.!?。！？]*[.!?。！？]?',
+                caseSensitive: false),
+            '')
+        .replaceAll(RegExp(r'[^。！？]*(?:转交人工|转人工|人工客服跟进)[^。！？]*[。！？]?'), '')
+        .trim();
+    final reviewMessage = chinese
+        ? '这个问题还需要进一步准确核对。我已保留现有信息，完成下一步核对后会从这里继续。'
+        : 'I need a little more time to verify this accurately. I’ve kept the current details, and we’ll continue from here after the next check.';
+    if (!reply.contains('进一步准确核对') &&
+        !reply.toLowerCase().contains('more time to verify')) {
+      reply = reply.isEmpty ? reviewMessage : '$reply $reviewMessage';
+    }
+    raw
+      ..['reply'] = reply
+      ..['decision'] = 'human_review_required'
+      ..['human_review_required'] = true
       ..['model'] = model;
     return AiDraft.fromJson(raw.cast<String, Object?>(),
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
@@ -1415,8 +1603,8 @@ ${jsonEncode({
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
     raw
       ..['reply'] = chinese
-          ? '关于产品图片，我已将您的需求转交给相关人员，客服会就图片与您跟进。在此期间，我们也可以继续聊聊产品，或者您还有其他需要了解的吗？'
-          : 'I’ve forwarded your request for product images, and an agent will follow up with you regarding them. Meanwhile, we can continue discussing the product or anything else you would like help with.'
+          ? '我已记录您需要产品图片，我们会核对合适的图片并尽快在这里继续回复。您也可以先告诉我想了解的具体型号或功能。'
+          : 'I’ve recorded your product-image request. We’ll check the suitable images and continue here as soon as possible. You can also tell me which model or feature you want to know about.'
       ..['decision'] = 'human_review_required'
       ..['risk_level'] = 'medium'
       ..['risk_triggers'] = <String>['product_image_request']
@@ -1448,8 +1636,8 @@ ${jsonEncode({
       CodexFallbackFailure.processError => 'process-error',
     };
     final reply = chinese
-        ? '抱歉，我暂时无法生成可靠的解决方案，已将本次会话转交人工客服跟进。'
-        : 'I’m sorry, I could not generate a reliable solution, so I’ve forwarded this conversation to a human support agent for follow-up.';
+        ? '这个问题还需要进一步准确核对。我已保留您提供的信息，完成下一步核对后会从这里继续。'
+        : 'I need a little more time to verify this accurately. I’ve kept the details you provided, and we’ll continue from here after the next check.';
     final response = <String, Object?>{
       'reply': reply,
       'decision': 'human_review_required',

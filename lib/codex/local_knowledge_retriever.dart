@@ -35,6 +35,7 @@ class LocalKnowledgeRetriever {
     }
     final scored = <({double score, Map<String, dynamic> record})>[];
     for (final record in records) {
+      if (!_isJdApplicable(record)) continue;
       final score = _score(query, record);
       if (score > 0) scored.add((score: score, record: record));
     }
@@ -152,8 +153,7 @@ class LocalKnowledgeRetriever {
   bool _isCustomerKnowledgeMarkdown(File file) {
     final name = p.basename(file.path).toLowerCase();
     return name.endsWith('_kb.md') ||
-        name == 'customer_service_high_priority_issues.md' ||
-        name == 'tmall_customer_service_rules.md';
+        name == 'customer_service_high_priority_issues.md';
   }
 
   Future<void> _loadJsonLines(
@@ -256,6 +256,32 @@ class LocalKnowledgeRetriever {
         score += 22;
       }
     }
+    if (_isTechnicalQuery(normalizedQuery)) {
+      final technicalText = _normalize([
+        record['intent'],
+        record['issue'],
+        record['title'],
+        record['reply_template'],
+        record['content'],
+      ].whereType<Object>().join(' '));
+      for (final concept in const [
+        ['driver', '驱动'],
+        ['download', '下载'],
+        ['install', '安装'],
+        ['connect', '连接'],
+        ['macos', '苹果'],
+      ]) {
+        if (concept.any(normalizedQuery.contains) &&
+            concept.any(technicalText.contains)) {
+          score += 14;
+        }
+      }
+      final intent = _normalize(record['intent']?.toString() ?? '');
+      if (const ['troubleshooting', 'tutorial', 'supportchannel']
+          .any(intent.contains)) {
+        score += 10;
+      }
+    }
     // Curated active cards carry reviewed reply policy, required slots, and
     // governed media links. Keep a genuinely matching card ahead of duplicate
     // source chunks/Markdown while allowing source-only exact matches through.
@@ -282,6 +308,22 @@ class LocalKnowledgeRetriever {
         '哪款',
         '买哪',
         '选哪',
+      ].any(query.contains);
+
+  bool _isTechnicalQuery(String query) => const [
+        'driver',
+        '驱动',
+        'download',
+        '下载',
+        'install',
+        '安装',
+        'connect',
+        '连接',
+        'setup',
+        '设置',
+        'troubleshoot',
+        '故障',
+        '报错',
       ].any(query.contains);
 
   bool _isMediaQuery(String query) => const [
@@ -330,6 +372,11 @@ class LocalKnowledgeRetriever {
       (r'\byear\b', '年份'),
       (r'\btime\b', '时间'),
       (r'\bbattery\b', '电池'),
+      (r'\bdrivers?\b', '驱动 下载 安装'),
+      (r'\bdownload\b', '下载 驱动'),
+      (r'\bconnect(?:ion|ing)?\b', '连接 安装'),
+      (r'\bsetup\b', '设置 安装'),
+      (r'\bmac(?:os|book)?\b', '苹果 macOS USB'),
     ]) {
       if (RegExp(pattern).hasMatch(lower)) terms.add(translation);
     }
@@ -421,8 +468,54 @@ class LocalKnowledgeRetriever {
           'source_file',
           'content',
         ])
-          if (record.containsKey(key)) key: record[key],
+          if (record.containsKey(key) && _jdOnlyValue(record[key]) != null)
+            key: _jdOnlyValue(record[key]),
       };
+
+  bool _isJdApplicable(Map<String, dynamic> record) {
+    final identity = [
+      record['id'],
+      record['title'],
+      record['source_file'],
+    ].whereType<Object>().join(' ');
+    if (!_containsUnsupportedPlatform(identity)) return true;
+    return RegExp(r'京东|\bjd\b|jingdong', caseSensitive: false)
+        .hasMatch(identity);
+  }
+
+  Object? _jdOnlyValue(Object? value) {
+    if (value is String) {
+      if (!_containsUnsupportedPlatform(value)) return value;
+      final kept = RegExp(r'[^。！？.!?；;\n]+[。！？.!?；;]?')
+          .allMatches(value)
+          .map((match) => match.group(0)!.trim())
+          .where((segment) =>
+              segment.isNotEmpty && !_containsUnsupportedPlatform(segment))
+          .join(' ')
+          .trim();
+      return kept.isEmpty ? null : kept;
+    }
+    if (value is List) {
+      final sanitized =
+          value.map(_jdOnlyValue).whereType<Object>().toList(growable: false);
+      return sanitized.isEmpty ? null : sanitized;
+    }
+    if (value is Map) {
+      final sanitized = <String, Object?>{};
+      for (final entry in value.entries) {
+        if (_containsUnsupportedPlatform(entry.key.toString())) continue;
+        final item = _jdOnlyValue(entry.value);
+        if (item != null) sanitized[entry.key.toString()] = item;
+      }
+      return sanitized.isEmpty ? null : sanitized;
+    }
+    return value;
+  }
+
+  bool _containsUnsupportedPlatform(String value) => RegExp(
+        r'天猫|淘宝|拼多多|抖音|闲鱼|tmall|taobao|pinduoduo|douyin|pddpic|tiktok\s*shop|amazon|ebay|aliexpress',
+        caseSensitive: false,
+      ).hasMatch(value);
 
   String _stableId(String value) {
     var hash = 0xcbf29ce484222325;

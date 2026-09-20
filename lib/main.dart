@@ -294,17 +294,24 @@ class _CaptureHomeState extends State<CaptureHome> {
           await _adapter
               .openConversation(job.userId, allowActivation: true)
               .timeout(_captureOperationTimeout);
+          // The timer may have reserved this job before a generated or manual
+          // reply completed. Recheck at the last possible point so a holding
+          // message can never follow a real reply from the same SLA window.
+          if (!await _database.isSlaFallbackReservedForSend(
+              userId: job.userId, messageId: job.messageId)) {
+            return;
+          }
           await _adapter.sendDraftOnce(
             expectedCustomer: job.userId,
             reply: holdingReply,
             mediaPaths: const [],
           );
-          await _database.markSlaFallbackSent(
+          final recorded = await _database.markSlaFallbackSent(
             userId: job.userId,
             messageId: job.messageId,
             reply: holdingReply,
           );
-          if (mounted) {
+          if (recorded && mounted) {
             setState(() => _diagnostics =
                 'Sent a holding message to ${job.userId}; the final answer remains queued.');
           }
@@ -397,19 +404,9 @@ class _CaptureHomeState extends State<CaptureHome> {
               activeCustomer.isNotEmpty &&
               rows.any((row) => row.customer == activeCustomer)) {
             final extraction = const OcrCaptureExtractor().analyze(inspection);
-            if (extraction.transferNoticeVisible) {
-              if (_visibleTransferWelcomes.add(activeCustomer)) {
-                await _sendTransferWelcomeOnce(
-                    activeCustomer,
-                    extraction.transferNoticeKey ??
-                        'visible-transfer-${inspection.capturedAt.day}');
-              }
-            } else {
+            if (!extraction.transferNoticeVisible) {
               _visibleTransferWelcomes.remove(activeCustomer);
             }
-            // A new transfer to this profile must be welcomed even if an old
-            // ticket still marks the customer as human_contacting. Apart from
-            // that acknowledgement, preserve the human pause.
             if (!await _database.isHumanContacting(activeCustomer)) {
               final capture = await _captureWithVisibleMedia(
                   inspection, extraction,
@@ -424,6 +421,13 @@ class _CaptureHomeState extends State<CaptureHome> {
                     newEvidence: insertedFromActiveChat > 0);
               }
               if (insertedFromActiveChat > 0) await _coordinator.refresh();
+            }
+            if (extraction.transferNoticeVisible) {
+              await _handleTransferNotice(
+                activeCustomer,
+                extraction.transferNoticeKey ??
+                    'visible-transfer-${inspection.capturedAt.day}',
+              );
             }
           }
         }
@@ -463,14 +467,7 @@ class _CaptureHomeState extends State<CaptureHome> {
               .timeout(_captureOperationTimeout);
           if (mounted) setState(() => _ocrInspection = inspection);
           final extraction = const OcrCaptureExtractor().analyze(inspection);
-          if (extraction.transferNoticeVisible) {
-            if (_visibleTransferWelcomes.add(customer)) {
-              await _sendTransferWelcomeOnce(
-                  customer,
-                  extraction.transferNoticeKey ??
-                      row.unreadEvidence.toString());
-            }
-          } else {
+          if (!extraction.transferNoticeVisible) {
             _visibleTransferWelcomes.remove(customer);
           }
           final capture = await _captureWithVisibleMedia(inspection, extraction,
@@ -490,6 +487,12 @@ class _CaptureHomeState extends State<CaptureHome> {
           if (await _database.hasPendingUnanswered(customer)) {
             _scheduleDraftGeneration(customer,
                 newEvidence: insertedForCustomer > 0);
+          }
+          if (extraction.transferNoticeVisible) {
+            await _handleTransferNotice(
+              customer,
+              extraction.transferNoticeKey ?? row.unreadEvidence.toString(),
+            );
           }
 
           // Never scroll into history. Only the current bottom viewport may
@@ -548,6 +551,20 @@ class _CaptureHomeState extends State<CaptureHome> {
       '${value.hour.toString().padLeft(2, '0')}:'
       '${value.minute.toString().padLeft(2, '0')}:'
       '${value.second.toString().padLeft(2, '0')}';
+
+  Future<void> _handleTransferNotice(String userId, String eventKey) async {
+    if (!_visibleTransferWelcomes.add(userId)) return;
+    // A transferred chat can already contain the customer's real question.
+    // Preserve that queued answer and record the transfer as handled without
+    // inserting a generic welcome in front of it.
+    if (await _database.hasPendingUnanswered(userId) ||
+        await _database.hasUndeliveredDraft(userId)) {
+      await _database.reserveTransferWelcome(
+          userId: userId, eventKey: eventKey);
+      return;
+    }
+    await _sendTransferWelcomeOnce(userId, eventKey);
+  }
 
   Future<bool> _sendTransferWelcomeOnce(String userId, String eventKey) async {
     if (!await _database.reserveTransferWelcome(

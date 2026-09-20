@@ -73,7 +73,7 @@ void main() {
 
     final job = await database.slaFallbackJob(userId);
     expect(job?.messageId, messageId);
-    expect(job?.dueAt, capturedAt.add(const Duration(minutes: 2)));
+    expect(job?.dueAt, capturedAt.add(const Duration(seconds: 20)));
     expect(
         await database.reserveSlaFallback(userId: userId, messageId: messageId),
         isTrue);
@@ -148,6 +148,73 @@ void main() {
     expect(slaRows.single['state'], 'completed');
   });
 
+  test('a real reply cancels a holding message that was already reserved',
+      () async {
+    final root = await Directory.systemTemp.createTemp('sla_race_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    const userId = 'race-customer';
+    const messageId = 'race-message';
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: DateTime(2026, 9, 20, 16),
+      messages: const [
+        CapturedMessage(
+          stableId: messageId,
+          direction: 'incoming',
+          body: 'Please check this.',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'Here is the checked answer.',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"Here is the checked answer.","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    await database.saveDraft(pending.id, draft, expectedMessageId: messageId);
+    expect(
+        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        isTrue);
+    expect(
+        await database.isSlaFallbackReservedForSend(
+            userId: userId, messageId: messageId),
+        isTrue);
+
+    expect(await database.markReplySent(userId: userId, reply: draft.reply),
+        isTrue);
+    expect(
+        await database.isSlaFallbackReservedForSend(
+            userId: userId, messageId: messageId),
+        isFalse);
+    expect(
+        await database.markSlaFallbackSent(
+          userId: userId,
+          messageId: messageId,
+          reply: 'Please wait while we check.',
+        ),
+        isFalse);
+    final history = await (await database.history).read(userId);
+    final messages = (history!['messages'] as List<Object?>)
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+    expect(messages.where((message) => message['source'] == 'sla_fallback'),
+        isEmpty);
+  });
+
   test('delivery failures retain drafts for retry or reconciliation', () async {
     final root = await Directory.systemTemp.createTemp('delivery_retry_test_');
     final database = CaptureDatabase(storageRoot: root);
@@ -204,7 +271,7 @@ void main() {
     expect(rows.single['delivery_state'], 'delivery_unknown');
   });
 
-  test('SLA deadline uses the JD China-time message clock', () async {
+  test('fallback reservation uses the JD China-time message clock', () async {
     final root = await Directory.systemTemp.createTemp('sla_clock_test_');
     final database = CaptureDatabase(storageRoot: root);
     addTearDown(() async {
@@ -233,7 +300,58 @@ void main() {
     ));
 
     final job = await database.slaFallbackJob('clock');
-    expect(job?.dueAt.toUtc(), DateTime.utc(2026, 9, 16, 5, 39, 40));
+    expect(job?.dueAt.toUtc(), DateTime.utc(2026, 9, 16, 5, 38));
+  });
+
+  test('later customer messages do not restart the fallback clock', () async {
+    final root = await Directory.systemTemp.createTemp('sla_batch_clock_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    const userId = 'jd_41aeec7741d05';
+    final firstAt = DateTime.utc(2026, 9, 19, 10, 58, 46);
+    final secondAt = DateTime.utc(2026, 9, 19, 10, 59, 37);
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: firstAt,
+      messages: [
+        CapturedMessage(
+          stableId: 'first-message',
+          direction: 'incoming',
+          body: 'oh...then how to set it up',
+          sentAt: firstAt,
+          axPath: 'test',
+        ),
+      ],
+    ));
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: secondAt,
+      messages: [
+        CapturedMessage(
+          stableId: 'second-message',
+          direction: 'incoming',
+          body: 'is it possible to change ribbon m880 with m880DaT',
+          sentAt: secondAt,
+          axPath: 'test',
+        ),
+      ],
+    ));
+
+    final job = await database.slaFallbackJob(userId);
+    expect(job?.messageId, 'second-message');
+    expect(
+      job?.dueAt.toUtc(),
+      firstAt.add(const Duration(seconds: 20)),
+    );
   });
 
   test('version 7 migration protects customers already waiting', () async {
@@ -291,7 +409,7 @@ void main() {
     final slaRows = await db.query('sla_fallbacks');
     expect(slaRows, hasLength(1));
     expect(slaRows.single['message_id'], 'existing-message');
-    expect(slaRows.single['due_at_ms'], enqueuedAt + 120000);
+    expect(slaRows.single['due_at_ms'], enqueuedAt + 20000);
     expect(slaRows.single['state'], 'pending');
 
     final columns = await db.rawQuery('PRAGMA table_info(generated_drafts)');
@@ -304,6 +422,55 @@ void main() {
           'retry_at_ms',
           'last_error',
         }));
+  });
+
+  test('version 10 migration restores pending fallback to 20 seconds',
+      () async {
+    final root =
+        await Directory.systemTemp.createTemp('sla_v10_migration_test_');
+    final path = '${root.path}/jd_automation.sqlite3';
+    sqfliteFfiInit();
+    final legacy = await databaseFactoryFfi.openDatabase(
+      path,
+      options: OpenDatabaseOptions(
+        version: 9,
+        onCreate: (db, _) async {
+          await db.execute('''CREATE TABLE sla_fallbacks (
+            user_id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            due_at_ms INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            sent_at_ms INTEGER,
+            updated_at_ms INTEGER NOT NULL
+          )''');
+          await db.execute('''CREATE TABLE conversation_control (
+            user_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            resume_after_message_id TEXT,
+            updated_at_ms INTEGER NOT NULL
+          )''');
+        },
+      ),
+    );
+    const anchor = 1800000000000;
+    await legacy.insert('sla_fallbacks', {
+      'user_id': 'waiting-v9',
+      'message_id': 'message-v9',
+      'due_at_ms': anchor + 35000,
+      'state': 'pending',
+      'sent_at_ms': null,
+      'updated_at_ms': anchor,
+    });
+    await legacy.close();
+
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final db = await database.database;
+    final rows = await db.query('sla_fallbacks');
+    expect(rows.single['due_at_ms'], anchor + 20000);
   });
 
   test('demo data uses JSON history and SQLite only as pending queue',
@@ -589,10 +756,25 @@ void main() {
     expect(await database.hasUndeliveredDraft('buyer'), isTrue);
     expect((await database.nextReadyDelivery())?.draft.reply,
         'Old image-only answer');
+    final sentAtLowerBound = DateTime.now();
     expect(await database.markReplySent(userId: 'buyer', reply: draft.reply),
         isTrue);
+    final sentAtUpperBound = DateTime.now();
     expect(await database.answeredMessageId('buyer'), 'image-1');
     expect(await database.hasPendingUnanswered('buyer'), isTrue);
+    final remainingFallback = await database.slaFallbackJob('buyer');
+    expect(remainingFallback?.messageId, 'text-2');
+    expect(
+      remainingFallback!.dueAt.millisecondsSinceEpoch,
+      inInclusiveRange(
+        sentAtLowerBound
+            .add(const Duration(seconds: 20))
+            .millisecondsSinceEpoch,
+        sentAtUpperBound
+            .add(const Duration(seconds: 20))
+            .millisecondsSinceEpoch,
+      ),
+    );
     final messages = ((await (await database.history)
             .read('buyer'))?['messages'] as List<Object?>? ??
         const []);
@@ -1196,6 +1378,44 @@ void main() {
     ));
 
     expect(await database.pendingMessageId('buyer'), 'new-customer-question');
+  });
+
+  test('older seller OCR appended after a newer customer stays pending',
+      () async {
+    final root = await Directory.systemTemp.createTemp('late_old_reply_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final now = DateTime.utc(2026, 9, 19, 6, 30);
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:late-old-reply',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: now,
+      messages: [
+        CapturedMessage(
+          stableId: 'new-customer-message',
+          direction: 'incoming',
+          body: 'I still have a question.',
+          sentAt: now.subtract(const Duration(minutes: 1)),
+          axPath: 'ocr',
+        ),
+        CapturedMessage(
+          stableId: 'older-seller-message',
+          direction: 'outgoing',
+          body: 'This seller reply belongs to yesterday.',
+          sentAt: now.subtract(const Duration(days: 1)),
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(await database.pendingMessageId('buyer'), 'new-customer-message');
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
+    expect(await database.answeredMessageId('buyer'), isNull);
   });
 
   test('exact production sequence keeps one incoming and one outgoing',

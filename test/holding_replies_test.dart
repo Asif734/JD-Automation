@@ -5,8 +5,8 @@ import 'package:jd_automation/codex/holding_replies.dart';
 
 void main() {
   test('holding replies vary and follow the customer language', () {
-    expect(englishHoldingReplies.toSet(), hasLength(10));
-    expect(chineseHoldingReplies.toSet(), hasLength(10));
+    expect(englishHoldingReplies.toSet(), hasLength(20));
+    expect(chineseHoldingReplies.toSet(), hasLength(20));
     final random = Random(7);
     for (var index = 0; index < 30; index++) {
       expect(

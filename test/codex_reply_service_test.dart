@@ -36,7 +36,7 @@ void main() {
   });
 
   test('creates a durable read-only session with structured output', () {
-    expect(service.timeout, const Duration(seconds: 90));
+    expect(service.timeout, isNull);
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],
@@ -131,7 +131,9 @@ void main() {
     );
 
     expect(draft.model, 'local-timeout-fallback-v2');
-    expect(draft.reply, contains('human support agent'));
+    expect(draft.reply, contains('more time to verify'));
+    expect(draft.reply, isNot(contains('senior customer service agent')));
+    expect(draft.reply, isNot(contains('forwarded')));
     expect(draft.decision, 'human_review_required');
     expect(draftRequiresHumanReview(draft), isTrue);
     expect(draft.actions, isEmpty);
@@ -394,6 +396,9 @@ void main() {
     expect(draftRequiresHumanReview(guarded), isTrue);
     expect(guarded.decision, 'human_review_required');
     expect(guarded.riskLevel, 'high');
+    expect(guarded.reply, contains('more time to verify'));
+    expect(guarded.reply, isNot(contains('senior customer service agent')));
+    expect(guarded.reply, isNot(contains('forwarded')));
   });
 
   test('recognizes refund and video-guide review requests', () {
@@ -402,6 +407,38 @@ void main() {
     expect(isVideoGuideRequest('Please send the setup video guide'), isTrue);
     expect(isVideoGuideRequest('请发设置视频教程'), isTrue);
     expect(isVideoGuideRequest('I sent a fault video'), isFalse);
+  });
+
+  test('keeps the technical subject for a short follow-up complaint', () {
+    const recent = 'I use macOS\nWhere can I get the TP874 driver?\n'
+        'Then how do I connect it?';
+    expect(
+        isTechnicalSupportTurn('you should have product link', recent), isTrue);
+    expect(isTechnicalSupportTurn('thank you', recent), isFalse);
+  });
+
+  test('selects one reply route before prompt construction', () {
+    String route({
+      String text = 'help',
+      bool technical = false,
+      bool list = false,
+      bool catalog = false,
+      bool features = false,
+    }) =>
+        selectReplyRoute(
+          currentTurnText: text,
+          technicalSupportRequested: technical,
+          productListRequested: list,
+          productCatalogRequested: catalog,
+          productFeatureRequested: features,
+        );
+
+    expect(route(technical: true, catalog: true), 'technical_support');
+    expect(route(list: true), 'product_list');
+    expect(route(catalog: true), 'product_recommendation');
+    expect(route(features: true), 'product_features');
+    expect(route(text: 'I need a refund', technical: true), 'refund_review');
+    expect(route(), 'general_support');
   });
 
   test('recognizes Codex video-thumbnail descriptions', () {
@@ -441,7 +478,7 @@ void main() {
     expect(refund.reply, contains('refund request'));
     expect(draftHumanReviewReason(refund), contains('refund'));
     expect(draftRequiresHumanReview(video), isTrue);
-    expect(video.reply, contains('video-guide request'));
+    expect(video.reply, contains('video guide'));
   });
 
   test('forces human requests, dissatisfaction, and no-solution replies', () {
@@ -491,6 +528,11 @@ void main() {
     expect(draftHumanReviewReason(dissatisfied), contains('dissatisfied'));
     expect(draftRequiresHumanReview(unresolved), isTrue);
     expect(draftHumanReviewReason(unresolved), contains('reliable solution'));
+    for (final guarded in [human, dissatisfied, unresolved]) {
+      expect(guarded.reply, isNot(contains('senior customer service agent')));
+      expect(guarded.reply.toLowerCase(), isNot(contains('forwarded')));
+      expect(guarded.reply.toLowerCase(), isNot(contains('transferred')));
+    }
   });
 
   test('builds a useful human-review reason when model reason is null', () {
@@ -578,6 +620,47 @@ void main() {
     expect(draft.usedRecordIds, ['intent:transfer_welcome']);
     expect(draft.reply, isNot(contains('人工')));
     expect(draft.reply, isNot(contains('human')));
+  });
+
+  test('answers recent context instead of welcoming after a transfer', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'How do I install the TP874 driver?'
+      },
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': '请你转给子账号小甘 Grozziie 上次会话小结 用户诉求：安装驱动',
+      },
+    ]);
+
+    expect(draft, isNull);
+  });
+
+  test('identifies as a JD customer service agent', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'Are you an AI assistant?'
+      },
+    ]);
+
+    expect(draft, isNotNull);
+    expect(draft!.reply, contains('customer service agent'));
+    expect(draft.reply.toLowerCase(), isNot(contains('ai')));
+  });
+
+  test('keeps other marketplace questions within JD scope', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'Can you check my Tmall order?'
+      },
+    ]);
+
+    expect(draft, isNotNull);
+    expect(draft!.reply, contains('only the JD store'));
+    expect(draft.reply, isNot(contains('Tmall')));
   });
 
   test('retrieval query contains only the current customer turn', () {
@@ -907,6 +990,27 @@ void main() {
     );
   });
 
+  test('retrieval omits non-JD marketplace evidence', () async {
+    final knowledge = Directory('${root.path}/jd_only_knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    await File('${ragCards.path}/customer_service_rag_cards.jsonl')
+        .writeAsString(
+      '{"id":"tmall_only","status":"active","title":"Tmall order rule","issue":"scopechecktoken","reply_template":"Tmall answer"}\n'
+      '{"id":"jd_mixed","status":"active","title":"JD support","issue":"scopechecktoken","reply_template":"JD answer. Tmall answer."}\n',
+    );
+
+    final records = await LocalKnowledgeRetriever(knowledge)
+        .retrieve('scopechecktoken', limit: 5);
+    final encoded = records.toString().toLowerCase();
+
+    expect(records.map((record) => record['id']), contains('jd_mixed'));
+    expect(
+        records.map((record) => record['id']), isNot(contains('tmall_only')));
+    expect(encoded, isNot(contains('tmall')));
+    expect(encoded, contains('jd answer'));
+  });
+
   test('retrieves an available attendance product for a buying conversation',
       () async {
     final projectRoot = Directory.current;
@@ -1006,6 +1110,69 @@ void main() {
           .any((record) => record['id'] == 'attendance_manual_date_time_setup'),
       isTrue,
     );
+  });
+
+  test('retrieves TP874 Mac driver and connection evidence without a link',
+      () async {
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final raw = await retriever.retrieve(
+      'TP874 macOS where can I get driver then how to connect?',
+      limit: 35,
+    );
+    final records = filterKnowledgeForLatestProduct(
+      raw,
+      'TP874 macOS driver download connect thermal printer',
+      categoryConstraints: const ProductRetrievalConstraints(
+        requiredCategories: {'thermal_label_printer'},
+      ),
+    );
+    final evidence = records
+        .map((record) => [
+              record['id'],
+              record['title'],
+              record['issue'],
+              record['reply_template'],
+              record['content'],
+            ].join(' '))
+        .join('\n');
+
+    expect(hasTechnicalSupportIntent('where can I get driver?'), isTrue);
+    expect(evidence, contains('TP874'));
+    expect(evidence, anyOf(contains('download.htm'), contains('下载')));
+    expect(evidence, contains('USB'));
+  });
+
+  test('exact-model filtering retains generic same-category support cards', () {
+    final records = filterKnowledgeForLatestProduct(
+      const [
+        {
+          'id': 'generic_download',
+          'models': ['all'],
+          'product_line': 'all_printers',
+          'issue': 'official driver download',
+        },
+        {
+          'id': 'thermal_setup',
+          'models': ['热敏打印机'],
+          'product_line': 'thermal_printer',
+          'issue': 'USB driver setup',
+        },
+        {
+          'id': 'wrong_exact_model',
+          'models': ['TD630'],
+          'product_line': 'dot_matrix_printer',
+          'issue': 'driver setup',
+        },
+      ],
+      'TP874 thermal printer driver',
+      categoryConstraints: const ProductRetrievalConstraints(
+        requiredCategories: {'thermal_label_printer'},
+      ),
+    );
+
+    expect(records.map((record) => record['id']),
+        ['generic_download', 'thermal_setup']);
   });
 
   test('retrieves verified media paths linked by selected cards', () async {
@@ -1128,9 +1295,95 @@ void main() {
     expect(guarded.decision, 'human_review_required');
     expect(draftRequiresHumanReview(guarded), isTrue);
     expect(guarded.attachments, isEmpty);
-    expect(guarded.reply, contains('agent will follow up'));
+    expect(guarded.reply, contains('recorded your product-image request'));
+    expect(guarded.reply, isNot(contains('senior customer service agent')));
+    expect(guarded.reply, isNot(contains('forwarded')));
     expect(draftHumanReviewReason(guarded),
         contains('Customer requested product photos'));
+  });
+
+  test('customer-facing guard removes internal identity and media reports', () {
+    final generated = service.parseResponse('''{
+      "reply":"As an AI assistant, my image analysis report says the printer is offline.",
+      "decision":"draft",
+      "confidence":0.8,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final guarded = service.enforceCustomerFacingPolicy(
+      generated,
+      'What do you see in the photo?',
+    );
+
+    expect(guarded.reply, contains('customer service agent'));
+    expect(guarded.reply.toLowerCase(), isNot(contains('ai')));
+    expect(guarded.reply.toLowerCase(), isNot(contains('analysis')));
+  });
+
+  test('customer-facing guard replaces a video inventory with service wording',
+      () {
+    final generated = service.parseResponse('''{
+      "reply":"The video shows a desk, monitor, keyboard, cables, and a notebook. No JD product is visible.",
+      "decision":"draft",
+      "confidence":0.8,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[{"path":"/data/frame.png","description":"A desk is visible."}],
+      "human_review_required":false,
+      "reason":null
+    }''', approvedImagePaths: {'/data/frame.png'});
+
+    final guarded =
+        service.enforceCustomerFacingPolicy(generated, 'did you find it now?');
+
+    expect(guarded.reply, contains('I found your video'));
+    expect(guarded.reply.toLowerCase(), isNot(contains('desk')));
+    expect(guarded.reply.toLowerCase(), isNot(contains('monitor')));
+  });
+
+  test('customer-facing guard removes unrequested JD purchase pressure', () {
+    final generated = service.parseResponse('''{
+      "reply":"Great! Please make sure the JD purchase option includes power backup before placing your order.",
+      "decision":"draft",
+      "confidence":0.8,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final natural =
+        service.enforceCustomerFacingPolicy(generated, 'looks good');
+    final buying = service.enforceCustomerFacingPolicy(
+        generated, 'Where can I buy this model?');
+
+    expect(natural.reply.toLowerCase(), isNot(contains('jd purchase')));
+    expect(natural.reply.toLowerCase(), isNot(contains('place your order')));
+    expect(natural.reply, contains('matches the requirement'));
+    expect(buying.reply, contains('JD purchase option'));
   });
 }
 
