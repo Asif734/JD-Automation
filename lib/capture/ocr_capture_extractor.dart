@@ -263,14 +263,25 @@ class OcrCaptureExtractor {
 
   String? _transferNoticeKey(
       List<OcrObservation> observations, String? customerId) {
+    final customerPrefix = customerId?.substring(
+        0, customerId.length < 10 ? customerId.length : 10);
     for (final observation in observations) {
-      final compact = observation.text.replaceAll(RegExp(r'\s+'), '');
+      final nearby = observations
+          .where((item) =>
+              (item.y - observation.y).abs() <= 0.10 &&
+              item.x + item.width / 2 >= 0.15 &&
+              item.x + item.width / 2 <= 0.85)
+          .toList()
+        ..sort((left, right) {
+          final vertical = left.y.compareTo(right.y);
+          return vertical != 0 ? vertical : left.x.compareTo(right.x);
+        });
+      final compact =
+          nearby.map((item) => item.text.replaceAll(RegExp(r'\s+'), '')).join();
       final colleagueTransfer = RegExp(r'(您的)?同事.+将客户').hasMatch(compact);
-      final jdTransferSummary =
-          RegExp(r'用户诉求[:：]?(?:要求|催促)?转接').hasMatch(compact);
+      final jdTransferSummary = RegExp(r'用户诉求[:：]?(?:要求|催促)?转接')
+          .hasMatch(observation.text.replaceAll(RegExp(r'\s+'), ''));
       if (!colleagueTransfer && !jdTransferSummary) continue;
-      final customerPrefix = customerId?.substring(
-          0, customerId.length < 10 ? customerId.length : 10);
       if (!jdTransferSummary &&
           customerPrefix != null &&
           !compact.contains(customerPrefix)) {

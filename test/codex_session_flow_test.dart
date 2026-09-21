@@ -58,7 +58,7 @@ void main() {
     expect(await database.hasUndeliveredDraft('buyer'), isFalse);
     expect(
         await database.reserveSlaFallback(
-            userId: 'buyer', messageId: job.messageId),
+            userId: 'buyer', messageId: job.messageId, dueAt: job.dueAt),
         isTrue);
     await database.markSlaFallbackSent(
       userId: 'buyer',
@@ -78,7 +78,7 @@ void main() {
     expect(await database.slaFallbackJob('buyer'), isNull);
     expect(
         await database.reserveSlaFallback(
-            userId: 'buyer', messageId: job.messageId),
+            userId: 'buyer', messageId: job.messageId, dueAt: job.dueAt),
         isFalse);
 
     await fakeCodex.writeAsString('''#!/bin/sh
@@ -181,6 +181,93 @@ printf '%s\\n' '{"reply":"The documented paper width is available.","decision":"
       expect(rows, contains(expectedWidth));
       expect(payload['product_model_feature_catalog'], isNotNull);
     }
+  });
+
+  test('Codex-classified second transfer request requires review', () async {
+    final root = await Directory.systemTemp.createTemp('jd_transfer_intent_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final counter = File('${root.path}/attempt-count');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+cat >/dev/null
+count=0
+if [ -f "${counter.path}" ]; then count=\$(cat "${counter.path}"); fi
+count=\$((count + 1))
+printf '%s' "\$count" > "${counter.path}"
+if [ "\$count" -eq 1 ]; then
+  printf '%s\\n' '{"reply":"What problem are you experiencing?","decision":"draft","confidence":0.9,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"human_transfer_request_message_ids":["first"],"reason":null}' > "\$output"
+else
+  printf '%s\\n' '{"reply":"My colleague can help you.","decision":"draft","confidence":0.9,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"human_transfer_request_message_ids":["first","second"],"reason":null}' > "\$output"
+fi
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    final start = DateTime.utc(2026, 9, 21, 5, 45);
+    Future<void> capture(List<CapturedMessage> messages, DateTime at) =>
+        database
+            .saveCapture(CapturedConversation(
+              stableKey: 'customer:transfer-intent',
+              customerName: 'transfer-intent',
+              customerExternalId: 'transfer-intent',
+              capturedAt: at,
+              messages: messages,
+            ))
+            .then((_) {});
+    const firstMessage = CapturedMessage(
+      stableId: 'first',
+      direction: 'incoming',
+      body: 'transfer me to human agent',
+      axPath: 'test',
+    );
+    const secondMessage = CapturedMessage(
+      stableId: 'second',
+      direction: 'incoming',
+      body: 'no, please transfer',
+      axPath: 'test',
+    );
+    await capture([firstMessage], start);
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+    );
+    final first = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+    expect(first.decision, 'ask_clarification');
+    expect(draftRequiresHumanReview(first), isFalse);
+
+    await capture(
+        [firstMessage, secondMessage], start.add(const Duration(minutes: 1)));
+    final second = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+    expect(draftRequiresHumanReview(second), isTrue);
+    expect(second.reply, contains('客服同事'));
+    expect(await counter.readAsString(), '2');
+    final rows = await (await database.database).query(
+      'human_transfer_requests',
+      where: 'user_id = ?',
+      whereArgs: ['transfer-intent'],
+    );
+    expect(rows.single['request_count'], 0);
   });
 
   test('an unresolved technical answer gets one fresh second investigation',

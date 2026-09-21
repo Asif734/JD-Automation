@@ -13,6 +13,7 @@ import 'capture/video_audio_extractor.dart';
 import 'capture/video_frame_extractor.dart';
 import 'codex/codex_reply_service.dart';
 import 'codex/holding_replies.dart';
+import 'codex/local_reply_router.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
 import 'storage/capture_database.dart';
@@ -287,7 +288,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       final holdingReply = chooseHoldingReply(latestCustomerText);
       await _withJdUiOperation(() async {
         if (!await _database.reserveSlaFallback(
-            userId: job.userId, messageId: job.messageId)) {
+            userId: job.userId, messageId: job.messageId, dueAt: job.dueAt)) {
           return;
         }
         try {
@@ -571,8 +572,7 @@ class _CaptureHomeState extends State<CaptureHome> {
         userId: userId, eventKey: eventKey)) {
       return false;
     }
-    const welcome =
-        'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
+    const welcome = LocalReplyRouter.transferWelcome;
     try {
       await _adapter.sendDraftOnce(
         expectedCustomer: userId,

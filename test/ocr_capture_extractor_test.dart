@@ -171,6 +171,47 @@ void main() {
     expect(result.capture!.messages.single.body, 'hello');
   });
 
+  test('detects a transfer notice split across OCR lines', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime.now(),
+      activeCustomerId: '上海胜价信息技术',
+      observations: const [
+        OcrObservation(
+            text: '您的同事格志打印机艳艳',
+            confidence: 0.99,
+            x: 0.25,
+            y: 0.30,
+            width: 0.20,
+            height: 0.03),
+        OcrObservation(
+            text: '将客户上海胜价信息技术转接',
+            confidence: 0.99,
+            x: 0.25,
+            y: 0.34,
+            width: 0.24,
+            height: 0.03),
+        OcrObservation(
+            text: '给您!',
+            confidence: 0.99,
+            x: 0.43,
+            y: 0.38,
+            width: 0.08,
+            height: 0.03),
+      ],
+    );
+
+    final result = const OcrCaptureExtractor().analyze(inspection);
+
+    expect(result.transferNoticeVisible, isTrue);
+    expect(result.transferNoticeKey, isNotNull);
+  });
+
   test('detects the JD session-summary transfer format', () {
     final inspection = OcrInspection(
       image: Uint8List(0),

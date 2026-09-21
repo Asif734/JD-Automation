@@ -6,6 +6,45 @@ import 'package:jd_automation/storage/capture_database.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
+  test('human transfer counter expires, resets, and ignores retried messages',
+      () async {
+    final root = await Directory.systemTemp.createTemp('human_transfer_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final start = DateTime.utc(2026, 9, 21, 4, 38);
+    Future<bool> request(String user, String id, Duration after) =>
+        database.recordHumanTransferRequest(
+          userId: user,
+          messageId: id,
+          requestedAt: start.add(after),
+        );
+
+    expect(await request('jd-a', 'first', Duration.zero), isFalse);
+    expect(await request('jd-a', 'first', const Duration(minutes: 1)), isFalse);
+    expect(await request('jd-b', 'own-first', const Duration(minutes: 1)),
+        isFalse);
+    expect(
+        await request('jd-a', 'second', const Duration(minutes: 10)), isTrue);
+    expect(
+        await request('jd-a', 'second', const Duration(minutes: 10)), isTrue);
+    expect(
+        await request('jd-a', 'third', const Duration(minutes: 11)), isFalse);
+    expect(
+        await request('jd-a', 'fourth', const Duration(minutes: 21)), isTrue);
+    expect(await request('jd-b', 'late', const Duration(minutes: 12)), isFalse);
+    expect(await request('jd-b', 'again', const Duration(minutes: 13)), isTrue);
+
+    final rows = await (await database.database).query(
+      'human_transfer_requests',
+      where: 'user_id = ?',
+      whereArgs: ['jd-a'],
+    );
+    expect(rows.single['request_count'], 0);
+  });
+
   test('transfer welcome reservation rejects the same exact event', () async {
     final root = await Directory.systemTemp.createTemp('welcome_guard_test_');
     final database = CaptureDatabase(storageRoot: root);
@@ -19,6 +58,7 @@ void main() {
         await database.reserveTransferWelcome(
             userId: 'jd_test', eventKey: 'ocr-shape-a', now: now),
         isTrue);
+    expect(await database.latestTransferNoticeAt('jd_test'), now.toUtc());
     expect(
         await database.reserveTransferWelcome(
             userId: 'jd_test',
@@ -75,10 +115,12 @@ void main() {
     expect(job?.messageId, messageId);
     expect(job?.dueAt, capturedAt.add(const Duration(seconds: 20)));
     expect(
-        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        await database.reserveSlaFallback(
+            userId: userId, messageId: messageId, dueAt: job!.dueAt),
         isTrue);
     expect(
-        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        await database.reserveSlaFallback(
+            userId: userId, messageId: messageId, dueAt: job.dueAt),
         isFalse);
     await database.markSlaFallbackSent(
       userId: userId,
@@ -187,7 +229,10 @@ void main() {
     );
     await database.saveDraft(pending.id, draft, expectedMessageId: messageId);
     expect(
-        await database.reserveSlaFallback(userId: userId, messageId: messageId),
+        await database.reserveSlaFallback(
+            userId: userId,
+            messageId: messageId,
+            dueAt: (await database.slaFallbackJob(userId))!.dueAt),
         isTrue);
     expect(
         await database.isSlaFallbackReservedForSend(
@@ -213,6 +258,74 @@ void main() {
         .toList(growable: false);
     expect(messages.where((message) => message['source'] == 'sla_fallback'),
         isEmpty);
+  });
+
+  test('a stale fallback callback cannot reserve a window reset by a reply',
+      () async {
+    final root = await Directory.systemTemp.createTemp('sla_stale_timer_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    const userId = 'stale-timer-customer';
+    final capturedAt = DateTime.now().subtract(const Duration(seconds: 30));
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: capturedAt,
+      messages: const [
+        CapturedMessage(
+          stableId: 'first-message',
+          direction: 'incoming',
+          body: 'I need help.',
+          axPath: 'test',
+        ),
+        CapturedMessage(
+          stableId: 'second-message',
+          direction: 'incoming',
+          body: 'Please transfer me.',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final staleJob = (await database.slaFallbackJob(userId))!;
+    final pending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'I have handled the first request.',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"I have handled the first request.","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    await database.saveDraft(pending.id, draft,
+        expectedMessageId: 'first-message');
+    expect(await database.markReplySent(userId: userId, reply: draft.reply),
+        isTrue);
+
+    final resetJob = (await database.slaFallbackJob(userId))!;
+    expect(resetJob.messageId, staleJob.messageId);
+    expect(resetJob.dueAt, isNot(staleJob.dueAt));
+    expect(
+        await database.reserveSlaFallback(
+          userId: staleJob.userId,
+          messageId: staleJob.messageId,
+          dueAt: staleJob.dueAt,
+        ),
+        isFalse);
+    expect(
+        await database.reserveSlaFallback(
+          userId: resetJob.userId,
+          messageId: resetJob.messageId,
+          dueAt: resetJob.dueAt,
+        ),
+        isTrue);
   });
 
   test('delivery failures retain drafts for retry or reconciliation', () async {
@@ -962,6 +1075,68 @@ void main() {
     expect(await database.hasPendingUnanswered('buyer'), isFalse);
     final document = await (await database.history).read('buyer');
     expect(document?['messages'], hasLength(2));
+  });
+
+  test('deduplicates an OCR spelling correction at the same bubble time',
+      () async {
+    final root = await Directory.systemTemp.createTemp('ocr_typo_fix_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final bubbleTime = DateTime.utc(2026, 9, 21, 4, 38, 54);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: bubbleTime,
+      messages: [
+        CapturedMessage(
+          stableId: 'ocr:misspelled',
+          direction: 'incoming',
+          body: 'please transter',
+          sentAt: bubbleTime,
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'I have noted your request.',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson:
+          '{"reply":"I have noted your request.","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
+    );
+    await database.saveDraft(pending.id, draft,
+        expectedMessageId: 'ocr:misspelled');
+    await database.markReplySent(userId: 'buyer', reply: draft.reply);
+
+    final changed = await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:buyer',
+      customerName: 'buyer',
+      customerExternalId: 'buyer',
+      capturedAt: bubbleTime.add(const Duration(seconds: 14)),
+      messages: [
+        CapturedMessage(
+          stableId: 'ocr:corrected',
+          direction: 'incoming',
+          body: 'please transfer',
+          sentAt: bubbleTime,
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+
+    expect(changed, 0);
+    expect(await database.hasPendingUnanswered('buyer'), isFalse);
+    expect(await database.slaFallbackJob('buyer'), isNull);
   });
 
   test('upgrades a clipped incoming bubble without replying twice', () async {

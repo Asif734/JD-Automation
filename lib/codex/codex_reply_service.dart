@@ -34,12 +34,11 @@ bool isProductPhotoRequest(String text) {
               .hasMatch(normalized));
 }
 
-bool explicitlyRequestsHumanAgent(String text) {
-  final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (normalized.isEmpty) return false;
-  return RegExp(
-          r'\b(speak|talk|connect|transfer|forward|escalate|contact)\b[^.!?]{0,40}\b(human|person|someone|agent|representative|manager|supervisor|staff|support team|technical team)\b|\b(human|live agent|real person|representative|manager|supervisor)\b|人工客服|转人工|真人客服|人工服务|找客服|联系人工|客服人员|技术人员')
-      .hasMatch(normalized);
+Set<String> codexHumanTransferRequestIds(AiDraft draft) {
+  final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+  final ids = raw['human_transfer_request_message_ids'];
+  if (ids is! List) return const <String>{};
+  return ids.whereType<String>().where((id) => id.isNotEmpty).toSet();
 }
 
 bool isRefundRequest(String text) => RegExp(
@@ -121,9 +120,6 @@ String selectReplyRoute({
   required bool productFeatureRequested,
 }) {
   if (isRefundRequest(currentTurnText)) return 'refund_review';
-  if (explicitlyRequestsHumanAgent(currentTurnText)) {
-    return 'requested_senior_service';
-  }
   if (technicalSupportRequested) return 'technical_support';
   if (productListRequested) return 'product_list';
   if (productCatalogRequested) return 'product_recommendation';
@@ -1045,7 +1041,11 @@ class CodexReplyService {
     // Text-only greetings may use the deterministic local router. Any buyer
     // image must reach Codex so the visual content is actually inspected.
     if (images.isEmpty) {
-      final fastReply = const LocalReplyRouter().route(promptRecent);
+      final fastReply = const LocalReplyRouter().route(
+        promptRecent,
+        transferNoticeAt:
+            await database.latestTransferNoticeAt(conversation.userId),
+      );
       if (fastReply != null) return fastReply;
     }
 
@@ -1142,6 +1142,8 @@ class CodexReplyService {
         'This service applies only to the JD store and JD orders. Do not use, mention, link to, or advise about Tmall, Taobao, Pinduoduo, Douyin, or another marketplace. If asked about another marketplace, state briefly that this account supports only the JD store and continue with JD assistance.',
         'JD is the service context, not a sales phrase. Do not push the customer to buy from JD, mention a "JD purchase option", or append reminders about placing an order. Mention JD purchasing, stock, order status, or an exact JD SKU only when the customer asks about it or when that check is essential. Recommend products naturally from the customer’s requirements.',
         'Write like a natural, gentle, technically experienced customer service agent. Avoid scripted repetition, sales pressure, and unnecessary handoff language.',
+        'All fixed greetings, holding messages, fallback responses, and default replies are in Chinese, even if the customer wrote in English. For a substantive answer, use the customer’s latest language. In customer-facing wording say "customer service colleague" or "my colleague", never "human agent". Never claim a review ticket was submitted or a colleague arranged unless this turn actually requires human review.',
+        'Classify human-transfer intent for each incoming message in target_customer_batch. Put the exact message IDs of explicit requests to speak with a customer service colleague in human_transfer_request_message_ids; use [] when there are none. Interpret conversational follow-ups such as "no, please transfer" and common misspellings by meaning, but do not count a statement that refuses transfer. Do not decide whether a request is first or repeated; the application maintains the ten-minute counter.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Never ask the customer to send this store’s product link. When the model is already known, answer from the knowledge base and confirmed general setup knowledge. Ask for a model-label photo only when the model is genuinely unknown or conflicting and that identity is essential.',
         'Do not invent product specifications, availability, or policies.',
@@ -1250,8 +1252,12 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         throw const CodexReplyException(
             'Codex returned invalid structured output.');
       }
+      final transferRequestIds = codexHumanTransferRequestIds(draft);
+      final latestTransferRequested =
+          transferRequestIds.contains(latestCustomerMessage['id']);
       if (!secondInvestigation &&
           technicalSupportRequested &&
+          !latestTransferRequested &&
           (draftRequiresHumanReview(draft) ||
               modelStatesNoSolution(draft) ||
               modelCannotResolveTechnicalIssue(draft))) {
@@ -1264,9 +1270,30 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
           secondInvestigation: true,
         );
       }
+      var repeatedHumanTransferRequest = false;
+      for (final message in currentCustomerTurn) {
+        final messageId = message['id']?.toString() ?? '';
+        if (!transferRequestIds.contains(messageId)) continue;
+        final requestedAt =
+            DateTime.tryParse(message['sent_at']?.toString() ?? '') ??
+                DateTime.tryParse(message['captured_at']?.toString() ?? '') ??
+                DateTime.now();
+        final repeated = await database.recordHumanTransferRequest(
+          userId: conversation.userId,
+          messageId: messageId,
+          requestedAt: requestedAt,
+        );
+        if (messageId == latestCustomerMessage['id']) {
+          repeatedHumanTransferRequest = repeated;
+        }
+      }
       final reviewGuardedDraft = enforceHumanReviewPolicy(
         draft,
         latestCustomerText,
+        humanTransferRequested: latestTransferRequested,
+        repeatedHumanTransferRequest: repeatedHumanTransferRequest,
+        technicalSecondInvestigationCompleted:
+            secondInvestigation && technicalSupportRequested,
       );
       final photoGuardedDraft = enforceProductPhotoReviewPolicy &&
               productPhotoRequested
@@ -1381,7 +1408,6 @@ ${jsonEncode({
   AiDraft enforceCustomerFacingPolicy(
       AiDraft draft, String latestCustomerText) {
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
-    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(latestCustomerText);
     final identityQuestion = RegExp(
       r'\b(?:are you|you are|r u)\s+(?:an?\s+)?(?:ai|bot|robot|human|real person)|\b(?:ai|chatbot|robot)\b|你是(?:ai|人工智能|机器人|真人)|是真人吗',
       caseSensitive: false,
@@ -1391,13 +1417,9 @@ ${jsonEncode({
       caseSensitive: false,
     ).hasMatch(latestCustomerText);
     if (identityQuestion) {
-      raw['reply'] = chinese
-          ? '我是京东店铺的客服人员，请问有什么可以帮您？'
-          : 'I’m a customer service agent for the JD store. How can I help you?';
+      raw['reply'] = '我是京东店铺的客服人员，请问有什么可以帮您？';
     } else if (unsupportedPlatformQuestion) {
-      raw['reply'] = chinese
-          ? LocalReplyRouter.jdOnlyChinese
-          : LocalReplyRouter.jdOnlyEnglish;
+      raw['reply'] = LocalReplyRouter.jdOnlyChinese;
     } else {
       final explicitVisualQuestion = RegExp(
         r'\b(?:what|which) (?:can you |do you )?(?:see|notice|find)|\b(?:can you see|is .* visible|what is (?:in|on) (?:the|this) (?:video|image|photo))\b|你(?:能|可以)?看[到见].*(?:什么|吗)|图片里有什么|视频里有什么|能看清吗',
@@ -1409,13 +1431,9 @@ ${jsonEncode({
       ).hasMatch(draft.reply);
       if (mediaInventoryDisclosure && !explicitVisualQuestion) {
         final mediaOnlyTurn = latestCustomerText.startsWith('[Customer sent');
-        raw['reply'] = chinese
-            ? mediaOnlyTurn
-                ? '我已收到您发来的视频，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
-                : '我已找到您发来的视频，但目前还无法准确确认产品型号。请将机器型号标签靠近镜头停留一下，我再为您核对。'
-            : mediaOnlyTurn
-                ? 'I received your video and am checking it against the product information. Please tell me the model or issue you want me to verify.'
-                : 'I found your video, but the product model is not clear enough to confirm accurately. Please hold the model label close to the camera for a moment so I can check it.';
+        raw['reply'] = mediaOnlyTurn
+            ? '我已收到您发来的视频，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
+            : '我已找到您发来的视频，但目前还无法准确确认产品型号。请将机器型号标签靠近镜头停留一下，我再为您核对。';
       }
       final privateDisclosure = RegExp(
         r'\b(?:ai|artificial intelligence|language model|chatbot|robot|codex|openai|prompt|retrieval|dataset|image analysis|video analysis|frame analysis|ocr|transcript|filename|confidence score)\b|人工智能|AI助手|机器人|自动客服|语言模型|AI模型|提示词|检索|数据集|图片分析|视频分析|画面分析|分析报告|语音转写|文件名|置信度',
@@ -1450,33 +1468,63 @@ ${jsonEncode({
           .join(' ')
           .trim();
       if (removedOnlyPurchasePressure && safeSentences.length < 24) {
-        raw['reply'] = chinese
-            ? '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。'
-            : 'That option matches the requirement you just described. I can also compare the available models and features if helpful.';
+        raw['reply'] = '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。';
       } else if (safeSentences != candidateReply.trim()) {
         raw['reply'] = safeSentences.isNotEmpty
             ? safeSentences
-            : chinese
-                ? removedOnlyPurchasePressure
-                    ? '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。'
-                    : '我是京东店铺的客服人员，请问有什么可以帮您？'
-                : removedOnlyPurchasePressure
-                    ? 'That option matches the requirement you just described. I can also compare the available models and features if helpful.'
-                    : 'I’m a customer service agent for the JD store. How can I help you?';
+            : removedOnlyPurchasePressure
+                ? '好的，这款符合您刚才提到的需求。如果您愿意，我也可以继续帮您比较不同型号的功能。'
+                : '我是京东店铺的客服人员，请问有什么可以帮您？';
       }
     }
+    final customerReply = raw['reply']?.toString() ?? draft.reply;
+    final claimsHandoff = RegExp(
+      r'\b(?:i(?:[’\x27]ve| have) (?:arranged|submitted|transferred|forwarded)|(?:a|the) (?:human agent|customer service colleague) will assist|submitted your request for human review)\b|已(?:安排|转交|提交).{0,12}(?:人工|客服同事)|(?:人工|客服同事).{0,12}(?:已接手|会接手)',
+      caseSensitive: false,
+    ).hasMatch(customerReply);
+    raw['reply'] = !draftRequiresHumanReview(draft) && claimsHandoff
+        ? '请告诉我您目前需要解决的具体问题，我会继续为您核对。'
+        : customerReply
+            .replaceAll(
+              RegExp(r'\bhuman (?:support )?agents?\b', caseSensitive: false),
+              'customer service colleague',
+            )
+            .replaceAll(
+              RegExp(r'\bhuman review\b', caseSensitive: false),
+              'customer service follow-up',
+            );
     raw['model'] = model;
     return AiDraft.fromJson(raw.cast<String, Object?>(),
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
   }
 
-  AiDraft enforceHumanReviewPolicy(AiDraft draft, String latestCustomerText) {
-    if (explicitlyRequestsHumanAgent(latestCustomerText)) {
+  AiDraft enforceHumanReviewPolicy(
+    AiDraft draft,
+    String latestCustomerText, {
+    bool humanTransferRequested = false,
+    bool repeatedHumanTransferRequest = false,
+    bool technicalSecondInvestigationCompleted = false,
+  }) {
+    if (humanTransferRequested) {
+      if (!repeatedHumanTransferRequest) {
+        final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+        raw
+          ..['reply'] = '我理解您希望由客服同事协助。请问您遇到了什么问题？我可以先帮您处理。'
+          ..['decision'] = 'ask_clarification'
+          ..['required_slots'] = <String>['customer issue']
+          ..['risk_level'] = 'low'
+          ..['risk_triggers'] = <String>['first_human_transfer_request']
+          ..['human_review_required'] = false
+          ..['reason'] = null
+          ..['actions'] = <Object?>[]
+          ..['attachments'] = <Object?>[]
+          ..['model'] = model;
+        return AiDraft.fromJson(raw.cast<String, Object?>(),
+            mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+      }
       return _forceHumanReview(
         draft,
         latestCustomerText,
-        englishReply:
-            'I’ve noted that you would like additional assistance. Your details are saved here, and the next available customer service colleague can continue from this point.',
         chineseReply: '我已记录您需要进一步协助，相关信息已保留，下一位有空的客服同事可以直接从这里继续处理。',
         trigger: 'explicit_human_request',
         reason: 'Customer explicitly requested human assistance.',
@@ -1486,8 +1534,6 @@ ${jsonEncode({
       return _forceHumanReview(
         draft,
         latestCustomerText,
-        englishReply:
-            'I’ve recorded your refund request. Please keep the order details ready; it will be checked as soon as possible.',
         chineseReply: '我已记录您的退款申请，请准备好订单信息，我们会尽快核对处理。',
         trigger: 'refund_request',
         reason: 'Customer requested a refund.',
@@ -1497,8 +1543,6 @@ ${jsonEncode({
       return _forceHumanReview(
         draft,
         latestCustomerText,
-        englishReply:
-            'I’ve recorded your request for a video guide. We’ll check the suitable guide and continue here as soon as possible.',
         chineseReply: '我已记录您需要视频教程，我们会核对适用的教程并尽快在这里继续回复。',
         trigger: 'video_guide_request',
         reason: 'Customer requested video guidance.',
@@ -1508,8 +1552,6 @@ ${jsonEncode({
       return _forceHumanReview(
         draft,
         latestCustomerText,
-        englishReply:
-            'I’m sorry the earlier steps did not solve it. I’ve kept the details and checks already completed so we can continue without making you repeat them.',
         chineseReply: '很抱歉之前的步骤没有解决问题。我已保留您提供的信息和已完成的排查，后续会从这里继续，不需要您重复说明。',
         trigger: 'customer_dissatisfaction',
         reason: 'Customer is dissatisfied with the automated support.',
@@ -1519,12 +1561,14 @@ ${jsonEncode({
       return _forceHumanReview(
         draft,
         latestCustomerText,
-        englishReply:
-            'I need a little more time to verify this accurately. I’ve kept the details you provided, and we’ll continue from here as soon as the next check is complete.',
         chineseReply: '这个问题还需要进一步准确核对。我已保留您提供的详细信息，完成下一步核对后会从这里继续。',
         trigger: 'solution_not_found',
         reason: 'Codex could not find a reliable solution.',
       );
+    }
+    if (technicalSecondInvestigationCompleted &&
+        draftRequiresHumanReview(draft)) {
+      return _normalizeReviewWording(draft, latestCustomerText);
     }
     if (!draftRequiresHumanReview(draft)) {
       return draft;
@@ -1548,7 +1592,6 @@ ${jsonEncode({
 
   AiDraft _normalizeReviewWording(AiDraft draft, String customerText) {
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
-    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(customerText);
     var reply = draft.reply
         .replaceAll(
             RegExp(
@@ -1557,9 +1600,7 @@ ${jsonEncode({
             '')
         .replaceAll(RegExp(r'[^。！？]*(?:转交人工|转人工|人工客服跟进)[^。！？]*[。！？]?'), '')
         .trim();
-    final reviewMessage = chinese
-        ? '这个问题还需要进一步准确核对。我已保留现有信息，完成下一步核对后会从这里继续。'
-        : 'I need a little more time to verify this accurately. I’ve kept the current details, and we’ll continue from here after the next check.';
+    const reviewMessage = '这个问题还需要进一步准确核对。我已保留现有信息，完成下一步核对后会从这里继续。';
     if (!reply.contains('进一步准确核对') &&
         !reply.toLowerCase().contains('more time to verify')) {
       reply = reply.isEmpty ? reviewMessage : '$reply $reviewMessage';
@@ -1576,16 +1617,13 @@ ${jsonEncode({
   AiDraft _forceHumanReview(
     AiDraft draft,
     String customerText, {
-    required String englishReply,
     required String chineseReply,
     required String trigger,
     required String reason,
   }) {
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
     raw
-      ..['reply'] = RegExp(r'[\u3400-\u9fff]').hasMatch(customerText)
-          ? chineseReply
-          : englishReply
+      ..['reply'] = chineseReply
       ..['decision'] = 'human_review_required'
       ..['risk_level'] = 'high'
       ..['risk_triggers'] = <String>[trigger]
@@ -1599,12 +1637,9 @@ ${jsonEncode({
   }
 
   AiDraft enforceProductPhotoReview(AiDraft draft, String customerText) {
-    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(customerText);
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
     raw
-      ..['reply'] = chinese
-          ? '我已记录您需要产品图片，我们会核对合适的图片并尽快在这里继续回复。您也可以先告诉我想了解的具体型号或功能。'
-          : 'I’ve recorded your product-image request. We’ll check the suitable images and continue here as soon as possible. You can also tell me which model or feature you want to know about.'
+      ..['reply'] = '我已记录您需要产品图片，我们会核对合适的图片并尽快在这里继续回复。您也可以先告诉我想了解的具体型号或功能。'
       ..['decision'] = 'human_review_required'
       ..['risk_level'] = 'medium'
       ..['risk_triggers'] = <String>['product_image_request']
@@ -1623,21 +1658,12 @@ ${jsonEncode({
     required CodexFallbackFailure failure,
     String? detail,
   }) {
-    final customerContext = recent
-        .where((message) => message['direction'] == 'incoming')
-        .map((message) => message['body']?.toString() ?? '')
-        .where((body) => body.isNotEmpty && !body.startsWith('[Customer sent'))
-        .join(' ');
-    final chinese = RegExp(r'[\u3400-\u9fff]').hasMatch(customerContext);
-
     final failureName = switch (failure) {
       CodexFallbackFailure.timeout => 'timeout',
       CodexFallbackFailure.invalidOutput => 'invalid-output',
       CodexFallbackFailure.processError => 'process-error',
     };
-    final reply = chinese
-        ? '这个问题还需要进一步准确核对。我已保留您提供的信息，完成下一步核对后会从这里继续。'
-        : 'I need a little more time to verify this accurately. I’ve kept the details you provided, and we’ll continue from here after the next check.';
+    const reply = '这个问题还需要进一步准确核对。我已保留您提供的信息，完成下一步核对后会从这里继续。';
     final response = <String, Object?>{
       'reply': reply,
       'decision': 'human_review_required',

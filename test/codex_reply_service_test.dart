@@ -131,7 +131,7 @@ void main() {
     );
 
     expect(draft.model, 'local-timeout-fallback-v2');
-    expect(draft.reply, contains('more time to verify'));
+    expect(draft.reply, contains('进一步准确核对'));
     expect(draft.reply, isNot(contains('senior customer service agent')));
     expect(draft.reply, isNot(contains('forwarded')));
     expect(draft.decision, 'human_review_required');
@@ -202,13 +202,25 @@ void main() {
     expect(draftRequiresHumanReview(draft), isFalse);
   });
 
-  test('recognizes only explicit requests for a human agent', () {
-    expect(explicitlyRequestsHumanAgent('Please connect me to a human agent.'),
-        isTrue);
-    expect(explicitlyRequestsHumanAgent('我要转人工客服'), isTrue);
-    expect(explicitlyRequestsHumanAgent('macOs 26.6.2'), isFalse);
-    expect(
-        explicitlyRequestsHumanAgent('Does TP732 work with my Mac?'), isFalse);
+  test('uses Codex-classified message IDs for transfer requests', () {
+    final draft = service.parseResponse('''{
+      "reply":"I can help with that.",
+      "decision":"draft",
+      "confidence":0.9,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "human_transfer_request_message_ids":["first","second"],
+      "reason":null
+    }''');
+    expect(codexHumanTransferRequestIds(draft), {'first', 'second'});
   });
 
   test('recognizes dissatisfaction with automated support', () {
@@ -396,9 +408,38 @@ void main() {
     expect(draftRequiresHumanReview(guarded), isTrue);
     expect(guarded.decision, 'human_review_required');
     expect(guarded.riskLevel, 'high');
-    expect(guarded.reply, contains('more time to verify'));
+    expect(guarded.reply, contains('进一步准确核对'));
     expect(guarded.reply, isNot(contains('senior customer service agent')));
     expect(guarded.reply, isNot(contains('forwarded')));
+  });
+
+  test('second technical investigation retains a requested review ticket', () {
+    final draft = service.parseResponse('''{
+      "reply":"The available checks are complete, but this needs a service colleague.",
+      "decision":"human_review_required",
+      "confidence":0.4,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"high",
+      "risk_triggers":["remaining technical issue"],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":true,
+      "reason":"Second investigation could not find a safe fix."
+    }''');
+
+    final guarded = service.enforceHumanReviewPolicy(
+      draft,
+      'My printer has error 42',
+      technicalSecondInvestigationCompleted: true,
+    );
+
+    expect(draftRequiresHumanReview(guarded), isTrue);
+    expect(guarded.decision, 'human_review_required');
+    expect(guarded.reply, contains('进一步准确核对'));
   });
 
   test('recognizes refund and video-guide review requests', () {
@@ -475,13 +516,14 @@ void main() {
         ordinary, 'Please send the setup video guide');
 
     expect(draftRequiresHumanReview(refund), isTrue);
-    expect(refund.reply, contains('refund request'));
+    expect(refund.reply, contains('退款申请'));
     expect(draftHumanReviewReason(refund), contains('refund'));
     expect(draftRequiresHumanReview(video), isTrue);
-    expect(video.reply, contains('video guide'));
+    expect(video.reply, contains('视频教程'));
   });
 
-  test('forces human requests, dissatisfaction, and no-solution replies', () {
+  test('first human request offers help and the repeated request transfers',
+      () {
     final ordinary = service.parseResponse('''{
       "reply":"I can continue troubleshooting.",
       "decision":"draft",
@@ -515,20 +557,29 @@ void main() {
       "reason":null
     }''');
 
-    final human = service.enforceHumanReviewPolicy(
-        ordinary, 'Please connect me to a human agent');
+    final firstHuman = service.enforceHumanReviewPolicy(
+        ordinary, 'Please connect me to a human agent',
+        humanTransferRequested: true);
+    final repeatedHuman = service.enforceHumanReviewPolicy(
+        ordinary, 'Please transfer',
+        humanTransferRequested: true, repeatedHumanTransferRequest: true);
     final dissatisfied =
         service.enforceHumanReviewPolicy(ordinary, 'This reply did not help');
     final unresolved =
         service.enforceHumanReviewPolicy(noSolution, 'My printer still fails');
 
-    expect(draftRequiresHumanReview(human), isTrue);
-    expect(draftHumanReviewReason(human), contains('explicitly requested'));
+    expect(draftRequiresHumanReview(firstHuman), isFalse);
+    expect(firstHuman.decision, 'ask_clarification');
+    expect(firstHuman.reply, contains('请问您遇到了什么问题'));
+    expect(firstHuman.reply.toLowerCase(), isNot(contains('human agent')));
+    expect(draftRequiresHumanReview(repeatedHuman), isTrue);
+    expect(draftHumanReviewReason(repeatedHuman),
+        contains('explicitly requested'));
     expect(draftRequiresHumanReview(dissatisfied), isTrue);
     expect(draftHumanReviewReason(dissatisfied), contains('dissatisfied'));
     expect(draftRequiresHumanReview(unresolved), isTrue);
     expect(draftHumanReviewReason(unresolved), contains('reliable solution'));
-    for (final guarded in [human, dissatisfied, unresolved]) {
+    for (final guarded in [repeatedHuman, dissatisfied, unresolved]) {
       expect(guarded.reply, isNot(contains('senior customer service agent')));
       expect(guarded.reply.toLowerCase(), isNot(contains('forwarded')));
       expect(guarded.reply.toLowerCase(), isNot(contains('transferred')));
@@ -584,6 +635,56 @@ void main() {
     expect(draft, isNull);
   });
 
+  test('welcomes a returning customer after a long gap', () {
+    final draft = const LocalReplyRouter().route([
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'What is the price?',
+        'captured_at': '2026-09-20T08:52:34Z',
+      },
+      <String, dynamic>{
+        'direction': 'outgoing',
+        'body': 'I will check.',
+        'captured_at': '2026-09-20T08:53:41Z',
+      },
+      <String, dynamic>{
+        'direction': 'incoming',
+        'body': 'hi',
+        'captured_at': '2026-09-21T08:16:01Z',
+      },
+    ]);
+
+    expect(draft, isNotNull);
+    expect(draft!.reply, LocalReplyRouter.transferWelcome);
+  });
+
+  test('welcomes a greeting after transfer even with recent history', () {
+    final transferAt = DateTime.utc(2026, 9, 21, 8, 15);
+    final messages = <Map<String, dynamic>>[
+      {
+        'direction': 'incoming',
+        'body': 'What about the price?',
+        'captured_at': '2026-09-21T08:14:00Z',
+      },
+      {
+        'direction': 'incoming',
+        'body': 'hi',
+        'captured_at': '2026-09-21T08:16:00Z',
+      },
+    ];
+    final router = const LocalReplyRouter();
+
+    expect(router.route(messages), isNull);
+    expect(router.route(messages, transferNoticeAt: transferAt)?.reply,
+        LocalReplyRouter.transferWelcome);
+    messages.insert(1, {
+      'direction': 'outgoing',
+      'body': LocalReplyRouter.transferWelcome,
+      'captured_at': '2026-09-21T08:15:30Z',
+    });
+    expect(router.route(messages, transferNoticeAt: transferAt), isNull);
+  });
+
   test('routes a closing thank-you without retrieving old product context', () {
     final draft = const LocalReplyRouter().route([
       <String, dynamic>{
@@ -601,7 +702,7 @@ void main() {
     ]);
 
     expect(draft, isNotNull);
-    expect(draft!.reply, "You're very welcome! I'm glad I could help.");
+    expect(draft!.reply, '不客气，很高兴能帮到您！');
     expect(draft.usedRecordIds, ['intent:thanks']);
     expect(draft.reply, isNot(contains('M880')));
   });
@@ -646,7 +747,7 @@ void main() {
     ]);
 
     expect(draft, isNotNull);
-    expect(draft!.reply, contains('customer service agent'));
+    expect(draft!.reply, contains('客服人员'));
     expect(draft.reply.toLowerCase(), isNot(contains('ai')));
   });
 
@@ -659,7 +760,7 @@ void main() {
     ]);
 
     expect(draft, isNotNull);
-    expect(draft!.reply, contains('only the JD store'));
+    expect(draft!.reply, contains('京东店铺'));
     expect(draft.reply, isNot(contains('Tmall')));
   });
 
@@ -1295,7 +1396,7 @@ void main() {
     expect(guarded.decision, 'human_review_required');
     expect(draftRequiresHumanReview(guarded), isTrue);
     expect(guarded.attachments, isEmpty);
-    expect(guarded.reply, contains('recorded your product-image request'));
+    expect(guarded.reply, contains('产品图片'));
     expect(guarded.reply, isNot(contains('senior customer service agent')));
     expect(guarded.reply, isNot(contains('forwarded')));
     expect(draftHumanReviewReason(guarded),
@@ -1325,9 +1426,35 @@ void main() {
       'What do you see in the photo?',
     );
 
-    expect(guarded.reply, contains('customer service agent'));
+    expect(guarded.reply, contains('客服人员'));
     expect(guarded.reply.toLowerCase(), isNot(contains('ai')));
     expect(guarded.reply.toLowerCase(), isNot(contains('analysis')));
+  });
+
+  test('does not claim a colleague is arranged without a review ticket', () {
+    final generated = service.parseResponse('''{
+      "reply":"Understood. I've arranged for a human agent to assist you.",
+      "decision":"draft",
+      "confidence":0.8,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final guarded =
+        service.enforceCustomerFacingPolicy(generated, 'Where is it?');
+
+    expect(guarded.reply, contains('继续为您核对'));
+    expect(guarded.reply.toLowerCase(), isNot(contains('human agent')));
+    expect(draftRequiresHumanReview(guarded), isFalse);
   });
 
   test('customer-facing guard replaces a video inventory with service wording',
@@ -1352,7 +1479,7 @@ void main() {
     final guarded =
         service.enforceCustomerFacingPolicy(generated, 'did you find it now?');
 
-    expect(guarded.reply, contains('I found your video'));
+    expect(guarded.reply, contains('我已找到您发来的视频'));
     expect(guarded.reply.toLowerCase(), isNot(contains('desk')));
     expect(guarded.reply.toLowerCase(), isNot(contains('monitor')));
   });
@@ -1382,7 +1509,7 @@ void main() {
 
     expect(natural.reply.toLowerCase(), isNot(contains('jd purchase')));
     expect(natural.reply.toLowerCase(), isNot(contains('place your order')));
-    expect(natural.reply, contains('matches the requirement'));
+    expect(natural.reply, contains('符合您刚才提到的需求'));
     expect(buying.reply, contains('JD purchase option'));
   });
 }

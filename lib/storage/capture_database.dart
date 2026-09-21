@@ -37,7 +37,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 10,
+        version: 11,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -72,6 +72,7 @@ class CaptureDatabase {
     await _createTransferWelcomes(db);
     await _createSlaFallbacks(db);
     await _createAnsweredCursors(db);
+    await _createHumanTransferRequests(db);
   }
 
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -109,6 +110,7 @@ class CaptureDatabase {
         SET due_at_ms=due_at_ms-15000
         WHERE state='pending' ''');
     }
+    if (oldVersion < 11) await _createHumanTransferRequests(db);
   }
 
   Future<void> _addColumnIfMissing(
@@ -150,6 +152,19 @@ class CaptureDatabase {
         whereArgs: [userId, eventKey],
         limit: 1);
     return rows.isNotEmpty;
+  }
+
+  Future<DateTime?> latestTransferNoticeAt(String userId) async {
+    final rows = await (await database).query('transfer_welcomes',
+        columns: ['created_at_ms'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+        orderBy: 'created_at_ms DESC',
+        limit: 1);
+    if (rows.isEmpty) return null;
+    return DateTime.fromMillisecondsSinceEpoch(
+        rows.single['created_at_ms'] as int,
+        isUtc: true);
   }
 
   Future<void> recordTransferWelcome(
@@ -282,6 +297,68 @@ class CaptureDatabase {
       resume_after_message_id TEXT,
       updated_at_ms INTEGER NOT NULL
     )''');
+  }
+
+  Future<void> _createHumanTransferRequests(Database db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS human_transfer_requests (
+      user_id TEXT PRIMARY KEY,
+      request_count INTEGER NOT NULL,
+      first_requested_at_ms INTEGER,
+      updated_at_ms INTEGER NOT NULL
+    )''');
+    await db
+        .execute('''CREATE TABLE IF NOT EXISTS human_transfer_request_events (
+      user_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      was_repeat INTEGER NOT NULL,
+      PRIMARY KEY(user_id, message_id)
+    )''');
+  }
+
+  /// Returns true only for a second distinct request within ten minutes.
+  /// Persisting message IDs keeps a retried generation from incrementing twice.
+  Future<bool> recordHumanTransferRequest({
+    required String userId,
+    required String messageId,
+    required DateTime requestedAt,
+  }) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final priorEvent = await txn.query('human_transfer_request_events',
+          columns: ['was_repeat'],
+          where: 'user_id = ? AND message_id = ?',
+          whereArgs: [userId, messageId],
+          limit: 1);
+      if (priorEvent.isNotEmpty) return priorEvent.single['was_repeat'] == 1;
+
+      final prior = await txn.query('human_transfer_requests',
+          where: 'user_id = ?', whereArgs: [userId], limit: 1);
+      final now = requestedAt.millisecondsSinceEpoch;
+      final first =
+          prior.isEmpty ? null : prior.single['first_requested_at_ms'] as int?;
+      final elapsed = first == null ? null : now - first;
+      final repeated = prior.isNotEmpty &&
+          prior.single['request_count'] == 1 &&
+          elapsed != null &&
+          elapsed >= 0 &&
+          elapsed <= const Duration(minutes: 10).inMilliseconds;
+      await txn.insert(
+        'human_transfer_requests',
+        {
+          'user_id': userId,
+          'request_count': repeated ? 0 : 1,
+          'first_requested_at_ms': repeated ? null : now,
+          'updated_at_ms': now,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert('human_transfer_request_events', {
+        'user_id': userId,
+        'message_id': messageId,
+        'was_repeat': repeated ? 1 : 0,
+      });
+      return repeated;
+    });
   }
 
   Future<void> _createPendingQueue(Database db) async {
@@ -732,8 +809,11 @@ class CaptureDatabase {
     return rows.map(SlaFallbackJob.fromRow).toList(growable: false);
   }
 
-  Future<bool> reserveSlaFallback(
-      {required String userId, required String messageId}) async {
+  Future<bool> reserveSlaFallback({
+    required String userId,
+    required String messageId,
+    required DateTime dueAt,
+  }) async {
     final db = await database;
     final changed = await db.update(
       'sla_fallbacks',
@@ -741,8 +821,13 @@ class CaptureDatabase {
         'state': 'sending',
         'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
       },
-      where: "user_id = ? AND message_id = ? AND state = 'pending'",
-      whereArgs: [userId, messageId],
+      // A real reply can keep the same latest customer message pending while
+      // resetting its 20-second window. Match the exact deadline as a
+      // generation token so an already-fired callback from the old window
+      // cannot reserve the recycled row and send after that reply.
+      where:
+          "user_id = ? AND message_id = ? AND due_at_ms = ? AND state = 'pending'",
+      whereArgs: [userId, messageId, dueAt.millisecondsSinceEpoch],
     );
     return changed == 1;
   }

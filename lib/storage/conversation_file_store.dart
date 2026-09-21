@@ -584,6 +584,14 @@ class ConversationFileStore {
     final shorter = left.length < right.length ? left : right;
     final longer = left.length < right.length ? right : left;
     if (shorter.length >= 3 && longer.contains(shorter)) return true;
+    // This check is only used when JD reports the exact same bubble clock.
+    // Treat a small OCR spelling correction as another reading of that bubble
+    // (for example "please transter" -> "please transfer"), not as a new
+    // customer turn that can start another SLA fallback window.
+    if (shorter.length >= 6) {
+      final maximumEdits = longer.length >= 14 ? 2 : 1;
+      if (_editDistanceAtMost(left, right, maximumEdits)) return true;
+    }
 
     Set<String> tokens(String value) => RegExp(r'[a-z0-9]+|[\u3400-\u9fff]')
         .allMatches(value.toLowerCase())
@@ -596,6 +604,28 @@ class ConversationFileStore {
     if (smallerTokens.length < 2) return false;
     final overlap = leftTokens.intersection(rightTokens).length;
     return overlap >= 2 && overlap / smallerTokens.length >= 0.66;
+  }
+
+  bool _editDistanceAtMost(String left, String right, int limit) {
+    if ((left.length - right.length).abs() > limit) return false;
+    var previous = List<int>.generate(right.length + 1, (index) => index);
+    for (var leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+      final current = List<int>.filled(right.length + 1, 0);
+      current[0] = leftIndex;
+      for (var rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+        final substitutionCost =
+            left.codeUnitAt(leftIndex - 1) == right.codeUnitAt(rightIndex - 1)
+                ? 0
+                : 1;
+        current[rightIndex] = [
+          current[rightIndex - 1] + 1,
+          previous[rightIndex] + 1,
+          previous[rightIndex - 1] + substitutionCost,
+        ].reduce((a, b) => a < b ? a : b);
+      }
+      previous = current;
+    }
+    return previous.last <= limit;
   }
 
   bool _sameIncomingBubbleTime(Object? storedValue, DateTime? observed) {

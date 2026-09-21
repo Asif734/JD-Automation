@@ -16,6 +16,7 @@
     "attachments",
     "image_descriptions",
     "human_review_required",
+    "human_transfer_request_message_ids",
     "reason"
   ],
   "properties": {
@@ -73,6 +74,10 @@
       }
     },
     "human_review_required": { "type": "boolean" },
+    "human_transfer_request_message_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "reason": { "type": ["string", "null"] }
   }
 }

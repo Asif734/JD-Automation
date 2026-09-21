@@ -3,11 +3,8 @@ import '../domain/capture_models.dart';
 class LocalReplyRouter {
   const LocalReplyRouter();
 
-  static const transferWelcome =
-      'Hello! Welcome to Grozziie customer service. I’m here to help you. What can I assist you with today?';
+  static const transferWelcome = '您好，欢迎来到Grozziie客服。请问有什么可以帮您？';
 
-  static const jdOnlyEnglish =
-      'This customer service account supports only the JD store and JD orders. How can I help with your JD purchase or product?';
   static const jdOnlyChinese = '本客服账号仅处理京东店铺及京东订单。请问您的京东订单或产品需要什么帮助？';
 
   static const _greetings = <String>{
@@ -43,7 +40,8 @@ class LocalReplyRouter {
     '太好了谢谢',
   };
 
-  AiDraft? route(List<Map<String, dynamic>> messages) {
+  AiDraft? route(List<Map<String, dynamic>> messages,
+      {DateTime? transferNoticeAt}) {
     Map<String, dynamic>? latestIncoming;
     for (final message in messages.reversed) {
       if (message['direction'] == 'incoming') {
@@ -71,30 +69,49 @@ class LocalReplyRouter {
     // instead of restarting the interaction.
     final incomingCount =
         messages.where((message) => message['direction'] == 'incoming').length;
+    final priorIncoming = messages.reversed
+        .skip(1)
+        .where((message) => message['direction'] == 'incoming')
+        .firstOrNull;
+    final latestAt =
+        DateTime.tryParse(latestIncoming?['captured_at']?.toString() ?? '');
+    final priorAt =
+        DateTime.tryParse(priorIncoming?['captured_at']?.toString() ?? '');
+    final freshSession = incomingCount == 1 ||
+        (latestAt != null &&
+            priorAt != null &&
+            latestAt.difference(priorAt) >= const Duration(minutes: 30));
+    final welcomeAlreadySent = transferNoticeAt != null &&
+        messages.any((message) {
+          if (message['direction'] != 'outgoing' ||
+              message['body'] != transferWelcome) {
+            return false;
+          }
+          final sentAt =
+              DateTime.tryParse(message['captured_at']?.toString() ?? '');
+          return sentAt != null && !sentAt.isBefore(transferNoticeAt);
+        });
+    final recentlyTransferred = transferNoticeAt != null &&
+        latestAt != null &&
+        !latestAt.isBefore(transferNoticeAt) &&
+        latestAt.difference(transferNoticeAt) <= const Duration(minutes: 10) &&
+        !welcomeAlreadySent;
     // A transfer marker never replaces a real customer request already in the
     // visible history. Let Codex answer that request from recent context.
     if (isTransfer && incomingCount > 1) return null;
-    if (!isTransfer && isGreeting && incomingCount > 1) return null;
+    if (!isTransfer && isGreeting && !freshSession && !recentlyTransferred) {
+      return null;
+    }
 
-    final useChinese =
-        RegExp(r'[\u3400-\u9fff]').hasMatch(body) || normalized == 'nihao';
     final reply = isUnsupportedPlatform
-        ? useChinese
-            ? jdOnlyChinese
-            : jdOnlyEnglish
+        ? jdOnlyChinese
         : isIdentityQuestion
-            ? useChinese
-                ? '我是京东店铺的客服人员，请问有什么可以帮您？'
-                : 'I’m a customer service agent for the JD store. How can I help you?'
+            ? '我是京东店铺的客服人员，请问有什么可以帮您？'
             : isTransfer
                 ? transferWelcome
                 : isThanks
-                    ? useChinese
-                        ? '不客气，很高兴能帮到您！'
-                        : "You're very welcome! I'm glad I could help."
-                    : useChinese
-                        ? '您好亲，在的，请问有什么可以帮您？'
-                        : 'Hello! How can I help you today?';
+                    ? '不客气，很高兴能帮到您！'
+                    : transferWelcome;
     final response = <String, Object?>{
       'reply': reply,
       'decision': 'draft',
