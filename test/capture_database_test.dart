@@ -6,6 +6,53 @@ import 'package:jd_automation/storage/capture_database.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
+  test(
+      'uncaptured holding counts as the single SLA fallback after OCR recovers',
+      () async {
+    final root = await Directory.systemTemp.createTemp('unread_sla_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final detectedAt = DateTime(2026, 9, 22, 10);
+    await (await database.history).appendSlaFallbackSent(
+      userId: 'jd-unread',
+      messageId: 'unread-event-1',
+      reply: '请稍等，我正在核对您刚发来的消息。',
+    );
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:jd-unread',
+      customerName: 'jd-unread',
+      customerExternalId: 'jd-unread',
+      capturedAt: detectedAt.add(const Duration(seconds: 16)),
+      messages: const [
+        CapturedMessage(
+          stableId: 'ocr-recovered-1',
+          direction: 'incoming',
+          body: '请帮我看一下',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final pendingJob = await database.slaFallbackJob('jd-unread');
+    expect(pendingJob, isNotNull);
+    await database.acknowledgeUncapturedHolding(
+      userId: 'jd-unread',
+      sentAt: detectedAt.add(const Duration(seconds: 12)),
+    );
+    expect(await database.slaFallbackJob('jd-unread'), isNull);
+    expect(await database.hasPendingUnanswered('jd-unread'), isTrue);
+    expect(
+      await database.reserveSlaFallback(
+        userId: 'jd-unread',
+        messageId: pendingJob!.messageId,
+        dueAt: pendingJob.dueAt,
+      ),
+      isFalse,
+    );
+  });
+
   test('human transfer counter expires, resets, and ignores retried messages',
       () async {
     final root = await Directory.systemTemp.createTemp('human_transfer_test_');
@@ -1309,6 +1356,124 @@ void main() {
     await database.saveDraft(conversation.id, draft);
 
     expect(await database.ensurePendingForUnanswered('recovery-user'), isFalse);
+  });
+
+  test('repairs a missing pending turn with an orphaned OCR cursor', () async {
+    final root = await Directory.systemTemp.createTemp('orphan_cursor_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final now = DateTime.now();
+    Future<void> capture(String id, String body, DateTime at) => database
+        .saveCapture(CapturedConversation(
+          stableKey: 'customer:buyer',
+          customerName: 'buyer',
+          customerExternalId: 'buyer',
+          capturedAt: at,
+          messages: [
+            CapturedMessage(
+              stableId: id,
+              direction: 'incoming',
+              body: body,
+              sentAt: at,
+              axPath: 'test',
+            )
+          ],
+        ))
+        .then((_) {});
+    await capture('old', 'M880UT question', now);
+    final oldPending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'Earlier answer',
+      decision: 'draft',
+      confidence: 1,
+      riskLevel: 'low',
+      model: 'test',
+      usedRecordIds: [],
+      actions: [],
+      attachments: [],
+      rawJson: '{"reply":"Earlier answer"}',
+    );
+    await database.saveDraft(oldPending.id, draft, expectedMessageId: 'old');
+    await database.markReplySent(userId: 'buyer', reply: draft.reply);
+    await (await database.database).update(
+      'answered_cursors',
+      {'message_id': 'ocr-id-that-was-replaced'},
+      where: 'user_id = ?',
+      whereArgs: ['buyer'],
+    );
+    await capture('model', 'I have TP732', now.add(const Duration(seconds: 2)));
+    await capture('question', 'How do I connect it to the app?',
+        now.add(const Duration(seconds: 4)));
+    await (await database.database).delete('pending_customers',
+        where: 'user_id = ?', whereArgs: ['buyer']);
+
+    expect(await database.ensurePendingForUnanswered('buyer'), isTrue);
+    expect(await database.pendingMessageId('buyer'), 'question');
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
+  });
+
+  test('a real reply starts a fresh fallback window after an old holding',
+      () async {
+    final root = await Directory.systemTemp.createTemp('new_sla_window_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final now = DateTime.now();
+    CapturedConversation incoming(String id, DateTime at) =>
+        CapturedConversation(
+          stableKey: 'customer:buyer',
+          customerName: 'buyer',
+          customerExternalId: 'buyer',
+          capturedAt: at,
+          messages: [
+            CapturedMessage(
+              stableId: id,
+              direction: 'incoming',
+              body: id,
+              sentAt: at,
+              axPath: 'test',
+            )
+          ],
+        );
+    await database.saveCapture(incoming('old-question', now));
+    await (await database.database).update(
+      'sla_fallbacks',
+      {'state': 'sent', 'sent_at_ms': now.millisecondsSinceEpoch},
+      where: 'user_id = ?',
+      whereArgs: ['buyer'],
+    );
+    final history = await database.history;
+    await history.appendSlaFallbackSent(
+      userId: 'buyer',
+      messageId: 'old-question',
+      reply: '请稍等。',
+    );
+    await history.appendSentReply(
+      userId: 'buyer',
+      displayName: 'buyer',
+      stableKey: 'customer:buyer',
+      draft: const AiDraft(
+        reply: 'Earlier answer',
+        decision: 'draft',
+        confidence: 1,
+        riskLevel: 'low',
+        model: 'test',
+        usedRecordIds: [],
+        actions: [],
+        attachments: [],
+        rawJson: '{"reply":"Earlier answer"}',
+      ),
+    );
+    await database.saveCapture(
+        incoming('new-question', now.add(const Duration(seconds: 30))));
+    final job = await database.slaFallbackJob('buyer');
+    expect(job?.messageId, 'new-question');
+    expect(await database.hasPendingUnanswered('buyer'), isTrue);
   });
 
   test('seller reply clears pending customer and cannot trigger another draft',

@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import 'capture/capture_coordinator.dart';
 import 'capture/ocr_capture_extractor.dart';
 import 'capture/ocr_image_candidate_selector.dart';
+import 'capture/unread_capture_recovery.dart';
 import 'capture/video_audio_extractor.dart';
 import 'capture/video_frame_extractor.dart';
 import 'codex/codex_reply_service.dart';
@@ -17,6 +18,9 @@ import 'codex/local_reply_router.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
 import 'storage/capture_database.dart';
+
+typedef _RunVideoProcessingUnlocked = Future<CapturedMessage?> Function(
+    Future<CapturedMessage?> Function() work);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -89,6 +93,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   bool _deliveryRequested = false;
   final Map<String, int> _processingUnreadEvidence = {};
   final Map<String, int> _handledUnreadEvidence = {};
+  final Map<String, UnreadCaptureRecovery> _unreadRecovery = {};
+  final Map<String, Timer> _unreadHoldingTimers = {};
+  final Map<String, Timer> _unreadResendTimers = {};
   final Set<String> _visibleTransferWelcomes = {};
   String _visibleMediaTrace = 'visible image candidates=0, saved=0';
 
@@ -141,6 +148,7 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   Future<void> _markContacting(HumanReviewTicket ticket) async {
     try {
+      _finishUnreadRecovery(ticket.conversationId);
       _draftRetryTimers.remove(ticket.conversationId)?.cancel();
       _slaFallbackTimers.remove(ticket.conversationId)?.cancel();
       _draftQueue.remove(ticket.conversationId);
@@ -188,6 +196,12 @@ class _CaptureHomeState extends State<CaptureHome> {
   Future<void> _start() async {
     if (_autoCaptureRunning) {
       _autoCaptureTimer?.cancel();
+      for (final timer in _unreadHoldingTimers.values) {
+        timer.cancel();
+      }
+      for (final timer in _unreadResendTimers.values) {
+        timer.cancel();
+      }
       setState(() => _autoCaptureRunning = false);
       return;
     }
@@ -199,6 +213,9 @@ class _CaptureHomeState extends State<CaptureHome> {
     });
     _autoCaptureTimer =
         Timer.periodic(_scanInterval, (_) => unawaited(_runAutoCaptureCycle()));
+    for (final recovery in _unreadRecovery.values) {
+      _armUnreadRecoveryTimers(recovery);
+    }
     unawaited(_recoverAutomationQueues());
     unawaited(_runAutoCaptureCycle());
   }
@@ -212,6 +229,243 @@ class _CaptureHomeState extends State<CaptureHome> {
       _armSlaFallback(job);
     }
     _requestDelivery();
+  }
+
+  static const _uncapturedHoldingReply = '请稍等，我正在核对您刚发来的消息。';
+  static const _uncapturedResendReply =
+      '抱歉，您刚才发来的内容未能完整显示。方便您重新发送文字或视频吗？我收到后会尽快为您处理。';
+
+  Future<void> _beginUnreadRecovery(String customer, int evidence) async {
+    if (_unreadRecovery.containsKey(customer)) return;
+    final document = await (await _database.history).read(customer);
+    final messages = (document?['messages'] as List<Object?>? ?? const [])
+        .whereType<Map<String, dynamic>>();
+    final recovery = UnreadCaptureRecovery(
+      customer: customer,
+      unreadEvidence: evidence,
+      detectedAt: DateTime.now(),
+      knownIncomingIds: messages
+          .where((message) => message['direction'] == 'incoming')
+          .map((message) => message['id']?.toString() ?? '')
+          .toSet(),
+      knownOutgoingIds: messages
+          .where((message) => message['direction'] == 'outgoing')
+          .map((message) => message['id']?.toString() ?? '')
+          .toSet(),
+    );
+    _unreadRecovery[customer] = recovery;
+    _armUnreadRecoveryTimers(recovery);
+  }
+
+  void _armUnreadRecoveryTimers(UnreadCaptureRecovery recovery) {
+    final customer = recovery.customer;
+    _unreadHoldingTimers.remove(customer)?.cancel();
+    _unreadResendTimers.remove(customer)?.cancel();
+    final now = DateTime.now();
+    if (!recovery.holdingSent) {
+      final due = recovery.detectedAt.add(UnreadCaptureRecovery.holdingAfter);
+      _unreadHoldingTimers[customer] = Timer(
+        due.isAfter(now) ? due.difference(now) : Duration.zero,
+        () => unawaited(_sendUnreadRecoveryNotice(recovery, resend: false)),
+      );
+    }
+    if (!recovery.resendSent) {
+      final due = recovery.resendDueAt;
+      _unreadResendTimers[customer] = Timer(
+        due.isAfter(now) ? due.difference(now) : Duration.zero,
+        () => unawaited(_sendUnreadRecoveryNotice(recovery, resend: true)),
+      );
+    }
+  }
+
+  void _finishUnreadRecovery(String customer) {
+    final recovery = _unreadRecovery.remove(customer);
+    _unreadHoldingTimers.remove(customer)?.cancel();
+    _unreadResendTimers.remove(customer)?.cancel();
+    if (recovery != null) {
+      _handledUnreadEvidence[customer] = recovery.unreadEvidence;
+      _processingUnreadEvidence[customer] = recovery.unreadEvidence;
+    }
+  }
+
+  Future<bool> _hasRecoveredIncoming(UnreadCaptureRecovery recovery) async {
+    final document = await (await _database.history).read(recovery.customer);
+    final messages = (document?['messages'] as List<Object?>? ?? const [])
+        .whereType<Map<String, dynamic>>();
+    return messages.any((message) =>
+        message['direction'] == 'incoming' &&
+        !recovery.knownIncomingIds.contains(message['id']?.toString() ?? ''));
+  }
+
+  Future<void> _sendUnreadRecoveryNotice(UnreadCaptureRecovery recovery,
+      {required bool resend}) async {
+    if (!_autoCaptureRunning ||
+        !identical(_unreadRecovery[recovery.customer], recovery)) {
+      return;
+    }
+    try {
+      await _withJdUiOperation(() async {
+        if (!identical(_unreadRecovery[recovery.customer], recovery)) return;
+        if (await _database.isHumanContacting(recovery.customer)) {
+          _finishUnreadRecovery(recovery.customer);
+          return;
+        }
+        if (await _database.hasUndeliveredDraft(recovery.customer)) {
+          _retryUnreadRecoveryNotice(recovery, resend: resend);
+          return;
+        }
+        if (await _hasRecoveredIncoming(recovery)) {
+          if (recovery.holdingSentAt case final sentAt?) {
+            await _database.acknowledgeUncapturedHolding(
+                userId: recovery.customer, sentAt: sentAt);
+            _slaFallbackTimers.remove(recovery.customer)?.cancel();
+          }
+          _finishUnreadRecovery(recovery.customer);
+          _scheduleDraftGeneration(recovery.customer, newEvidence: false);
+          return;
+        }
+        final now = DateTime.now();
+        if (resend ? !recovery.resendDue(now) : !recovery.holdingDue(now)) {
+          return;
+        }
+        if (resend && recovery.videoProcessing) {
+          _retryUnreadRecoveryNotice(recovery, resend: true);
+          return;
+        }
+        await _adapter
+            .openConversation(recovery.customer, allowActivation: true)
+            .timeout(_captureOperationTimeout);
+        final windows =
+            await _adapter.listOcrWindows().timeout(_captureOperationTimeout);
+        if (windows.isEmpty) {
+          _retryUnreadRecoveryNotice(recovery, resend: resend);
+          return;
+        }
+        final reception = windows.firstWhere(
+            (window) => window.title.contains('咚咚融合工作台'),
+            orElse: () => windows.first);
+        final inspection = await _adapter
+            .inspectExpectedCustomer(
+              windowId: reception.windowId,
+              expectedCustomer: recovery.customer,
+            )
+            .timeout(_captureOperationTimeout);
+        final extraction = OcrCaptureExtractor(
+          bodyConfidenceThreshold:
+              recovery.useRelaxedBodyOcr(DateTime.now()) ? 0.30 : 0.45,
+        ).analyze(inspection);
+        final visible = extraction.capture;
+        final newlyReadIncoming = visible?.messages.any((message) =>
+                message.direction == 'incoming' &&
+                !recovery.knownIncomingIds.contains(message.stableId)) ??
+            false;
+        final onlyOurHoldingIsBelow = recovery.holdingSent &&
+            visible?.messages.lastOrNull?.body == _uncapturedHoldingReply;
+        if (newlyReadIncoming &&
+            (extraction.latestVisibleSenderIsIncoming ||
+                onlyOurHoldingIsBelow)) {
+          final inserted = await _database.saveCapture(visible!);
+          if (inserted > 0) {
+            if (recovery.holdingSentAt case final sentAt?) {
+              await _database.acknowledgeUncapturedHolding(
+                  userId: recovery.customer, sentAt: sentAt);
+              _slaFallbackTimers.remove(recovery.customer)?.cancel();
+            }
+            _finishUnreadRecovery(recovery.customer);
+            _scheduleDraftGeneration(recovery.customer, newEvidence: true);
+            return;
+          }
+        }
+        final repliedByColleague = visible?.messages.any((message) =>
+                message.direction == 'outgoing' &&
+                !recovery.knownOutgoingIds.contains(message.stableId) &&
+                message.body != _uncapturedHoldingReply &&
+                message.body != _uncapturedResendReply) ??
+            false;
+        if (repliedByColleague) {
+          _finishUnreadRecovery(recovery.customer);
+          return;
+        }
+        if (!identical(_unreadRecovery[recovery.customer], recovery)) return;
+        if (await _database.isHumanContacting(recovery.customer)) {
+          _finishUnreadRecovery(recovery.customer);
+          return;
+        }
+        if (await _database.hasUndeliveredDraft(recovery.customer)) {
+          _retryUnreadRecoveryNotice(recovery, resend: resend);
+          return;
+        }
+        if (await _hasRecoveredIncoming(recovery)) {
+          if (recovery.holdingSentAt case final sentAt?) {
+            await _database.acknowledgeUncapturedHolding(
+                userId: recovery.customer, sentAt: sentAt);
+            _slaFallbackTimers.remove(recovery.customer)?.cancel();
+          }
+          _finishUnreadRecovery(recovery.customer);
+          _scheduleDraftGeneration(recovery.customer, newEvidence: false);
+          return;
+        }
+        final reply = resend ? _uncapturedResendReply : _uncapturedHoldingReply;
+        await _adapter.sendDraftOnce(
+          expectedCustomer: recovery.customer,
+          reply: reply,
+          mediaPaths: const [],
+        );
+        final sentAt = DateTime.now();
+        if (resend) {
+          recovery.resendSent = true;
+        } else {
+          recovery.holdingSent = true;
+          recovery.holdingSentAt = sentAt;
+          _unreadResendTimers.remove(recovery.customer)?.cancel();
+          final due = recovery.resendDueAt;
+          _unreadResendTimers[recovery.customer] = Timer(
+            due.isAfter(sentAt) ? due.difference(sentAt) : Duration.zero,
+            () => unawaited(_sendUnreadRecoveryNotice(recovery, resend: true)),
+          );
+        }
+        try {
+          await (await _database.history).appendSlaFallbackSent(
+            userId: recovery.customer,
+            messageId:
+                'unread-recovery:${recovery.detectedAt.microsecondsSinceEpoch}:${resend ? 'resend' : 'holding'}',
+            reply: reply,
+          );
+        } catch (error) {
+          // JD already confirmed the send. Never repeat it merely because
+          // local history storage failed afterward.
+          if (mounted) setState(() => _error = error);
+        }
+        if (mounted) {
+          setState(() => _diagnostics = resend
+              ? 'Asked ${recovery.customer} to resend content that could not be captured.'
+              : 'Sent a holding message to ${recovery.customer} while capture retries continue.');
+        }
+      });
+    } on PlatformException catch (error) {
+      // The send may have succeeded even if JD did not confirm it. Never
+      // retry an uncertain send and risk a duplicate customer message.
+      if (error.code == 'send_unconfirmed') {
+        _finishUnreadRecovery(recovery.customer);
+      } else {
+        _retryUnreadRecoveryNotice(recovery, resend: resend);
+      }
+      if (mounted) setState(() => _error = error);
+    } catch (error) {
+      _retryUnreadRecoveryNotice(recovery, resend: resend);
+      if (mounted) setState(() => _error = error);
+    }
+  }
+
+  void _retryUnreadRecoveryNotice(UnreadCaptureRecovery recovery,
+      {required bool resend}) {
+    if (!identical(_unreadRecovery[recovery.customer], recovery)) return;
+    final timers = resend ? _unreadResendTimers : _unreadHoldingTimers;
+    timers.remove(recovery.customer)?.cancel();
+    timers[recovery.customer] = Timer(
+      const Duration(seconds: 2),
+      () => unawaited(_sendUnreadRecoveryNotice(recovery, resend: resend)),
+    );
   }
 
   void _scheduleDraftGeneration(String userId, {required bool newEvidence}) {
@@ -349,7 +603,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (!_autoCaptureRunning || _autoCaptureBusy) return;
     _autoCaptureBusy = true;
     final previousUiOperation = _jdUiTail;
-    final releaseUiOperation = Completer<void>();
+    var releaseUiOperation = Completer<void>();
     _jdUiTail = releaseUiOperation.future;
     await previousUiOperation;
     final scanStartedAt = DateTime.now();
@@ -361,8 +615,9 @@ class _CaptureHomeState extends State<CaptureHome> {
       });
     }
     try {
-      // A periodic monitor must never activate/unhide Qianniu. Doing so steals
-      // keyboard focus from whichever application the operator is using.
+      // Baseline polling does not activate JD. A verified unread media bubble
+      // may briefly bring it forward to inspect the video play overlay, then
+      // restore the operator's previous frontmost application.
       await _adapter
           .ensureReceptionWindow(allowActivation: false)
           .timeout(_captureOperationTimeout);
@@ -377,15 +632,23 @@ class _CaptureHomeState extends State<CaptureHome> {
         _handledUnreadEvidence.remove(row.customer);
         _processingUnreadEvidence.remove(row.customer);
       }
-      final orderedRows = evidenceAvailable
-          ? rows
-              .where((row) =>
+      for (final row in rows.where((row) => row.unread)) {
+        if (!_unreadRecovery.containsKey(row.customer) &&
+            _handledUnreadEvidence[row.customer] != row.unreadEvidence &&
+            !await _database.isHumanContacting(row.customer)) {
+          await _beginUnreadRecovery(row.customer, row.unreadEvidence);
+        }
+      }
+      final orderedRows = rows
+          .where((row) =>
+              (_unreadRecovery[row.customer]?.captureRetryDue(DateTime.now()) ??
+                  false) ||
+              (evidenceAvailable &&
                   row.unread &&
                   _processingUnreadEvidence[row.customer] !=
                       row.unreadEvidence &&
-                  _handledUnreadEvidence[row.customer] != row.unreadEvidence)
-              .toList(growable: false)
-          : const <QianniuConversationRow>[];
+                  _handledUnreadEvidence[row.customer] != row.unreadEvidence))
+          .toList(growable: false);
       if (orderedRows.isEmpty) {
         var insertedFromActiveChat = 0;
         final windows =
@@ -417,6 +680,7 @@ class _CaptureHomeState extends State<CaptureHome> {
               if (capture != null) {
                 insertedFromActiveChat = await _database.saveCapture(capture);
               }
+              await _database.ensurePendingForUnanswered(activeCustomer);
               if (await _database.hasPendingUnanswered(activeCustomer)) {
                 _scheduleDraftGeneration(activeCustomer,
                     newEvidence: insertedFromActiveChat > 0);
@@ -467,21 +731,69 @@ class _CaptureHomeState extends State<CaptureHome> {
               )
               .timeout(_captureOperationTimeout);
           if (mounted) setState(() => _ocrInspection = inspection);
-          final extraction = const OcrCaptureExtractor().analyze(inspection);
+          final recovery = _unreadRecovery[customer];
+          if (recovery != null) {
+            recovery.lastCaptureAttemptAt = DateTime.now();
+          }
+          final extraction = OcrCaptureExtractor(
+            bodyConfidenceThreshold:
+                recovery?.useRelaxedBodyOcr(DateTime.now()) == true
+                    ? 0.30
+                    : 0.45,
+          ).analyze(inspection);
           if (!extraction.transferNoticeVisible) {
             _visibleTransferWelcomes.remove(customer);
           }
           final capture = await _captureWithVisibleMedia(inspection, extraction,
-                  allowUnlabeledLatestImage: row.unread)
-              .timeout(_captureOperationTimeout);
+              allowUnlabeledLatestImage: row.unread || recovery != null,
+              allowRecoveryAfterHolding: recovery?.holdingSent == true,
+              allowVideoDetectionActivation: recovery != null,
+              runVideoProcessingUnlocked: (work) async {
+            releaseUiOperation.complete();
+            try {
+              return await work();
+            } finally {
+              final queuedUiOperation = _jdUiTail;
+              releaseUiOperation = Completer<void>();
+              _jdUiTail = releaseUiOperation.future;
+              await queuedUiOperation;
+            }
+          }).timeout(_captureOperationTimeout);
           var insertedForCustomer = 0;
           if (capture != null) {
             insertedForCustomer = await _database.saveCapture(capture);
             insertedTotal += insertedForCustomer;
           }
-          if (capture != null || extraction.transferNoticeVisible) {
+          final capturedNewIncoming = recovery != null &&
+              insertedForCustomer > 0 &&
+              (extraction.latestVisibleSenderIsIncoming ||
+                  extraction.capture == null ||
+                  (recovery.holdingSent &&
+                      extraction.capture?.messages.lastOrNull?.body ==
+                          _uncapturedHoldingReply) ||
+                  (recovery.holdingSent &&
+                      capture?.messages.any((message) =>
+                              message.direction == 'incoming' &&
+                              message.media.isNotEmpty) ==
+                          true)) &&
+              capture != null &&
+              capture.messages.any((message) =>
+                  message.direction == 'incoming' &&
+                  !recovery.knownIncomingIds.contains(message.stableId));
+          if (capturedNewIncoming) {
+            if (recovery.holdingSentAt case final sentAt?) {
+              await _database.acknowledgeUncapturedHolding(
+                  userId: customer, sentAt: sentAt);
+              _slaFallbackTimers.remove(customer)?.cancel();
+            }
+            _finishUnreadRecovery(customer);
+          }
+          if (capturedNewIncoming ||
+              (recovery == null &&
+                  (capture != null || extraction.transferNoticeVisible))) {
             _processingUnreadEvidence[customer] = row.unreadEvidence;
           }
+          await _database.ensurePendingForUnanswered(customer);
           // Queue the durable current message immediately. Optional history
           // scrolling must never prevent an already-saved customer turn from
           // reaching Codex.
@@ -511,6 +823,14 @@ class _CaptureHomeState extends State<CaptureHome> {
           }
           rethrow;
         }
+        // Give an already-due holding message or delivery a turn before
+        // switching to another customer. A busy multi-chat scan must not
+        // monopolize the single JD UI queue past the response deadline.
+        releaseUiOperation.complete();
+        final queuedUiOperation = _jdUiTail;
+        releaseUiOperation = Completer<void>();
+        _jdUiTail = releaseUiOperation.future;
+        await queuedUiOperation;
       }
       await _coordinator.refresh();
       if (mounted) {
@@ -909,6 +1229,7 @@ class _CaptureHomeState extends State<CaptureHome> {
         mediaPaths: mediaPaths,
       );
       await _database.markReplySent(userId: userId, reply: draft.reply);
+      _finishUnreadRecovery(userId);
       _slaFallbackTimers.remove(userId)?.cancel();
       _scheduleDraftGeneration(userId, newEvidence: false);
       final evidence = _processingUnreadEvidence[userId];
@@ -933,16 +1254,25 @@ class _CaptureHomeState extends State<CaptureHome> {
     OcrInspection inspection,
     OcrExtractionAttempt extraction, {
     bool allowUnlabeledLatestImage = false,
+    bool allowRecoveryAfterHolding = false,
+    bool allowVideoDetectionActivation = false,
+    _RunVideoProcessingUnlocked? runVideoProcessingUnlocked,
   }) async {
     final customer = extraction.customerId ?? extraction.capture?.customerName;
     if (customer == null || inspection.windowId == 0) {
       return extraction.capture;
     }
     final textCapture = extraction.capture;
+    final latestVisible = textCapture?.messages.lastOrNull;
+    final onlyOurHoldingIsBelow = allowRecoveryAfterHolding &&
+        latestVisible?.direction == 'outgoing' &&
+        latestVisible?.body == _uncapturedHoldingReply;
 
     // Keep verified OCR text, then inspect any customer-owned visual region in
     // the same viewport. An image followed by text must not skip image capture.
-    if (!extraction.latestVisibleSenderIsIncoming) {
+    if (!extraction.latestVisibleSenderIsIncoming &&
+        !onlyOurHoldingIsBelow &&
+        !(allowUnlabeledLatestImage && textCapture == null)) {
       _visibleMediaTrace =
           'strict routing: newest visible sender is not the customer';
       return textCapture;
@@ -953,9 +1283,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       customer,
       allowUnlabeledLatestImage: allowUnlabeledLatestImage,
     );
-    final visibleMessages = textCapture?.messages ?? const [];
-    final latestVisible = visibleMessages.isEmpty ? null : visibleMessages.last;
-    if (latestVisible?.direction == 'outgoing' ||
+    if ((latestVisible?.direction == 'outgoing' && !onlyOurHoldingIsBelow) ||
         extraction.latestIncomingHasText) {
       imageCandidates = imageCandidates.where((region) {
         final bottom = region.y + region.height;
@@ -970,9 +1298,8 @@ class _CaptureHomeState extends State<CaptureHome> {
       }).toList(growable: false);
     }
     // Automatic image capture stays screenshot-first and never opens JD's
-    // image viewer. A detected video play overlay instead uses JD's bounded
-    // Save As flow while JD is already frontmost. Only the newest candidate
-    // can create work.
+    // image viewer. A detected video uses JD's bounded local cache copy.
+    // Only the newest candidate can create work.
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
     for (final region in imageCandidates) {
@@ -984,6 +1311,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           y: region.y,
           width: region.width,
           height: region.height,
+          allowActivationForVideoDetection: allowVideoDetectionActivation,
         );
         if (visible.kind == 'video') {
           final saved = await _saveVisibleVideo(
@@ -991,6 +1319,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             inspection.windowId,
             region,
             visible.visualFingerprint ?? '',
+            runVideoProcessingUnlocked: runVideoProcessingUnlocked,
           );
           if (saved != null) capturedMedia.add(saved);
         } else if (visible.kind == 'image' && visible.bytes != null) {
@@ -1029,8 +1358,9 @@ class _CaptureHomeState extends State<CaptureHome> {
     String customer,
     int windowId,
     OcrVisualRegion region,
-    String thumbnailFingerprint,
-  ) async {
+    String thumbnailFingerprint, {
+    _RunVideoProcessingUnlocked? runVideoProcessingUnlocked,
+  }) async {
     final store = await _database.history;
     if (thumbnailFingerprint.isNotEmpty &&
         await store.hasSimilarImageFingerprint(
@@ -1054,44 +1384,19 @@ class _CaptureHomeState extends State<CaptureHome> {
       destinationDirectory: destination.path,
     );
     if (downloaded.path.isEmpty) return null;
-    final extracted =
-        await const VideoFrameExtractor().extract(downloaded.path);
-    var audioEvidence = '[Video audio: analysis unavailable]';
-    CapturedMedia? audioMedia;
-    try {
-      final audio = await const VideoAudioExtractor().extract(downloaded.path);
-      if (!audio.hasAudioStream) {
-        audioEvidence = '[Video audio: no audio stream]';
-      } else if (!audio.hasAudibleContent) {
-        audioEvidence =
-            '[Video audio: an audio stream exists, but no meaningful audible content was detected]';
-        audioMedia = CapturedMedia(
-          type: 'audio',
-          path: audio.audioPath!,
-          mimeType: 'audio/wav',
-          originalName: 'video_audio.wav',
-          captureSource: 'jd_video_audio_ffmpeg',
-          description:
-              'Audio stream present; meaningful sound was not detected.',
-        );
-      } else {
-        SpeechTranscription? speech;
-        try {
-          speech = await _adapter
-              .transcribeAudio(audio.audioPath!)
-              .timeout(const Duration(seconds: 60));
-        } catch (_) {
-          // Audio evidence remains useful even if permission, connectivity, or
-          // the platform recognizer is temporarily unavailable.
-        }
-        final transcript =
-            speech?.transcript.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
-        if (speech?.speechDetected == true && transcript.isNotEmpty) {
-          final bounded = transcript.length <= 8000
-              ? transcript
-              : '${transcript.substring(0, 8000)}…';
+    Future<CapturedMessage?> processDownloadedVideo() async {
+      final extracted =
+          await const VideoFrameExtractor().extract(downloaded.path);
+      var audioEvidence = '[Video audio: analysis unavailable]';
+      CapturedMedia? audioMedia;
+      try {
+        final audio =
+            await const VideoAudioExtractor().extract(downloaded.path);
+        if (!audio.hasAudioStream) {
+          audioEvidence = '[Video audio: no audio stream]';
+        } else if (!audio.hasAudibleContent) {
           audioEvidence =
-              '[Video speech transcript (${speech!.language}): $bounded]';
+              '[Video audio: an audio stream exists, but no meaningful audible content was detected]';
           audioMedia = CapturedMedia(
             type: 'audio',
             path: audio.audioPath!,
@@ -1099,60 +1404,98 @@ class _CaptureHomeState extends State<CaptureHome> {
             originalName: 'video_audio.wav',
             captureSource: 'jd_video_audio_ffmpeg',
             description:
-                'Audible speech transcribed as ${speech.language} with confidence ${speech.confidence.toStringAsFixed(2)}: $bounded',
+                'Audio stream present; meaningful sound was not detected.',
           );
         } else {
-          audioEvidence =
-              '[Video audio: audible content exists, but no speech was recognized]';
-          audioMedia = CapturedMedia(
-            type: 'audio',
-            path: audio.audioPath!,
-            mimeType: 'audio/wav',
-            originalName: 'video_audio.wav',
-            captureSource: 'jd_video_audio_ffmpeg',
-            description:
-                'Audible content detected; no speech transcript was available.',
-          );
+          SpeechTranscription? speech;
+          try {
+            speech = await _adapter
+                .transcribeAudio(audio.audioPath!)
+                .timeout(const Duration(seconds: 60));
+          } catch (_) {
+            // Audio evidence remains useful even if permission, connectivity, or
+            // the platform recognizer is temporarily unavailable.
+          }
+          final transcript =
+              speech?.transcript.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+          if (speech?.speechDetected == true && transcript.isNotEmpty) {
+            final bounded = transcript.length <= 8000
+                ? transcript
+                : '${transcript.substring(0, 8000)}…';
+            audioEvidence =
+                '[Video speech transcript (${speech!.language}): $bounded]';
+            audioMedia = CapturedMedia(
+              type: 'audio',
+              path: audio.audioPath!,
+              mimeType: 'audio/wav',
+              originalName: 'video_audio.wav',
+              captureSource: 'jd_video_audio_ffmpeg',
+              description:
+                  'Audible speech transcribed as ${speech.language} with confidence ${speech.confidence.toStringAsFixed(2)}: $bounded',
+            );
+          } else {
+            audioEvidence =
+                '[Video audio: audible content exists, but no speech was recognized]';
+            audioMedia = CapturedMedia(
+              type: 'audio',
+              path: audio.audioPath!,
+              mimeType: 'audio/wav',
+              originalName: 'video_audio.wav',
+              captureSource: 'jd_video_audio_ffmpeg',
+              description:
+                  'Audible content detected; no speech transcript was available.',
+            );
+          }
         }
+      } catch (_) {
+        // Visual video analysis must still proceed if the audio stream is
+        // malformed or local FFmpeg audio extraction is unavailable.
       }
-    } catch (_) {
-      // Visual video analysis must still proceed if the audio stream is
-      // malformed or local FFmpeg audio extraction is unavailable.
+      final frameMedia = <CapturedMedia>[];
+      for (var index = 0; index < extracted.framePaths.length; index++) {
+        frameMedia.add(CapturedMedia(
+          type: 'image',
+          path: extracted.framePaths[index],
+          mimeType: 'image/jpeg',
+          originalName:
+              'video_frame_${(index + 1).toString().padLeft(2, '0')}s.jpg',
+          captureSource: 'jd_video_frame_1fps',
+          description: 'Pending Codex visual analysis.',
+        ));
+      }
+      return CapturedMessage(
+        stableId: 'visible-video:${extracted.sha256Digest}',
+        direction: 'incoming',
+        body:
+            '[Customer sent a video; copied from JD cache and sampled at one frame per second, maximum 20 frames]\n$audioEvidence',
+        sender: customer,
+        axPath: 'ocr:jd-video-cache',
+        media: [
+          CapturedMedia(
+            type: 'video',
+            path: downloaded.path,
+            mimeType: downloaded.mimeType,
+            originalName: downloaded.originalName,
+            captureSource: 'jd_video_cache',
+            description:
+                'Original customer video; visual evidence is stored in the sampled frame images.',
+            visualFingerprint: thumbnailFingerprint,
+          ),
+          if (audioMedia != null) audioMedia,
+          ...frameMedia,
+        ],
+      );
     }
-    final frameMedia = <CapturedMedia>[];
-    for (var index = 0; index < extracted.framePaths.length; index++) {
-      frameMedia.add(CapturedMedia(
-        type: 'image',
-        path: extracted.framePaths[index],
-        mimeType: 'image/jpeg',
-        originalName:
-            'video_frame_${(index + 1).toString().padLeft(2, '0')}s.jpg',
-        captureSource: 'jd_video_frame_1fps',
-        description: 'Pending Codex visual analysis.',
-      ));
+
+    final recovery = _unreadRecovery[customer];
+    if (recovery != null) recovery.videoProcessing = true;
+    try {
+      return runVideoProcessingUnlocked == null
+          ? await processDownloadedVideo()
+          : await runVideoProcessingUnlocked(processDownloadedVideo);
+    } finally {
+      if (recovery != null) recovery.videoProcessing = false;
     }
-    return CapturedMessage(
-      stableId: 'visible-video:${extracted.sha256Digest}',
-      direction: 'incoming',
-      body:
-          '[Customer sent a video; copied from JD cache and sampled at one frame per second, maximum 20 frames]\n$audioEvidence',
-      sender: customer,
-      axPath: 'ocr:jd-video-cache',
-      media: [
-        CapturedMedia(
-          type: 'video',
-          path: downloaded.path,
-          mimeType: downloaded.mimeType,
-          originalName: downloaded.originalName,
-          captureSource: 'jd_video_cache',
-          description:
-              'Original customer video; visual evidence is stored in the sampled frame images.',
-          visualFingerprint: thumbnailFingerprint,
-        ),
-        if (audioMedia != null) audioMedia,
-        ...frameMedia,
-      ],
-    );
   }
 
   Future<CapturedMessage?> _saveVisibleImage(
@@ -1235,6 +1578,12 @@ class _CaptureHomeState extends State<CaptureHome> {
       timer.cancel();
     }
     for (final timer in _slaFallbackTimers.values) {
+      timer.cancel();
+    }
+    for (final timer in _unreadHoldingTimers.values) {
+      timer.cancel();
+    }
+    for (final timer in _unreadResendTimers.values) {
       timer.cancel();
     }
     _updateSubscription?.cancel();

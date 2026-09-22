@@ -60,16 +60,14 @@ class ConversationFileStore {
             final existingBody = existing['body']?.toString() ?? '';
             if (_ocrCanonical(message.body).length >
                 _ocrCanonical(existingBody).length) {
-              final oldId = existing['id']?.toString();
-              if (oldId != null) knownIds.remove(oldId);
               existing
-                ..['id'] = message.stableId
                 ..['body'] = message.body
                 ..['sender'] = message.sender
                 ..['sent_at'] = message.sentAt?.toUtc().toIso8601String()
                 ..['captured_at'] =
                     capture.capturedAt.toUtc().toIso8601String();
-              knownIds.add(message.stableId);
+              // The first durable ID is a reply/queue cursor. OCR may refine
+              // the body, but replacing that ID orphans the cursor.
               inserted++;
               lastInsertedDirection = 'incoming';
             }
@@ -100,15 +98,11 @@ class ConversationFileStore {
             final existingCanonical =
                 _ocrCanonical(existing['body']?.toString() ?? '');
             if (canonical.length > existingCanonical.length) {
-              final oldId = existing['id']?.toString();
-              if (oldId != null) knownIds.remove(oldId);
               existing
-                ..['id'] = message.stableId
                 ..['body'] = message.body
                 ..['sender'] = message.sender
                 ..['captured_at'] =
                     capture.capturedAt.toUtc().toIso8601String();
-              knownIds.add(message.stableId);
               inserted++;
               lastInsertedDirection = 'incoming';
               final alreadyAnswered = messages.skip(upgradeIndex + 1).any(
@@ -116,7 +110,8 @@ class ConversationFileStore {
                       item['direction'] == 'outgoing' &&
                       item['source'] != 'sla_fallback');
               if (!alreadyAnswered) {
-                insertedIncomingIds.add(message.stableId);
+                insertedIncomingIds
+                    .add(existing['id']?.toString() ?? message.stableId);
               }
             }
             continue;

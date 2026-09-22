@@ -56,6 +56,8 @@ final class AccessibilityBridge {
         normalizedY: (args?["y"] as? NSNumber)?.doubleValue ?? -1,
         normalizedWidth: (args?["width"] as? NSNumber)?.doubleValue ?? -1,
         normalizedHeight: (args?["height"] as? NSNumber)?.doubleValue ?? -1,
+        allowActivationForVideoDetection:
+          args?["allowActivationForVideoDetection"] as? Bool ?? false,
         completion: result)
     case "classifyMessageAt":
       let args = call.arguments as? [String: Any]
@@ -265,6 +267,7 @@ final class QianniuOCRInspector {
         code: "jd_window_missing",
         message: "No visible JD 咚咚 window was found. Open its customer-service window and retry.")
     }
+    let customerBeforeCapture = customerIdentityProvider?()
     guard let image = CGWindowListCreateImage(
       .null,
       .optionIncludingWindow,
@@ -384,6 +387,12 @@ final class QianniuOCRInspector {
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
       throw OCRInspectorError(code: "png_encoding_failed", message: "Could not encode the captured window image.")
     }
+    let customerAfterRecognition = customerIdentityProvider?()
+    guard let customerBeforeCapture, let customerAfterRecognition,
+          exactCustomerIdentityMatches(customerBeforeCapture, customerAfterRecognition) else {
+      throw OCRInspectorError(code: "customer_changed_during_capture",
+                              message: "The JD conversation changed during OCR; this screenshot was discarded.")
+    }
     var payload: [String: Any] = [
       "pid": Int(app.processIdentifier),
       "windowId": Int(window.id),
@@ -399,7 +408,7 @@ final class QianniuOCRInspector {
       "visualRegions": visualRegions,
       "recognizedText": observations.compactMap { $0["text"] as? String }.joined(separator: "\n"),
       "ocrEngine": "apple_vision",
-      "activeCustomerId": customerIdentityProvider?() as Any,
+      "activeCustomerId": customerAfterRecognition,
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ]
     if let chatFrame = chatFrameProvider?(), window.bounds.width > 0 {
@@ -755,6 +764,7 @@ final class QianniuAXCollector {
   func captureImageRegion(expectedCustomer: String, windowID: CGWindowID,
                           normalizedX: Double, normalizedY: Double,
                           normalizedWidth: Double, normalizedHeight: Double,
+                          allowActivationForVideoDetection: Bool = false,
                           completion: @escaping FlutterResult) {
     queue.async { [weak self] in
       guard let self else { return }
@@ -797,6 +807,23 @@ final class QianniuAXCollector {
       // JD renders the play control in a separate overlay layer that is absent
       // from a window-only capture. When JD is frontmost, hover the verified
       // bubble and inspect a bounded composite crop solely for classification.
+      let previouslyFrontmost = NSWorkspace.shared.frontmostApplication
+      let jdPID = runningPID()
+      var activatedForRetry = false
+      if !videoDetected && allowActivationForVideoDetection,
+         previouslyFrontmost?.processIdentifier != jdPID,
+         let jdPID,
+         let jdApp = NSRunningApplication(processIdentifier: jdPID) {
+        activatedForRetry = jdApp.activate(options: [.activateIgnoringOtherApps])
+        if activatedForRetry { usleep(200_000) }
+      }
+      defer {
+        if activatedForRetry,
+           let previous = previouslyFrontmost,
+           !previous.isTerminated {
+          _ = previous.activate(options: [.activateIgnoringOtherApps])
+        }
+      }
       if !videoDetected,
          NSWorkspace.shared.frontmostApplication?.processIdentifier == runningPID(),
          let bounds = windowBounds(windowID) {
@@ -1322,10 +1349,12 @@ final class QianniuAXCollector {
             .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
             .max(by: { $0.path.count < $1.path.count }),
           let frame = split.frame else { return false }
+    // JD places other labels before the customer name in some header layouts.
+    // Do not treat the leftmost text as the identity; require a positive match
+    // inside the active chat's header region instead.
     let headerMatches = nodes.contains { node in
       guard node.role == kAXStaticTextRole as String,
-            let text = node.text?.lowercased(), let candidate = node.frame else { return false }
-      // The active-chat header is immediately above the central split/composer.
+            let text = node.text, let candidate = node.frame else { return false }
       return candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
         candidate.maxY <= frame.minY && candidate.minY >= frame.minY - 100 &&
         visibleCustomerIdentityMatches(text, expected: expected)
@@ -1342,9 +1371,8 @@ final class QianniuAXCollector {
     }
     if jdHeaderMatches { return true }
 
-    // The customer-details panel to the right of the composer exposes the full
-    // active account name. Sidebar rows are left of the split, so they cannot
-    // satisfy this independent verification signal.
+    // JD sometimes exposes the complete active account only in its details
+    // panel. The sidebar is to the left and cannot satisfy this region.
     return nodes.contains { node in
       guard node.role == kAXStaticTextRole as String,
             let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),

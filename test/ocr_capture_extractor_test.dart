@@ -5,6 +5,77 @@ import 'package:jd_automation/capture/ocr_capture_extractor.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('recovery accepts low-confidence body but not low-confidence sender',
+      () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 9, 15, 12, 24),
+      activeCustomerId: 'jd_customer',
+      observations: const [
+        OcrObservation(
+            text: 'jd_customer 12:24:00',
+            confidence: .95,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: '请帮我看一下',
+            confidence: .35,
+            x: .22,
+            y: .44,
+            width: .15,
+            height: .02),
+      ],
+    );
+
+    expect(const OcrCaptureExtractor().extract(inspection), isNull);
+    expect(
+      const OcrCaptureExtractor(bodyConfidenceThreshold: .30)
+          .extract(inspection)!
+          .messages
+          .single
+          .body,
+      '请帮我看一下',
+    );
+
+    final lowSender = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 2550,
+      imageHeight: 1640,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 9, 15, 12, 24),
+      activeCustomerId: 'jd_customer',
+      observations: const [
+        OcrObservation(
+            text: 'jd_customer 12:24:00',
+            confidence: .35,
+            x: .22,
+            y: .40,
+            width: .18,
+            height: .02),
+        OcrObservation(
+            text: '请帮我看一下',
+            confidence: .95,
+            x: .22,
+            y: .44,
+            width: .15,
+            height: .02),
+      ],
+    );
+    expect(
+        const OcrCaptureExtractor(bodyConfidenceThreshold: .30)
+            .extract(lowSender),
+        isNull);
+  });
+
   for (final customer in const ['上海思停志科技', 'clffq520', 'jd_41aeec7741d05']) {
     test('captures messages for unrestricted customer identity: $customer', () {
       final inspection = OcrInspection(

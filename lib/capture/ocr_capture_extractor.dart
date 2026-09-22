@@ -10,7 +10,12 @@ import '../platform/macos_capture_adapter.dart';
 /// bubbles with a clear sender/body relationship are returned; durable IDs
 /// remove older duplicates.
 class OcrCaptureExtractor {
-  const OcrCaptureExtractor();
+  const OcrCaptureExtractor({this.bodyConfidenceThreshold = 0.45});
+
+  /// Recovery may relax body recognition, but sender labels and customer
+  /// identity must continue to meet the normal confidence threshold.
+  final double bodyConfidenceThreshold;
+  static const double senderConfidenceThreshold = 0.45;
 
   // JD indents wrapped bubble lines independently. In particular, a short
   // final line can start to the left of the longer line above it. Treat the
@@ -24,7 +29,9 @@ class OcrCaptureExtractor {
 
   OcrExtractionAttempt analyze(OcrInspection inspection) {
     final observations = inspection.observations
-        .where((item) => item.confidence >= 0.45 && item.text.trim().isNotEmpty)
+        .where((item) =>
+            item.confidence >= bodyConfidenceThreshold &&
+            item.text.trim().isNotEmpty)
         .toList(growable: false);
     final suppliedCustomer = inspection.activeCustomerId?.trim();
     final customerId = suppliedCustomer != null && suppliedCustomer.isNotEmpty
@@ -49,6 +56,7 @@ class OcrCaptureExtractor {
 
     final messageLabels = observations
         .where((item) =>
+            item.confidence >= senderConfidenceThreshold &&
             (_sameIdentity(item.text, customerId) ||
                 _isSellerIdentity(item.text)) &&
             item.x + item.width / 2 >= chatLeft &&

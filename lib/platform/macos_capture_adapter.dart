@@ -129,6 +129,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required double y,
     required double width,
     required double height,
+    bool allowActivationForVideoDetection = false,
   }) async {
     final value = await _mapCall('captureImageRegion', <String, Object?>{
       'expectedCustomer': expectedCustomer,
@@ -137,6 +138,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
       'y': y,
       'width': width,
       'height': height,
+      'allowActivationForVideoDetection': allowActivationForVideoDetection,
     });
     if (value['error'] case final String code) {
       throw PlatformException(

@@ -35,6 +35,22 @@ void main() {
     expect(batch.map((message) => message['id']), ['text-2']);
   });
 
+  test('orphaned OCR cursor falls back to the last sent reply', () {
+    final messages = <Map<String, dynamic>>[
+      {'id': 'old-question', 'direction': 'incoming', 'body': 'M880UT shift'},
+      {'id': 'old-reply', 'direction': 'outgoing', 'source': 'generated_reply'},
+      {'id': 'model', 'direction': 'incoming', 'body': 'I have TP732'},
+      {
+        'id': 'question',
+        'direction': 'incoming',
+        'body': 'How to connect app?'
+      },
+    ];
+    final batch = customerBatchThroughMessage(messages,
+        endMessageId: 'question', answeredMessageId: 'replaced-ocr-id');
+    expect(batch.map((message) => message['id']), ['model', 'question']);
+  });
+
   test('creates a durable read-only session with structured output', () {
     expect(service.timeout, isNull);
     final arguments = service.buildArguments(

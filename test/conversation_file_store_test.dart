@@ -67,6 +67,7 @@ void main() {
     final messages =
         (document!['messages'] as List).cast<Map<String, Object?>>();
     expect(messages, hasLength(1));
+    expect(messages.single['id'], 'partial');
     expect(messages.single['body'], 'how to connect tp732 with macos');
   });
 

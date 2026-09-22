@@ -481,6 +481,7 @@ class CaptureDatabase {
     final messages = (document?['messages'] as List<Object?>? ?? const [])
         .whereType<Map<String, dynamic>>()
         .toList(growable: false);
+    final resetSentFallback = _newTurnAfterHoldingAndReply(messages);
     final newest =
         messages.lastWhere((message) => message['direction'] == 'incoming');
     final newestId = newest['id']?.toString() ?? '';
@@ -499,6 +500,10 @@ class CaptureDatabase {
     );
     final db = await database;
     await db.transaction((txn) async {
+      if (resetSentFallback) {
+        await txn.update('sla_fallbacks', {'state': 'completed'},
+            where: "user_id = ? AND state = 'sent'", whereArgs: [userId]);
+      }
       await txn.rawInsert('''INSERT INTO pending_customers(
         user_id, display_name, stable_key, newest_message_id, enqueued_at_ms, updated_at_ms)
         VALUES(?, ?, ?, ?, ?, ?)
@@ -711,7 +716,11 @@ class CaptureDatabase {
 
   int _answeredIndex(List<Map<String, dynamic>> messages, String? cursor) {
     if (cursor != null) {
-      return messages.indexWhere((message) => message['id'] == cursor);
+      final index = messages.indexWhere((message) => message['id'] == cursor);
+      if (index >= 0) return index;
+      // Older OCR versions could replace a bubble ID after it had become the
+      // answered cursor. Recover from the actual sent-reply boundary instead
+      // of treating the entire conversation as unanswered.
     }
     // Existing installations did not have a cursor. Their last delivered or
     // manual reply is the best available boundary until the next send. OCR
@@ -753,6 +762,15 @@ class CaptureDatabase {
   bool _isFinalOutgoing(Map<String, dynamic> message) =>
       message['direction'] == 'outgoing' && message['source'] != 'sla_fallback';
 
+  bool _newTurnAfterHoldingAndReply(List<Map<String, dynamic>> messages) {
+    final holding = messages
+        .lastIndexWhere((message) => message['source'] == 'sla_fallback');
+    final reply = messages.lastIndexWhere(_isFinalOutgoing);
+    final incoming = messages
+        .lastIndexWhere((message) => message['direction'] == 'incoming');
+    return holding >= 0 && holding < reply && reply < incoming;
+  }
+
   Future<void> _ensureSlaFallback({
     required String userId,
     required String messageId,
@@ -760,6 +778,14 @@ class CaptureDatabase {
   }) async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final document = await (await history).read(userId);
+    final messages = (document?['messages'] as List<Object?>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+    if (_newTurnAfterHoldingAndReply(messages)) {
+      await db.update('sla_fallbacks', {'state': 'completed'},
+          where: "user_id = ? AND state = 'sent'", whereArgs: [userId]);
+    }
     await db.rawInsert('''INSERT INTO sla_fallbacks(
       user_id,message_id,due_at_ms,state,sent_at_ms,updated_at_ms)
       VALUES(?,?,?,'pending',NULL,?)
@@ -807,6 +833,24 @@ class CaptureDatabase {
       orderBy: 'due_at_ms ASC',
     );
     return rows.map(SlaFallbackJob.fromRow).toList(growable: false);
+  }
+
+  /// An unread-only recovery may have already sent the customer's holding
+  /// message before OCR could create the normal pending SLA row. Treat that
+  /// verified send as the one holding message for this response window.
+  Future<void> acknowledgeUncapturedHolding(
+      {required String userId, required DateTime sentAt}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (await database).update(
+      'sla_fallbacks',
+      {
+        'state': 'sent',
+        'sent_at_ms': sentAt.millisecondsSinceEpoch,
+        'updated_at_ms': now,
+      },
+      where: "user_id = ? AND state IN ('pending','sending')",
+      whereArgs: [userId],
+    );
   }
 
   Future<bool> reserveSlaFallback({

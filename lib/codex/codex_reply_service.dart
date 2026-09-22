@@ -267,11 +267,14 @@ List<Map<String, dynamic>> customerBatchThroughMessage(
 }) {
   final end = messages.indexWhere((message) => message['id'] == endMessageId);
   if (end < 0) return const [];
-  final answered = answeredMessageId == null
-      ? messages.take(end + 1).toList().lastIndexWhere((message) =>
-          message['direction'] == 'outgoing' &&
-          message['source'] != 'sla_fallback')
+  final durableBoundary = answeredMessageId == null
+      ? -1
       : messages.indexWhere((message) => message['id'] == answeredMessageId);
+  final answered = durableBoundary >= 0
+      ? durableBoundary
+      : messages.take(end + 1).toList().lastIndexWhere((message) =>
+          message['direction'] == 'outgoing' &&
+          message['source'] != 'sla_fallback');
   if (answered >= end) return const [];
   return messages
       .skip(answered + 1)
