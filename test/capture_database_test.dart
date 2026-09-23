@@ -6,6 +6,121 @@ import 'package:jd_automation/storage/capture_database.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() {
+  test('same customer image in a later turn is stored again', () async {
+    final root = await Directory.systemTemp.createTemp('repeated_image_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final firstAt = DateTime.utc(2026, 9, 23, 3, 30);
+    const digest = 'same-image-bytes';
+    const fingerprint = '01317c7f7f3f0100';
+
+    CapturedConversation turn(DateTime sentAt) => CapturedConversation(
+          stableKey: 'customer:repeat-image',
+          customerName: 'repeat-image',
+          customerExternalId: 'repeat-image',
+          capturedAt: sentAt.add(const Duration(seconds: 2)),
+          messages: [
+            CapturedMessage(
+              stableId:
+                  'visible-image:$digest:${sentAt.microsecondsSinceEpoch}',
+              direction: 'incoming',
+              body: '[Customer sent an image; visible portion captured]',
+              sentAt: sentAt,
+              axPath: 'ocr:visible-image-region',
+              media: const [
+                CapturedMedia(
+                  type: 'image',
+                  path: '/tmp/repeated-image.png',
+                  captureSource: 'verified_window_crop',
+                  visualFingerprint: fingerprint,
+                ),
+              ],
+            ),
+          ],
+        );
+
+    expect(await database.saveCapture(turn(firstAt)), 1);
+    final secondAt = firstAt.add(const Duration(minutes: 15));
+    final store = await database.history;
+    expect(
+        await store.hasSimilarImageFingerprint(
+          'repeat-image',
+          fingerprint,
+          capturedAfter: secondAt,
+        ),
+        isFalse);
+    expect(await database.saveCapture(turn(secondAt)), 1);
+
+    final document = await store.read('repeat-image');
+    final incoming = (document!['messages'] as List<Object?>)
+        .whereType<Map<String, dynamic>>()
+        .where((message) => message['direction'] == 'incoming');
+    expect(incoming, hasLength(2));
+  });
+
+  test('captured message gives the durable SLA path sole holding ownership',
+      () async {
+    final root = await Directory.systemTemp.createTemp('sla_owner_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final receivedAt = DateTime.utc(2026, 9, 23, 3, 11, 43);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:jd-owner',
+      customerName: 'jd-owner',
+      customerExternalId: 'jd-owner',
+      capturedAt: receivedAt.add(const Duration(seconds: 4)),
+      messages: [
+        CapturedMessage(
+          stableId: 'incoming-owner-1',
+          direction: 'incoming',
+          body: 'hi',
+          sentAt: receivedAt,
+          axPath: 'test',
+        ),
+      ],
+    ));
+
+    expect(await database.hasActiveSlaFallback('jd-owner'), isTrue);
+  });
+
+  test('late OCR keeps the original unread fallback deadline', () async {
+    final root = await Directory.systemTemp.createTemp('unread_deadline_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final detectedAt = DateTime(2026, 9, 22, 10);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:jd-unread',
+      customerName: 'jd-unread',
+      customerExternalId: 'jd-unread',
+      capturedAt: detectedAt.add(const Duration(seconds: 23)),
+      messages: const [
+        CapturedMessage(
+          stableId: 'late-ocr-1',
+          direction: 'incoming',
+          body: '请帮我看一下',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    await database.capSlaFallbackDue(
+      userId: 'jd-unread',
+      dueAt: detectedAt.add(const Duration(seconds: 20)),
+    );
+    expect(
+      (await database.slaFallbackJob('jd-unread'))?.dueAt,
+      detectedAt.add(const Duration(seconds: 20)),
+    );
+  });
+
   test(
       'uncaptured holding counts as the single SLA fallback after OCR recovers',
       () async {

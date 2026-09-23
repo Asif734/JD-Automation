@@ -5,6 +5,136 @@ import 'package:jd_automation/capture/ocr_capture_extractor.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('JD clock uses China time even when the Mac is two hours behind', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1500,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.utc(2026, 9, 22, 8, 58, 52),
+      activeCustomerId: 'jd_customer',
+      observations: const [
+        OcrObservation(
+            text: 'jd_customer 16:57:08',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .20,
+            height: .02),
+        OcrObservation(
+            text: 'printer issue',
+            confidence: 1,
+            x: .22,
+            y: .44,
+            width: .14,
+            height: .02),
+      ],
+    );
+    final extraction = const OcrCaptureExtractor().analyze(inspection);
+    expect(
+        extraction.latestIncomingSentAt, DateTime.utc(2026, 9, 22, 8, 57, 8));
+    expect(extraction.capture!.messages.single.sentAt,
+        DateTime.utc(2026, 9, 22, 8, 57, 8));
+  });
+
+  test('composer controls are outside the verified transcript bottom', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1500,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.utc(2026, 9, 22, 8, 58, 52),
+      activeCustomerId: 'jd_customer',
+      chatBottom: .72,
+      observations: const [
+        OcrObservation(
+            text: 'jd_customer 16:57:08',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .20,
+            height: .02),
+        OcrObservation(
+            text: '口、Aa',
+            confidence: 1,
+            x: .26,
+            y: .75,
+            width: .06,
+            height: .02),
+      ],
+    );
+    final extraction = const OcrCaptureExtractor().analyze(inspection);
+    expect(extraction.capture, isNull);
+    expect(extraction.latestIncomingSenderKey, isNotNull);
+  });
+
+  test('text inside a confirmed media rectangle is not customer chat text', () {
+    const region =
+        OcrVisualRegion(x: .22, y: .43, width: .30, height: .22, confidence: 1);
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1500,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.utc(2026, 9, 22, 8, 58, 52),
+      activeCustomerId: 'jd_customer',
+      visualRegions: const [region],
+      observations: const [
+        OcrObservation(
+            text: 'jd_customer 16:57:08',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .20,
+            height: .02),
+        OcrObservation(
+            text: 'Aa', confidence: 1, x: .28, y: .53, width: .04, height: .02),
+      ],
+    );
+    final extraction = const OcrCaptureExtractor()
+        .analyze(inspection, excludedMediaRegions: const [region]);
+    expect(extraction.capture, isNull);
+  });
+
+  test('video play overlay glyphs do not become a customer message', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1500,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      windowId: 1,
+      capturedAt: DateTime(2026, 9, 22, 15, 58, 44),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 15:58:44',
+            confidence: .95,
+            x: .22,
+            y: .40,
+            width: .20,
+            height: .02),
+        OcrObservation(
+            text: 'の ¿ 回',
+            confidence: .75,
+            x: .35,
+            y: .53,
+            width: .08,
+            height: .02),
+      ],
+    );
+
+    final extraction = const OcrCaptureExtractor().analyze(inspection);
+    expect(extraction.capture, isNull);
+    expect(extraction.latestVisibleSenderIsIncoming, isTrue);
+    expect(extraction.latestIncomingHasText, isFalse);
+    expect(
+        extraction.latestIncomingSenderKey, 'jd_41aeec7741d05\u001f15:58:44');
+  });
+
   test('recovery accepts low-confidence body but not low-confidence sender',
       () {
     final inspection = OcrInspection(
@@ -425,7 +555,7 @@ void main() {
     expect(capture!.customerExternalId, 'stoneshishininger');
     expect(capture.messages.map((message) => message.body), ['3', 'hi']);
     expect(capture.messages.last.stableId, startsWith('ocr:'));
-    expect(capture.messages.last.sentAt, DateTime(2026, 8, 25, 9, 40, 20));
+    expect(capture.messages.last.sentAt, DateTime.utc(2026, 8, 25, 1, 40, 20));
   });
 
   test('preserves a time-only JD bubble timestamp on the capture date', () {
@@ -436,7 +566,7 @@ void main() {
       windowTitle: '咚咚融合工作台',
       recognizedText: '',
       windowId: 1,
-      capturedAt: DateTime(2026, 8, 31, 18, 18, 46),
+      capturedAt: DateTime.utc(2026, 8, 31, 10, 18, 46),
       activeCustomerId: 'jd_41aeec7741d05',
       observations: const [
         OcrObservation(
@@ -458,7 +588,7 @@ void main() {
 
     final message =
         const OcrCaptureExtractor().extract(inspection)!.messages.single;
-    expect(message.sentAt, DateTime(2026, 8, 31, 18, 18, 16));
+    expect(message.sentAt, DateTime.utc(2026, 8, 31, 10, 18, 16));
   });
 
   test('refuses a scan without a full customer identity', () {
@@ -1161,7 +1291,7 @@ void main() {
       imageHeight: 1640,
       windowTitle: '咚咚融合工作台',
       recognizedText: '',
-      capturedAt: DateTime(2026, 8, 31, 18, 46, 1),
+      capturedAt: DateTime.utc(2026, 8, 31, 10, 46, 1),
       activeCustomerId: 'jd_41aeec7741d05',
       observations: const [
         OcrObservation(
@@ -1192,7 +1322,7 @@ void main() {
         const OcrCaptureExtractor().extract(inspection)!.messages.single;
     expect(message.body,
         'i am not able to setup tp32 printer to my phone. check this');
-    expect(message.sentAt, DateTime(2026, 8, 31, 18, 45, 59));
+    expect(message.sentAt, DateTime.utc(2026, 8, 31, 10, 45, 59));
   });
 
   test('reconstructs multiline text even when sender and bubble x differ', () {

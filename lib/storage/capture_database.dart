@@ -825,6 +825,37 @@ class CaptureDatabase {
     return rows.isEmpty ? null : SlaFallbackJob.fromRow(rows.first);
   }
 
+  /// Once OCR has created a durable SLA row, that row exclusively owns the
+  /// one holding message for this customer turn. Unread-only recovery must
+  /// stop at this boundary instead of racing a second UI send.
+  Future<bool> hasActiveSlaFallback(String userId) async {
+    final rows = await (await database).query(
+      'sla_fallbacks',
+      columns: ['user_id'],
+      where:
+          "user_id = ? AND state IN ('pending','sending','reserved','sent','delivery_unknown')",
+      whereArgs: [userId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  /// OCR may finish after the unread sidebar first exposed this message.
+  /// Keep the original customer-visible 20-second deadline when that happens.
+  Future<void> capSlaFallbackDue({
+    required String userId,
+    required DateTime dueAt,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await (await database).rawUpdate('''UPDATE sla_fallbacks SET
+      due_at_ms=MIN(due_at_ms, ?), updated_at_ms=?
+      WHERE user_id=? AND state='pending' ''', [
+      dueAt.millisecondsSinceEpoch,
+      now,
+      userId,
+    ]);
+  }
+
   Future<List<SlaFallbackJob>> pendingSlaFallbackJobs() async {
     final db = await database;
     final rows = await db.query(

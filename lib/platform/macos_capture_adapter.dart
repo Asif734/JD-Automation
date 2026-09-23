@@ -356,6 +356,7 @@ class QianniuConversationRow {
     required this.unread,
     required this.unreadEvidence,
     required this.evidenceAvailable,
+    this.unreadAgeSeconds,
   });
 
   factory QianniuConversationRow.fromMap(Map<Object?, Object?> value) =>
@@ -364,12 +365,16 @@ class QianniuConversationRow {
         unread: value['unread'] == true,
         unreadEvidence: (value['unreadEvidence'] as num?)?.toInt() ?? 0,
         evidenceAvailable: value['evidenceAvailable'] == true,
+        unreadAgeSeconds: (value['unreadAgeSeconds'] as num?)?.toInt(),
       );
 
   final String customer;
   final bool unread;
   final int unreadEvidence;
   final bool evidenceAvailable;
+
+  /// Elapsed time shown by JD's red unread badge, when confidently readable.
+  final int? unreadAgeSeconds;
 }
 
 class OcrObservation {
@@ -414,6 +419,7 @@ class OcrInspection {
     this.ocrEngine = 'unknown',
     this.chatLeft,
     this.chatRight,
+    this.chatBottom,
   });
 
   factory OcrInspection.fromMap(Map<String, Object?> value) {
@@ -434,6 +440,7 @@ class OcrInspection {
       ocrEngine: value['ocrEngine'] as String? ?? 'unknown',
       chatLeft: (chatRegion?['left'] as num?)?.toDouble(),
       chatRight: (chatRegion?['right'] as num?)?.toDouble(),
+      chatBottom: (chatRegion?['bottom'] as num?)?.toDouble(),
       observations: rawObservations
           .whereType<Map<Object?, Object?>>()
           .map(OcrObservation.fromMap)
@@ -458,6 +465,7 @@ class OcrInspection {
   final String ocrEngine;
   final double? chatLeft;
   final double? chatRight;
+  final double? chatBottom;
 }
 
 class OcrVisualRegion {

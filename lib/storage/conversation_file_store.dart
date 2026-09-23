@@ -220,13 +220,22 @@ class ConversationFileStore {
       });
 
   Future<bool> hasSimilarImageFingerprint(String userId, String fingerprint,
-      {int maximumDistance = 8, Set<String>? captureSources}) async {
+      {int maximumDistance = 8,
+      Set<String>? captureSources,
+      DateTime? capturedAfter}) async {
     if (fingerprint.isEmpty) return false;
     final target = BigInt.tryParse(fingerprint, radix: 16);
     if (target == null) return false;
     final document = await read(userId);
     final messages = document?['messages'] as List<Object?>? ?? const [];
     for (final message in messages.whereType<Map<String, dynamic>>()) {
+      if (capturedAfter != null) {
+        final capturedAt =
+            DateTime.tryParse(message['captured_at']?.toString() ?? '');
+        if (capturedAt == null || capturedAt.isBefore(capturedAfter)) {
+          continue;
+        }
+      }
       final mediaItems = message['media'] as List<Object?>? ?? const [];
       for (final media in mediaItems.whereType<Map<String, dynamic>>()) {
         if (captureSources != null &&

@@ -1432,11 +1432,20 @@ ${jsonEncode({
         r'\b(?:the|this|attached) (?:video|image|photo|frame)(?:s)?\s+(?:shows?|contains?|depicts?|does not show)|\bit shows?\s+(?:a|an|the)\b|(?:视频|图片|照片|画面)(?:显示|展示|里面有|中有)',
         caseSensitive: false,
       ).hasMatch(draft.reply);
-      if (mediaInventoryDisclosure && !explicitVisualQuestion) {
+      final usefulVisualNextStep = RegExp(
+        r'\b(?:please|send|show|photograph|take (?:a|another) (?:photo|picture)|check|confirm|tell me)\b|请|麻烦|重新发送|再发|重拍|拍(?:一张|清楚|一下)|告诉我|确认',
+        caseSensitive: false,
+      ).hasMatch(draft.reply);
+      if (mediaInventoryDisclosure &&
+          !explicitVisualQuestion &&
+          !usefulVisualNextStep) {
         final mediaOnlyTurn = latestCustomerText.startsWith('[Customer sent');
+        final currentMediaIsImage =
+            latestCustomerText.startsWith('[Customer sent an image');
+        final mediaName = currentMediaIsImage ? '图片' : '视频';
         raw['reply'] = mediaOnlyTurn
-            ? '我已收到您发来的视频，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
-            : '我已找到您发来的视频，但目前还无法准确确认产品型号。请将机器型号标签靠近镜头停留一下，我再为您核对。';
+            ? '我已收到您发来的$mediaName，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
+            : '我已找到您发来的$mediaName，但目前还无法准确确认产品型号。请将机器型号标签拍清楚一些，我再为您核对。';
       }
       final privateDisclosure = RegExp(
         r'\b(?:ai|artificial intelligence|language model|chatbot|robot|codex|openai|prompt|retrieval|dataset|image analysis|video analysis|frame analysis|ocr|transcript|filename|confidence score)\b|人工智能|AI助手|机器人|自动客服|语言模型|AI模型|提示词|检索|数据集|图片分析|视频分析|画面分析|分析报告|语音转写|文件名|置信度',

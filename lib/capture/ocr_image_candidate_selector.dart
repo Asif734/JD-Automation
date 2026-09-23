@@ -10,9 +10,11 @@ class OcrImageCandidateSelector {
     OcrInspection inspection,
     String customer, {
     bool allowUnlabeledLatestImage = false,
+    bool includeTextDense = false,
   }) {
     final left = inspection.chatLeft ?? .15;
     final right = inspection.chatRight ?? .68;
+    final bottom = inspection.chatBottom ?? .90;
     final senderLabels = inspection.observations
         .where((item) =>
             item.x + item.width / 2 >= left &&
@@ -28,11 +30,13 @@ class OcrImageCandidateSelector {
           index + 1 < senderLabels.length ? senderLabels[index + 1].y : .90;
       final matches = inspection.visualRegions
           .where((region) => _validGeometry(region, left, right))
-          .where((region) => !_isTextDense(region, inspection.observations))
+          .where((region) =>
+              includeTextDense || !isTextDense(region, inspection.observations))
           .where((region) =>
               label.y <= region.y &&
               region.y - label.y <= .13 &&
-              region.y + region.height < nextSenderY - .002)
+              region.y + region.height < nextSenderY - .002 &&
+              region.y + region.height <= bottom)
           .toList()
         ..sort((left, right) =>
             (right.width * right.height).compareTo(left.width * left.height));
@@ -42,13 +46,16 @@ class OcrImageCandidateSelector {
     if (selected.isEmpty && allowUnlabeledLatestImage && senderLabels.isEmpty) {
       final unlabeled = inspection.visualRegions
           .where((region) => _validGeometry(region, left, right))
-          .where((region) => !_isTextDense(region, inspection.observations))
+          .where((region) =>
+              includeTextDense || !isTextDense(region, inspection.observations))
           .where((region) =>
               region.x >= left &&
-              region.x < right &&
+              // Customer media is left aligned. An unlabeled rectangle on the
+              // seller side cannot be safely attributed to the customer.
+              region.x <= left + (right - left) * .25 &&
               region.x + region.width <= right &&
               region.width >= .12 &&
-              region.width <= .38 &&
+              region.width <= .60 &&
               region.height >= .12)
           .toList();
       final outer = unlabeled.where((candidate) {
@@ -73,6 +80,59 @@ class OcrImageCandidateSelector {
     return selected;
   }
 
+  /// Last-resort screenshot region for an incoming block when Vision did not
+  /// emit a rectangle. This is bounded by sender labels, stays on the customer
+  /// side, and rejects blocks containing ordinary message text.
+  OcrVisualRegion? fallbackLatestCustomerBlock(
+      OcrInspection inspection, String customer) {
+    final left = inspection.chatLeft ?? .15;
+    final right = inspection.chatRight ?? .68;
+    final bottom = inspection.chatBottom ?? .90;
+    final labels = inspection.observations
+        .where((item) =>
+            item.x + item.width / 2 >= left &&
+            item.x + item.width / 2 < right &&
+            (_isCustomer(item.text, customer) || _isSeller(item.text)))
+        .toList()
+      ..sort((a, b) => a.y.compareTo(b.y));
+
+    for (var index = labels.length - 1; index >= 0; index--) {
+      final label = labels[index];
+      if (!_isCustomer(label.text, customer)) continue;
+      final start = label.y + label.height + .004;
+      final end =
+          index + 1 < labels.length ? labels[index + 1].y - .004 : bottom;
+      final height = end - start;
+      if (height < .07) continue;
+      final width = (right - left).clamp(.12, .42).toDouble();
+      final candidate = OcrVisualRegion(
+        x: left,
+        y: start,
+        width: width,
+        height: height.clamp(.07, .60).toDouble(),
+        confidence: 0,
+      );
+      final bodyCharacters = inspection.observations.where((item) {
+        final centerX = item.x + item.width / 2;
+        final centerY = item.y + item.height / 2;
+        if (centerX < candidate.x ||
+            centerX > candidate.x + candidate.width ||
+            centerY < candidate.y ||
+            centerY > candidate.y + candidate.height) {
+          return false;
+        }
+        final text = item.text.trim();
+        return !RegExp(r'^\d{1,2}:\d{2}(?::\d{2})?$').hasMatch(text) &&
+            !text.contains('格志打印机');
+      }).fold<int>(
+          0,
+          (total, item) =>
+              total + item.text.replaceAll(RegExp(r'\s+'), '').length);
+      if (bodyCharacters < 4) return candidate;
+    }
+    return null;
+  }
+
   bool _validGeometry(OcrVisualRegion region, double left, double right) =>
       region.x >= left &&
       region.x + region.width <= right &&
@@ -80,10 +140,13 @@ class OcrImageCandidateSelector {
       region.y + region.height <= .90 &&
       region.width >= .035 &&
       region.height >= .065 &&
-      region.width <= .48 &&
+      // JD's video previews can occupy about half of the captured window.
+      // Rejecting them here prevents both capture and the unanswered-message
+      // recovery path from ever seeing the new customer turn.
+      region.width <= .60 &&
       region.height <= .76;
 
-  bool _isTextDense(OcrVisualRegion region, List<OcrObservation> observations) {
+  bool isTextDense(OcrVisualRegion region, List<OcrObservation> observations) {
     final contained = observations.where((text) {
       final centerX = text.x + text.width / 2;
       final centerY = text.y + text.height / 2;

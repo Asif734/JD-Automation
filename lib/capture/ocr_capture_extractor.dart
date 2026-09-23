@@ -27,7 +27,8 @@ class OcrCaptureExtractor {
   CapturedConversation? extract(OcrInspection inspection) =>
       analyze(inspection).capture;
 
-  OcrExtractionAttempt analyze(OcrInspection inspection) {
+  OcrExtractionAttempt analyze(OcrInspection inspection,
+      {List<OcrVisualRegion> excludedMediaRegions = const []}) {
     final observations = inspection.observations
         .where((item) =>
             item.confidence >= bodyConfidenceThreshold &&
@@ -53,6 +54,11 @@ class OcrCaptureExtractor {
     final chatLeft = hasVerifiedChatRegion ? verifiedChatLeft : _chatBodyLeft;
     final chatRight =
         hasVerifiedChatRegion ? verifiedChatRight : _chatBodyRight;
+    final chatBottom = inspection.chatBottom != null &&
+            inspection.chatBottom! > 0.25 &&
+            inspection.chatBottom! <= 0.95
+        ? inspection.chatBottom!
+        : 0.82;
 
     final messageLabels = observations
         .where((item) =>
@@ -62,7 +68,7 @@ class OcrCaptureExtractor {
             item.x + item.width / 2 >= chatLeft &&
             item.x + item.width / 2 < chatRight &&
             item.y >= 0.18 &&
-            item.y < 0.82)
+            item.y < chatBottom)
         .map((item) => _MessageLabel(
               observation: item,
               direction: _sameIdentity(item.text, customerId)
@@ -85,6 +91,22 @@ class OcrCaptureExtractor {
         .toList(growable: false);
     final latestVisibleSenderIsIncoming =
         messageLabels.last.direction == 'incoming';
+    final latestIncomingLabel = incomingLabels.lastOrNull?.observation;
+    final latestIncomingClock = latestIncomingLabel == null
+        ? null
+        : _timestamp.firstMatch(latestIncomingLabel.text)?.group(0) ??
+            observations
+                .where((item) =>
+                    (item.y - latestIncomingLabel.y).abs() < 0.018 &&
+                    item.x > latestIncomingLabel.x &&
+                    _timestamp.hasMatch(item.text))
+                .map((item) => _timestamp.firstMatch(item.text)!.group(0))
+                .firstOrNull;
+    final latestIncomingSenderKey = latestIncomingClock == null
+        ? null
+        : '$customerId\u001f$latestIncomingClock';
+    final latestIncomingSentAt =
+        _parseTimestamp(latestIncomingClock, inspection.capturedAt);
     final sender = incomingLabels.isEmpty
         ? messageLabels.last.observation
         : incomingLabels.last.observation;
@@ -104,14 +126,22 @@ class OcrCaptureExtractor {
           // JD can leave a larger vertical gap before the newest bottom
           // bubble. The next sender safely bounds older messages; the final
           // sender may use the remaining verified chat area above composer.
-          : 0.82;
+          : chatBottom;
       final bodies = observations.where((item) {
         final text = item.text.trim();
         if (item.y <= currentSender.y + 0.006 || item.y >= bottom) {
           return false;
         }
         final centerX = item.x + item.width / 2;
+        final centerY = item.y + item.height / 2;
         if (centerX < chatLeft || centerX >= chatRight) return false;
+        if (excludedMediaRegions.any((region) =>
+            centerX >= region.x &&
+            centerX <= region.x + region.width &&
+            centerY >= region.y &&
+            centerY <= region.y + region.height)) {
+          return false;
+        }
         return !_isMetadata(text, customerId);
       }).toList()
         ..sort((left, right) {
@@ -159,7 +189,9 @@ class OcrCaptureExtractor {
           copyTarget: fallbackCopyTarget,
           transferNoticeVisible: transferNoticeVisible,
           transferNoticeKey: transferNoticeKey,
-          latestVisibleSenderIsIncoming: latestVisibleSenderIsIncoming);
+          latestVisibleSenderIsIncoming: latestVisibleSenderIsIncoming,
+          latestIncomingSenderKey: latestIncomingSenderKey,
+          latestIncomingSentAt: latestIncomingSentAt);
     }
     final latestBody = latestBodyObservation;
     final latestIncomingSender =
@@ -193,6 +225,8 @@ class OcrCaptureExtractor {
       transferNoticeKey: transferNoticeKey,
       latestIncomingHasText: latestIncomingHasText,
       latestVisibleSenderIsIncoming: latestVisibleSenderIsIncoming,
+      latestIncomingSenderKey: latestIncomingSenderKey,
+      latestIncomingSentAt: latestIncomingSentAt,
     );
   }
 
@@ -261,6 +295,17 @@ class OcrCaptureExtractor {
     // tiny strings such as `◎ 回`, `g 回`, or `•`. These contain no customer
     // language and must leave the newest turn image-only.
     if (RegExp(r'^(?:[gG]\s*)?[◎◉○口回□▣•·.\s]+$').hasMatch(cleaned)) {
+      return '';
+    }
+    // A video play overlay is sometimes recognized as a tiny mixture of
+    // Japanese kana, punctuation, and one JD control glyph (for example
+    // `の ¿ 回`). It is not a customer text message. Do not let it close the
+    // unread recovery before the video itself has been captured.
+    final readableCharacters =
+        RegExp(r'[A-Za-z0-9\u3400-\u9fff]').allMatches(cleaned).length;
+    if (readableCharacters <= 1 &&
+        RegExp(r'[◎◉○口回□▣•·¿の]').hasMatch(cleaned) &&
+        RegExp(r'[¿の◎◉○□▣•·]').hasMatch(cleaned)) {
       return '';
     }
     return cleaned;
@@ -420,28 +465,33 @@ class OcrCaptureExtractor {
         .map((match) => int.parse(match.group(0)!))
         .toList(growable: false);
     if (numbers.length < 2) return null;
-    final localCapture = capturedAt.toLocal();
+    // JD displays chat clocks in China Standard Time, regardless of the
+    // operator Mac's timezone. A clock-only label must be interpreted against
+    // the JD calendar day, not DateTime.toLocal() on this machine.
+    const jdOffset = Duration(hours: 8);
+    final capturedUtc = capturedAt.toUtc();
+    final jdCapture = capturedUtc.add(jdOffset);
     late DateTime result;
     if (numbers.length >= 5 && numbers.first >= 2000) {
-      result = DateTime(
+      result = DateTime.utc(
         numbers[0],
         numbers[1],
         numbers[2],
         numbers[3],
         numbers[4],
         numbers.length >= 6 ? numbers[5] : 0,
-      );
+      ).subtract(jdOffset);
     } else {
-      result = DateTime(
-        localCapture.year,
-        localCapture.month,
-        localCapture.day,
+      result = DateTime.utc(
+        jdCapture.year,
+        jdCapture.month,
+        jdCapture.day,
         numbers[0],
         numbers[1],
         numbers.length >= 3 ? numbers[2] : 0,
-      );
+      ).subtract(jdOffset);
       // A scan just after midnight can still show a message from yesterday.
-      if (result.difference(localCapture) > const Duration(hours: 1)) {
+      if (result.difference(capturedUtc) > const Duration(minutes: 1)) {
         result = result.subtract(const Duration(days: 1));
       }
     }
@@ -479,6 +529,8 @@ class OcrExtractionAttempt {
     this.transferNoticeKey,
     this.latestIncomingHasText = false,
     this.latestVisibleSenderIsIncoming = false,
+    this.latestIncomingSenderKey,
+    this.latestIncomingSentAt,
   });
 
   final String reason;
@@ -489,6 +541,10 @@ class OcrExtractionAttempt {
   final String? transferNoticeKey;
   final bool latestIncomingHasText;
   final bool latestVisibleSenderIsIncoming;
+
+  /// Stable across scans even when a media-only bubble has no OCR body.
+  final String? latestIncomingSenderKey;
+  final DateTime? latestIncomingSentAt;
 }
 
 class OcrCopyTarget {

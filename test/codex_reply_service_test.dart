@@ -1500,6 +1500,34 @@ void main() {
     expect(guarded.reply.toLowerCase(), isNot(contains('monitor')));
   });
 
+  test('customer-facing guard keeps a still image classified as an image', () {
+    final generated = service.parseResponse('''{
+      "reply":"图片显示的是一朵白色的花，没有看到M880UT或色带仓。请重新拍摄色带盒和打开的色带仓。",
+      "decision":"ask_clarification",
+      "confidence":0.9,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[{"path":"/data/flower.png","description":"A white flower is visible."}],
+      "human_review_required":false,
+      "reason":null
+    }''', approvedImagePaths: {'/data/flower.png'});
+
+    final guarded = service.enforceCustomerFacingPolicy(
+      generated,
+      '[Customer sent an image; visible portion captured]',
+    );
+
+    expect(guarded.reply, contains('请重新拍摄色带盒'));
+    expect(guarded.reply, contains('M880UT'));
+    expect(guarded.reply, isNot(contains('视频')));
+  });
+
   test('customer-facing guard removes unrequested JD purchase pressure', () {
     final generated = service.parseResponse('''{
       "reply":"Great! Please make sure the JD purchase option includes power backup before placing your order.",
