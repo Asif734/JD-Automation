@@ -77,6 +77,7 @@ privacy: "本文件不保留买家姓名、电话、地址、完整订单号等�
 
 ### 2.3 iPhone / iPad / 平板
 
+- 官方 `速印通/Grozziie` 手机 App 提供 Android 和 iOS/iPhone 版本；不同市场的下载入口可能不同，中国市场 Android 可用官方安装包，iPhone 可在 App Store 搜索速印通。只要资料已明确确认具体型号或 SKU 支持该 App，就可直接回答该型号或 SKU 支持 Android 和 iOS/iPhone；不能用 App 可下载这一事实反向推断所有打印机都支持 App。
 - iPhone 和鸿蒙在 App Store/应用市场搜索 `速印通`，认准 G 图标。
 - 手机连接默认优先使用蓝牙；客户明确要求 WiFi 时再提供 WiFi 教程。iPhone 同样可通过速印通进行蓝牙打印，连接和使用流程与 Android 相似。
 - 表内记录：普通机型和安卓/鸿蒙平板不支持；iPad/苹果平板是否支持要结合机型和 WiFi 使用方式判断，不要一口咬定。

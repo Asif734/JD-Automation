@@ -377,6 +377,12 @@ class LocalKnowledgeRetriever {
       (r'\bconnect(?:ion|ing)?\b', '连接 安装'),
       (r'\bsetup\b', '设置 安装'),
       (r'\bmac(?:os|book)?\b', '苹果 macOS USB'),
+      (r'\bandroid\b', '安卓 手机系统'),
+      (r'\biphone\b|\bios\b', '苹果手机 手机系统'),
+      (r'\bphones?\b|\bmobile\b', '手机 手机系统'),
+      (r'\bapps?\b|\bgro+z+i+e+\b|\bsuyintong\b', '速印通 APP'),
+      (r'\bcompatib(?:le|ility)\b|\bwork(?:s)? with\b', '兼容 支持'),
+      (r'\bsupport(?:s|ed|ing)?\b', '支持'),
     ]) {
       if (RegExp(pattern).hasMatch(lower)) terms.add(translation);
     }

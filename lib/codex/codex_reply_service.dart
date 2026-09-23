@@ -153,6 +153,39 @@ bool hasProductFeatureIntent(String text) => RegExp(
       caseSensitive: false,
     ).hasMatch(text);
 
+bool asksForMediaDescription(String text) => RegExp(
+      r'\b(?:describe|explain)\b[^.!?]{0,30}\b(?:image|photo|picture|video|frame)\b|\bwhat\s+(?:is|are)\s+in\s+(?:this|the)\s+(?:image|photo|picture|video)\b|\bwhat\s+does\s+(?:this|the)\s+(?:image|photo|picture|video)\s+show\b|\bwhat\s+do\s+you\s+see\b|(?:描述|说明|解释)[^。！？]{0,20}(?:图片|照片|视频|画面)|(?:图片|照片|视频|画面)(?:里|中)[^。！？]{0,20}(?:是什么|有什么|显示什么|看见什么)|(?:这|那)(?:张)?(?:图片|照片|视频|画面)?是什么|看到了什么',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+/// Extracts the concrete capability being checked so the reply prompt can
+/// distinguish an unsupported claim from a field that the catalog simply
+/// does not document. These values are retrieval labels, not customer copy.
+Set<String> requestedProductCapabilities(String text) {
+  final capabilities = <String>{};
+  final rules = <(RegExp, String)>[
+    (RegExp(r'\bandroid\b|安卓', caseSensitive: false), 'android'),
+    (RegExp(r'\biphone\b|\bios\b|苹果手机', caseSensitive: false), 'ios'),
+    (
+      RegExp(r'\bapps?\b|\bgro+z+i+e+\b|\bsuyintong\b|速印通',
+          caseSensitive: false),
+      'mobile_app'
+    ),
+    (RegExp(r'\bbluetooth\b|蓝牙', caseSensitive: false), 'bluetooth'),
+    (RegExp(r'\bwi-?fi\b|无线网络', caseSensitive: false), 'wifi'),
+    (RegExp(r'\bmac(?:os|book)?\b|苹果电脑', caseSensitive: false), 'macos'),
+    (
+      RegExp(r'\bpaper width\b|\bprint width\b|纸宽|打印宽度', caseSensitive: false),
+      'paper_width'
+    ),
+    (RegExp(r'\bresolution\b|\bdpi\b|分辨率', caseSensitive: false), 'resolution'),
+  ];
+  for (final (pattern, label) in rules) {
+    if (pattern.hasMatch(text)) capabilities.add(label);
+  }
+  return capabilities;
+}
+
 bool hasProductContext(String text) => RegExp(
       r'\b(product|model|printer|attendance machine|card machine|paper card|label|receipt)\b|产品|型号|打印机|考勤机|打卡机|纸卡|标签|票据',
       caseSensitive: false,
@@ -1011,6 +1044,9 @@ class CodexReplyService {
     final productFeatureRequested = !technicalFollowUp &&
         activeModels.isNotEmpty &&
         hasProductFeatureIntent(currentTurnText);
+    final requestedCapabilities = productFeatureRequested
+        ? requestedProductCapabilities(currentTurnText)
+        : const <String>{};
     final technicalSupportRequested = technicalFollowUp;
     final replyRoute = selectReplyRoute(
       currentTurnText: currentTurnText,
@@ -1041,6 +1077,8 @@ class CodexReplyService {
         }
       }
     }
+    final mediaDescriptionRequested =
+        images.isNotEmpty && asksForMediaDescription(currentTurnText);
     // Text-only greetings may use the deterministic local router. Any buyer
     // image must reach Codex so the visual content is actually inspected.
     if (images.isEmpty) {
@@ -1123,6 +1161,7 @@ class CodexReplyService {
       'attached_image_paths': images.toList(growable: false),
       'attached_video_frame_paths': videoFrames.toList(growable: false),
       'image_analysis_required': images.isNotEmpty,
+      'customer_requested_media_description': mediaDescriptionRequested,
       'reply_route': replyRoute,
       'product_catalog_requested': productCatalogRequested,
       'product_feature_requested': productFeatureRequested,
@@ -1130,6 +1169,9 @@ class CodexReplyService {
       'product_list_requested': productListRequested,
       if (productFeatureRequested)
         'verified_model_catalog_rows': verifiedModelFacts,
+      if (productFeatureRequested)
+        'requested_product_capabilities':
+            requestedCapabilities.toList(growable: false),
       if (productRecommendationCatalog != null)
         'product_model_feature_catalog': {
           'record_id': 'product_model_feature_catalog',
@@ -1139,12 +1181,12 @@ class CodexReplyService {
       'clarification_questions_already_asked': clarificationCount,
       'clarification_questions_remaining': clarificationBudget,
       'requirements': [
-        'Be polite and concise. Answer every unanswered question in target_customer_batch in one reply, using the customer’s latest language. Treat attached images and video frames as part of that batch.',
+        'Understand the customer’s intent, product, symptom, and desired result. Answer every unresolved question in target_customer_batch in one concise reply using the customer’s latest language. Give the answer or next action first.',
         'The target_customer_batch is the frozen unanswered work. A seller reply appearing later in the stored timeline may belong to an earlier batch; it does not answer this target batch.',
         'Speak only as a JD store customer service agent. Never mention or imply AI, Codex, automation, a model, a prompt, retrieval, a dataset, or an internal tool. If asked about your identity, say that you are a customer service agent.',
         'This service applies only to the JD store and JD orders. Do not use, mention, link to, or advise about Tmall, Taobao, Pinduoduo, Douyin, or another marketplace. If asked about another marketplace, state briefly that this account supports only the JD store and continue with JD assistance.',
         'JD is the service context, not a sales phrase. Do not push the customer to buy from JD, mention a "JD purchase option", or append reminders about placing an order. Mention JD purchasing, stock, order status, or an exact JD SKU only when the customer asks about it or when that check is essential. Recommend products naturally from the customer’s requirements.',
-        'Write like a natural, gentle, technically experienced customer service agent. Avoid scripted repetition, sales pressure, and unnecessary handoff language.',
+        'Write like a real, gentle, technically experienced customer service agent. Be short, specific, and direct. Do not repeat the customer’s message, use generic introductions, stack unrelated possibilities, or ask a question whose answer will not change the next step.',
         'All fixed greetings, holding messages, fallback responses, and default replies are in Chinese, even if the customer wrote in English. For a substantive answer, use the customer’s latest language. In customer-facing wording say "customer service colleague" or "my colleague", never "human agent". Never claim a review ticket was submitted or a colleague arranged unless this turn actually requires human review.',
         'Classify human-transfer intent for each incoming message in target_customer_batch. Put the exact message IDs of explicit requests to speak with a customer service colleague in human_transfer_request_message_ids; use [] when there are none. Interpret conversational follow-ups such as "no, please transfer" and common misspellings by meaning, but do not count a statement that refuses transfer. Do not decide whether a request is first or repeated; the application maintains the ten-minute counter.',
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
@@ -1169,19 +1211,28 @@ class CodexReplyService {
           'The customer wants a product suggestion. Use product_model_feature_catalog as the primary source and evaluate every stated hard requirement against one confirmed model/SKU. If one model fully matches, recommend it directly with concise confirmed reasons. If several fully match, briefly state the confirmed options and ask one decisive preference only when needed to distinguish them. If none fully matches, say that no specific model can currently be confirmed and identify the missing field. Never combine capabilities from different models/SKUs, never turn "unconfirmed" into support or non-support, and never invent a link, price, stock, size, connection method, or compatibility. Include product_model_feature_catalog in used_record_ids.',
         if (productFeatureRequested)
           'The customer asks about features of ${activeModels.join(', ')}. Use verified_model_catalog_rows as primary evidence. State the confirmed model facts that answer the question, including confirmed paper width, interface, resolution or system support where those facts appear. A grouped table row applies to the named model in that row. Do not describe a documented fact as unknown or ask for a product link to verify it. Keep SKU-dependent or undocumented facts separate and label only those as unconfirmed. Do not infer Android or iOS support from Bluetooth. Include product_model_feature_catalog in used_record_ids.',
+        if (productFeatureRequested &&
+            requestedCapabilities.contains('mobile_app'))
+          'When supplied evidence explicitly confirms that the named model or SKU supports the official Grozziie/速印通 mobile app, treat that confirmed app capability as Android and iOS/iPhone support and answer it directly. App-store availability establishes the app platforms but does not by itself establish that an otherwise unverified printer model supports the app.',
+        if (productFeatureRequested)
+          'Answer the requested_product_capabilities directly in the first sentence. If the supplied evidence does not confirm a requested capability for every named model/SKU, say that the exact versions are not yet confirmed and ask only for the exact purchase option or SKU shown in the order. Do not define the app, add general product background, list unrelated specifications, or repeat every model name unless the models have different confirmed results.',
         if (productListRequested)
           'The customer asked for a model list. Give the complete r21 Current model list for the requested product category from product_model_feature_catalog before asking about preferences. Current is a catalog status, not a stock promise. If the customer also specified hard requirements, clearly separate the full category list from models verified to meet every requirement; never imply unverified models are compatible.',
         if (technicalSupportRequested)
-          'This is a technical-support request. Work through all matching retrieved records, including example questions, reply templates, source chunks, and Markdown evidence, before concluding that no solution exists. Then use safe reliable general technical knowledge only as a backup. Give the customer concrete steps in a sensible order and continue troubleshooting one step at a time. Human review is allowed only after the available safe checks and solutions have been exhausted, or when physical repair, account/order authority, or an unavailable official file is required.',
+          'This is technical support. Infer the most likely cause from the exact symptoms and evidence, then give the best supported solution in a sensible order. Work through all matching records before concluding that no solution exists. Ask one decisive question only when it changes the next step. Request review only after safe solutions are exhausted or repair, account/order authority, or an unavailable official file is required.',
         if (technicalSupportRequested && secondInvestigation)
           'This is the required second investigation. Re-check every retrieved record and example against the exact symptoms, reconsider safe alternative causes and steps, and produce a concrete solution if any reliable path remains. Request review only after this second pass still cannot produce a safe next step.',
         if (images.isNotEmpty)
-          'Inspect attached customer images and use only clearly visible evidence.',
+          'Inspect attached customer media privately and use only clearly visible evidence to understand the problem and choose the answer or next action.',
         if (images.isNotEmpty)
           'Return one concise image_descriptions item per image using its exact path.',
         if (videoFrames.isNotEmpty)
-          'The attached video-frame paths are chronological one-second samples from one customer video. Analyze them together as a sequence, describe only visible changes or actions, and do not claim unseen events between frames.',
-        'Photo descriptions, video-frame findings, audio transcripts, OCR, filenames, confidence, extraction details, and analysis reports are internal working evidence. Never expose them as a report or mention the analysis process. State only the useful customer-facing observation or next action in natural customer-service language.',
+          'The attached video-frame paths are chronological one-second samples from one customer video. Analyze them together privately and do not claim unseen events between frames.',
+        if (images.isNotEmpty && !mediaDescriptionRequested)
+          'The customer did not explicitly ask for a media description. Do not describe, summarize, inventory, or announce the image/video contents, and do not say that you viewed or analyzed them. Use the visual evidence silently to give the likely cause, solution, or next troubleshooting step.',
+        if (images.isNotEmpty && mediaDescriptionRequested)
+          'The customer explicitly asked what the media shows. Briefly state only the relevant visible observation, then give the useful answer or next action.',
+        'Media descriptions, video-frame findings, audio transcripts, OCR, filenames, confidence, extraction details, and analysis reports are internal working evidence. Never expose these internal artifacts or the analysis process.',
         'For a transferred or newly opened conversation, use the recent conversation to answer the most recent unresolved customer request. Welcome the customer only when no recent request needs an answer.',
         'Prioritize the latest message. Use retrieved knowledge first, then safe reliable reasoning. Human review is the last step when the latest request asks for it or has no reliable answer after the required technical investigation; old handoffs do not block new questions. Any review acknowledgement must sound like normal customer service, preserve the work already completed, and avoid saying that the conversation was forwarded or transferred.',
         'Return only reply.schema.json output, keep auto_send_allowed false, and leave attachments empty.',
@@ -1424,28 +1475,24 @@ ${jsonEncode({
     } else if (unsupportedPlatformQuestion) {
       raw['reply'] = LocalReplyRouter.jdOnlyChinese;
     } else {
-      final explicitVisualQuestion = RegExp(
-        r'\b(?:what|which) (?:can you |do you )?(?:see|notice|find)|\b(?:can you see|is .* visible|what is (?:in|on) (?:the|this) (?:video|image|photo))\b|你(?:能|可以)?看[到见].*(?:什么|吗)|图片里有什么|视频里有什么|能看清吗',
-        caseSensitive: false,
-      ).hasMatch(latestCustomerText);
+      final explicitVisualQuestion =
+          asksForMediaDescription(latestCustomerText);
       final mediaInventoryDisclosure = RegExp(
-        r'\b(?:the|this|attached) (?:video|image|photo|frame)(?:s)?\s+(?:shows?|contains?|depicts?|does not show)|\bit shows?\s+(?:a|an|the)\b|(?:视频|图片|照片|画面)(?:显示|展示|里面有|中有)',
+        r'\b(?:the|this|attached) (?:video|image|photo|frame)(?:s)?\s+(?:shows?|contains?|depicts?|does not show)|\bit shows?\s+(?:a|an|the)\b|\b[^.!?]{0,50}\b(?:is|are|isn\x27t|aren\x27t) visible\b|(?:视频|图片|照片|画面)(?:显示|展示|里面有|中有)|没有看[到见]',
         caseSensitive: false,
-      ).hasMatch(draft.reply);
-      final usefulVisualNextStep = RegExp(
-        r'\b(?:please|send|show|photograph|take (?:a|another) (?:photo|picture)|check|confirm|tell me)\b|请|麻烦|重新发送|再发|重拍|拍(?:一张|清楚|一下)|告诉我|确认',
-        caseSensitive: false,
-      ).hasMatch(draft.reply);
-      if (mediaInventoryDisclosure &&
-          !explicitVisualQuestion &&
-          !usefulVisualNextStep) {
-        final mediaOnlyTurn = latestCustomerText.startsWith('[Customer sent');
-        final currentMediaIsImage =
-            latestCustomerText.startsWith('[Customer sent an image');
-        final mediaName = currentMediaIsImage ? '图片' : '视频';
-        raw['reply'] = mediaOnlyTurn
-            ? '我已收到您发来的$mediaName，正在结合产品信息核对。请告诉我您希望重点确认的型号或问题。'
-            : '我已找到您发来的$mediaName，但目前还无法准确确认产品型号。请将机器型号标签拍清楚一些，我再为您核对。';
+      );
+      if (mediaInventoryDisclosure.hasMatch(draft.reply) &&
+          !explicitVisualQuestion) {
+        final solutionOnly = RegExp(r'[^.!?。！？]+[.!?。！？]?')
+            .allMatches(draft.reply)
+            .map((match) => match.group(0)!.trim())
+            .where((sentence) =>
+                sentence.isNotEmpty &&
+                !mediaInventoryDisclosure.hasMatch(sentence))
+            .join(' ')
+            .trim();
+        raw['reply'] =
+            solutionOnly.isNotEmpty ? solutionOnly : '请告诉我您希望解决的具体问题，我会继续帮您排查。';
       }
       final privateDisclosure = RegExp(
         r'\b(?:ai|artificial intelligence|language model|chatbot|robot|codex|openai|prompt|retrieval|dataset|image analysis|video analysis|frame analysis|ocr|transcript|filename|confidence score)\b|人工智能|AI助手|机器人|自动客服|语言模型|AI模型|提示词|检索|数据集|图片分析|视频分析|画面分析|分析报告|语音转写|文件名|置信度',

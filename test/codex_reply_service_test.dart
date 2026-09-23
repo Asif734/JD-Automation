@@ -1188,6 +1188,77 @@ void main() {
     expect(scores['thermal_models'], 0.8);
   });
 
+  test('semantic scorer maps English Android app compatibility to Chinese',
+      () async {
+    const channel =
+        MethodChannel('com.grozziie.jdAutomation/semanticRetrieval');
+    Map<Object?, Object?>? request;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      request = (call.arguments as Map).cast<Object?, Object?>();
+      return {'app_support': 0.8};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    await const MacOSSemanticKnowledgeScorer().score(
+      'Do these printers support the Grozziie app on Android?',
+      [
+        {'id': 'app_support', 'issue': '速印通安卓手机兼容性'}
+      ],
+    );
+
+    expect(request?['query'], contains('安卓'));
+    expect(request?['query'], contains('速印通'));
+    expect(request?['query'], contains('支持'));
+  });
+
+  test('extracts the requested product capabilities without inventing facts',
+      () {
+    expect(
+      requestedProductCapabilities(
+          'Do GZP510 and GZP820 support the Grozziie app on Android?'),
+      {'android', 'mobile_app'},
+    );
+    expect(requestedProductCapabilities('What paper width does TP874 use?'),
+        {'paper_width'});
+  });
+
+  test('English Android app query retrieves Chinese app guidance', () async {
+    final knowledge = Directory('${root.path}/android_app_knowledge');
+    final ragCards = Directory('${knowledge.path}/rag_cards');
+    await ragCards.create(recursive: true);
+    await File('${ragCards.path}/customer_service_rag_cards.jsonl').writeAsString(
+        '{"id":"android_app","status":"active","keywords":["安卓","手机系统","速印通","兼容","支持"],"issue":"速印通安卓手机兼容性","reply_template":"按精确型号确认"}\n');
+
+    final records = await LocalKnowledgeRetriever(knowledge,
+            semanticScorer: _FixedSemanticScorer(const {}))
+        .retrieve('Do GZP510 and GZP820 support the Grozziie app on Android?',
+            limit: 3);
+
+    expect(records.map((record) => record['id']), contains('android_app'));
+  });
+
+  test('retrieves the Android and iOS implication for confirmed app support',
+      () async {
+    final retriever = LocalKnowledgeRetriever(Directory(
+        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+
+    final records = await retriever.retrieve(
+      'If this printer supports the Grozziie app, does it work on Android and iOS?',
+      limit: 8,
+    );
+
+    expect(
+      records.map((record) => record['id']),
+      contains('official_mobile_app_android_ios_implication'),
+    );
+    final rule = records.firstWhere((record) =>
+        record['id'] == 'official_mobile_app_android_ios_implication');
+    expect(rule['reply_template'].toString(), contains('Android'));
+    expect(rule['reply_template'].toString(), contains('iOS'));
+  });
+
   test('reloads edited knowledge files without restarting the retriever',
       () async {
     final knowledge = Directory('${root.path}/live_knowledge');
@@ -1388,6 +1459,16 @@ void main() {
     expect(isProductPhotoRequest('How do I connect the printer?'), isFalse);
   });
 
+  test('recognizes only explicit requests to describe customer media', () {
+    expect(asksForMediaDescription('What does this image show?'), isTrue);
+    expect(asksForMediaDescription('Please describe this video.'), isTrue);
+    expect(asksForMediaDescription('这张图片里有什么？'), isTrue);
+    expect(asksForMediaDescription('这是什么？'), isTrue);
+    expect(asksForMediaDescription('Check this and help me fix it.'), isFalse);
+    expect(
+        asksForMediaDescription('The printer is not feeding paper.'), isFalse);
+  });
+
   test('forces product photo requests into human review', () {
     final ordinary = service.parseResponse('''{
       "reply":"Which photo do you need?",
@@ -1473,8 +1554,7 @@ void main() {
     expect(draftRequiresHumanReview(guarded), isFalse);
   });
 
-  test('customer-facing guard replaces a video inventory with service wording',
-      () {
+  test('customer-facing guard removes an unsolicited video inventory', () {
     final generated = service.parseResponse('''{
       "reply":"The video shows a desk, monitor, keyboard, cables, and a notebook. No JD product is visible.",
       "decision":"draft",
@@ -1495,12 +1575,14 @@ void main() {
     final guarded =
         service.enforceCustomerFacingPolicy(generated, 'did you find it now?');
 
-    expect(guarded.reply, contains('我已找到您发来的视频'));
+    expect(guarded.reply, contains('希望解决的具体问题'));
+    expect(guarded.reply, isNot(contains('视频')));
     expect(guarded.reply.toLowerCase(), isNot(contains('desk')));
     expect(guarded.reply.toLowerCase(), isNot(contains('monitor')));
   });
 
-  test('customer-facing guard keeps a still image classified as an image', () {
+  test('customer-facing guard keeps the action and removes image description',
+      () {
     final generated = service.parseResponse('''{
       "reply":"图片显示的是一朵白色的花，没有看到M880UT或色带仓。请重新拍摄色带盒和打开的色带仓。",
       "decision":"ask_clarification",
@@ -1524,7 +1606,8 @@ void main() {
     );
 
     expect(guarded.reply, contains('请重新拍摄色带盒'));
-    expect(guarded.reply, contains('M880UT'));
+    expect(guarded.reply, isNot(contains('白色的花')));
+    expect(guarded.reply, isNot(contains('图片显示')));
     expect(guarded.reply, isNot(contains('视频')));
   });
 
