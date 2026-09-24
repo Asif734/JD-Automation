@@ -21,3 +21,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+# The sqlite3 package's bundled macOS framework is resolved relative to
+# FlutterMacOS.framework in release builds on this Flutter toolchain. Use the
+# SQLite library supplied by macOS so the native symbols resolve reliably.
+hooks:
+  user_defines:
+    sqlite3:
+      source: system

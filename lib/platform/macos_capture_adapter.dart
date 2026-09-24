@@ -23,6 +23,20 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   final MethodChannel _channel;
   final _captures = StreamController<CapturedConversation>.broadcast();
   final _diagnostics = StreamController<Map<String, Object?>>.broadcast();
+  final Map<String, String> _verifiedCustomerIdentities = {};
+
+  String _identityKey(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  String _verifiedIdentityFor(String customer) =>
+      _verifiedCustomerIdentities[_identityKey(customer)] ?? customer;
+
+  void _rememberVerifiedIdentity(String requested, Object? verified) {
+    final identity = verified?.toString().trim() ?? '';
+    if (identity.isEmpty) return;
+    _verifiedCustomerIdentities[_identityKey(requested)] = identity;
+    _verifiedCustomerIdentities[_identityKey(identity)] = identity;
+  }
 
   @override
   Stream<CapturedConversation> get captures => _captures.stream;
@@ -79,7 +93,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return OcrInspection.fromMap(value);
   }
 
-  /// Waits until Qianniu's active header proves that a requested row switch
+  /// Waits until JingMai's active header proves that a requested row switch
   /// completed. Callers must not persist OCR under the requested customer
   /// name until this independent identity check succeeds.
   Future<OcrInspection> inspectExpectedCustomer({
@@ -88,18 +102,19 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     int maximumAttempts = 6,
     Duration retryDelay = const Duration(milliseconds: 250),
   }) async {
+    final verifiedExpected = _verifiedIdentityFor(expectedCustomer);
     OcrInspection? lastInspection;
     for (var attempt = 0; attempt < maximumAttempts; attempt++) {
       if (attempt > 0) await Future<void>.delayed(retryDelay);
       lastInspection = await inspectOcr(windowId: windowId);
       if (customerIdentitiesMatch(
-          lastInspection.activeCustomerId, expectedCustomer)) {
+          lastInspection.activeCustomerId, verifiedExpected)) {
         return lastInspection;
       }
     }
     throw PlatformException(
       code: 'customer_switch_not_verified',
-      message: 'Qianniu did not settle on $expectedCustomer. OCR data was '
+      message: 'JingMai did not settle on $verifiedExpected. OCR data was '
           'discarded instead of being saved to the wrong customer file '
           '(active: ${lastInspection?.activeCustomerId ?? 'unknown'}).',
     );
@@ -111,7 +126,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     List<String> mediaPaths = const [],
   }) async {
     final value = await _mapCall('sendDraftOnce', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'reply': reply,
       'mediaPaths': mediaPaths,
     });
@@ -129,15 +144,18 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required double y,
     required double width,
     required double height,
+    DateTime? expectedMediaAt,
     bool allowActivationForVideoDetection = false,
   }) async {
     final value = await _mapCall('captureImageRegion', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'windowId': windowId,
       'x': x,
       'y': y,
       'width': width,
       'height': height,
+      if (expectedMediaAt != null)
+        'expectedMediaAtMs': expectedMediaAt.millisecondsSinceEpoch,
       'allowActivationForVideoDetection': allowActivationForVideoDetection,
     });
     if (value['error'] case final String code) {
@@ -149,6 +167,32 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return VisibleImagePayload.fromMap(value);
   }
 
+  /// Looks for one uniquely timed image or video in JD's local cache after an
+  /// unread turn was detected. Native code re-verifies the active customer;
+  /// the caller must additionally reject cross-customer clock ambiguity.
+  Future<CachedMediaPayload?> captureRecentCachedMedia({
+    required String expectedCustomer,
+    required DateTime expectedMediaAt,
+    required String destinationDirectory,
+  }) async {
+    final value = await _mapCall('captureRecentCachedMedia', <String, Object?>{
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+      'expectedMediaAtMs': expectedMediaAt.millisecondsSinceEpoch,
+      'destinationDirectory': destinationDirectory,
+    });
+    final kind = value['kind']?.toString();
+    if (kind != 'image' && kind != 'video') return null;
+    return CachedMediaPayload(
+      kind: kind!,
+      cacheKey: value['cacheKey']?.toString() ?? '',
+      cacheModifiedAt: DateTime.fromMillisecondsSinceEpoch(
+        (value['cacheModifiedAtMs'] as num?)?.toInt() ?? 0,
+      ),
+      image: kind == 'image' ? VisibleImagePayload.fromMap(value) : null,
+      video: kind == 'video' ? DownloadedVideoPayload.fromMap(value) : null,
+    );
+  }
+
   Future<MessageClassification> classifyMessageAt({
     required String expectedCustomer,
     required int windowId,
@@ -156,7 +200,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required double y,
   }) async {
     final value = await _mapCall('classifyMessageAt', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'windowId': windowId,
       'x': x,
       'y': y,
@@ -177,7 +221,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required double y,
   }) async {
     final value = await _mapCall('downloadImageAt', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'windowId': windowId,
       'x': x,
       'y': y,
@@ -201,7 +245,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required String destinationDirectory,
   }) async {
     final value = await _mapCall('downloadVideoAt', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'windowId': windowId,
       'x': x,
       'y': y,
@@ -265,8 +309,9 @@ class MacOSCaptureAdapter implements CaptureAdapter {
 
   Future<void> openConversation(String expectedCustomer,
       {bool allowActivation = true}) async {
+    final nativeExpected = _verifiedIdentityFor(expectedCustomer);
     final value = await _mapCall('openConversation', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': nativeExpected,
       'allowActivation': allowActivation,
     });
     if (value['error'] case final String code) {
@@ -275,12 +320,13 @@ class MacOSCaptureAdapter implements CaptureAdapter {
           message:
               value['message'] as String? ?? 'Could not open conversation.');
     }
+    _rememberVerifiedIdentity(expectedCustomer, value['customer']);
   }
 
   Future<void> scrollConversation(
       {required String expectedCustomer, required int deltaY}) async {
     final value = await _mapCall('scrollConversation', <String, Object?>{
-      'expectedCustomer': expectedCustomer,
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
       'deltaY': deltaY,
     });
     if (value['error'] case final String code) {
@@ -500,6 +546,7 @@ class VisibleImagePayload {
     this.extension,
     this.originalName,
     this.visualFingerprint,
+    this.captureSource,
     this.bytes,
   });
 
@@ -510,6 +557,7 @@ class VisibleImagePayload {
         extension: value['extension'] as String?,
         originalName: value['originalName'] as String?,
         visualFingerprint: value['visualFingerprint'] as String?,
+        captureSource: value['captureSource'] as String?,
         bytes: value['dataBase64'] is String
             ? base64Decode(value['dataBase64']! as String)
             : null,
@@ -520,6 +568,7 @@ class VisibleImagePayload {
   final String? extension;
   final String? originalName;
   final String? visualFingerprint;
+  final String? captureSource;
   final Uint8List? bytes;
 }
 
@@ -540,6 +589,22 @@ class DownloadedVideoPayload {
   final String path;
   final String originalName;
   final String mimeType;
+}
+
+class CachedMediaPayload {
+  const CachedMediaPayload({
+    required this.kind,
+    required this.cacheKey,
+    required this.cacheModifiedAt,
+    this.image,
+    this.video,
+  });
+
+  final String kind;
+  final String cacheKey;
+  final DateTime cacheModifiedAt;
+  final VisibleImagePayload? image;
+  final DownloadedVideoPayload? video;
 }
 
 class SpeechTranscription {

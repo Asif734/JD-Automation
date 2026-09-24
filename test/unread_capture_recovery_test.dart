@@ -40,6 +40,41 @@ void main() {
         isTrue);
   });
 
+  test('cache media is rejected when two customers have ambiguous clocks', () {
+    UnreadCaptureRecovery recovery(String customer, int second) =>
+        UnreadCaptureRecovery(
+          customer: customer,
+          unreadEvidence: second,
+          detectedAt: DateTime.utc(2026, 9, 24, 6, 0, second),
+          knownIncomingIds: const {},
+          knownOutgoingIds: const {},
+        );
+
+    final recoveries = <String, UnreadCaptureRecovery>{
+      'customer-a': recovery('customer-a', 2),
+      'customer-b': recovery('customer-b', 4),
+    };
+    final modifiedAt = DateTime.utc(2026, 9, 24, 6, 0, 3);
+    expect(
+      UnreadCaptureRecovery.cacheClockUniquelyMatches(
+        modifiedAt: modifiedAt,
+        targetCustomer: 'customer-a',
+        recoveries: recoveries,
+      ),
+      isFalse,
+    );
+
+    recoveries['customer-b'] = recovery('customer-b', 20);
+    expect(
+      UnreadCaptureRecovery.cacheClockUniquelyMatches(
+        modifiedAt: modifiedAt,
+        targetCustomer: 'customer-a',
+        recoveries: recoveries,
+      ),
+      isTrue,
+    );
+  });
+
   test('visible history cannot resolve a newly detected unread turn', () {
     final detectedAt = DateTime.utc(2026, 9, 23, 2, 35, 39);
     final recovery = UnreadCaptureRecovery(

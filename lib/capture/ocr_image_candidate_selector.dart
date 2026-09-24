@@ -165,6 +165,16 @@ class OcrImageCandidateSelector {
     return regionArea > 0 && textArea / regionArea >= .12;
   }
 
+  /// A cache match is verified against the visible customer-owned pixels, so
+  /// readable text inside that image is evidence about the image rather than
+  /// evidence that the region is an ordinary chat bubble.
+  bool shouldSaveImage(
+    OcrVisualRegion region,
+    List<OcrObservation> observations, {
+    required bool fromVerifiedCache,
+  }) =>
+      fromVerifiedCache || !isTextDense(region, observations);
+
   bool _isCustomer(String value, String customer) {
     final raw = value.toLowerCase().trim();
     final expected = customer.toLowerCase();

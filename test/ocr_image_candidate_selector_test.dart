@@ -141,15 +141,24 @@ void main() {
       ],
     );
 
-    final candidates =
-        const OcrImageCandidateSelector().select(inspection, 'jd_test');
+    const selector = OcrImageCandidateSelector();
+    final candidates = selector.select(inspection, 'jd_test');
 
     expect(candidates, isEmpty);
     // The same rectangle still needs native video classification: a customer
     // may have filmed a text-filled screen rather than typed that text.
-    final videoCandidates = const OcrImageCandidateSelector()
-        .select(inspection, 'jd_test', includeTextDense: true);
+    final videoCandidates =
+        selector.select(inspection, 'jd_test', includeTextDense: true);
     expect(videoCandidates, hasLength(1));
+    final region = inspection.visualRegions.single;
+    expect(
+        selector.shouldSaveImage(region, inspection.observations,
+            fromVerifiedCache: false),
+        isFalse);
+    expect(
+        selector.shouldSaveImage(region, inspection.observations,
+            fromVerifiedCache: true),
+        isTrue);
   });
 
   OcrInspection inspection({required List<OcrObservation> observations}) =>

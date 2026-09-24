@@ -63,8 +63,18 @@ final class AccessibilityBridge {
         normalizedY: (args?["y"] as? NSNumber)?.doubleValue ?? -1,
         normalizedWidth: (args?["width"] as? NSNumber)?.doubleValue ?? -1,
         normalizedHeight: (args?["height"] as? NSNumber)?.doubleValue ?? -1,
+        expectedMediaAt: (args?["expectedMediaAtMs"] as? NSNumber)
+          .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
         allowActivationForVideoDetection:
           args?["allowActivationForVideoDetection"] as? Bool ?? false,
+        completion: result)
+    case "captureRecentCachedMedia":
+      let args = call.arguments as? [String: Any]
+      collector.captureRecentCachedMedia(
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "",
+        expectedMediaAt: (args?["expectedMediaAtMs"] as? NSNumber)
+          .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
+        destinationDirectory: args?["destinationDirectory"] as? String ?? "",
         completion: result)
     case "classifyMessageAt":
       let args = call.arguments as? [String: Any]
@@ -523,6 +533,101 @@ private struct DownloadedVideoCandidate {
   let size: Int
 }
 
+private struct JDCachedImageCandidate {
+  let url: URL
+  let modified: Date
+  let size: Int
+  let fingerprint: String
+  let score: Double
+}
+
+private struct JDTimedCachedMediaCandidate {
+  let url: URL
+  let modified: Date
+  let size: Int
+  let kind: String
+
+  var cacheKey: String {
+    let identity = "\(url.path)|\(modified.timeIntervalSince1970)|\(size)"
+    return SHA256.hash(data: Data(identity.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+/// Resolves cache media from the unread-message clock only when there is one
+/// clear recent candidate. The caller separately verifies the active customer
+/// and rejects candidates that are equally close to another customer's unread
+/// recovery clock.
+private func uniquelyTimedRecentJDCachedMedia(
+  expectedAt: Date,
+  now: Date = Date()
+) -> JDTimedCachedMediaCandidate? {
+  let root = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/JingDong/咚咚工作台",
+                           isDirectory: true)
+  let keys: Set<URLResourceKey> = [
+    .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
+  ]
+  guard let enumerator = FileManager.default.enumerator(
+    at: root, includingPropertiesForKeys: Array(keys),
+    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+  let imageExtensions = Set(["jpg", "jpeg", "png", "webp"])
+  let videoExtensions = Set(["mp4", "mov", "m4v", "webm"])
+  var candidates: [JDTimedCachedMediaCandidate] = []
+
+  for case let url as URL in enumerator {
+    let parent = url.deletingLastPathComponent()
+    let chatDirectory = parent.deletingLastPathComponent().lastPathComponent
+    let folder = parent.lastPathComponent
+    let ext = url.pathExtension.lowercased()
+    let kind: String
+    if folder == "images" && imageExtensions.contains(ext) {
+      kind = "image"
+    } else if folder == "videos" && videoExtensions.contains(ext) {
+      kind = "video"
+    } else {
+      continue
+    }
+    guard chatDirectory.hasPrefix("chat_"),
+          let values = try? url.resourceValues(forKeys: keys),
+          values.isRegularFile == true,
+          let modified = values.contentModificationDate,
+          let size = values.fileSize,
+          size > 0, size <= 250 * 1024 * 1024 else { continue }
+    // A JD download normally lands within a second or two of the unread turn.
+    // Allow small clock/poll jitter and bounded network delay, but never mine
+    // older cache history merely because a text-only message arrived later.
+    let offset = modified.timeIntervalSince(expectedAt)
+    let age = now.timeIntervalSince(modified)
+    guard offset >= -5, offset <= 60, age >= -5, age <= 5 * 60 else { continue }
+    candidates.append(JDTimedCachedMediaCandidate(
+      url: url, modified: modified, size: size, kind: kind))
+  }
+
+  // JD also stores a thumbnail image for many videos. Treat the video as the
+  // logical media item when both cache entries share the same stem.
+  let videoStems = Set(candidates.filter { $0.kind == "video" }
+    .map { $0.url.deletingPathExtension().lastPathComponent.lowercased() })
+  let logical = candidates.filter {
+    $0.kind == "video" ||
+      !videoStems.contains($0.url.deletingPathExtension().lastPathComponent.lowercased())
+  }.sorted {
+    let left = abs($0.modified.timeIntervalSince(expectedAt))
+    let right = abs($1.modified.timeIntervalSince(expectedAt))
+    if left != right { return left < right }
+    return $0.modified > $1.modified
+  }
+  guard let best = logical.first else { return nil }
+  if logical.count > 1 {
+    let bestDelta = abs(best.modified.timeIntervalSince(expectedAt))
+    let nextDelta = abs(logical[1].modified.timeIntervalSince(expectedAt))
+    // Two different cache items with nearly identical clocks cannot safely be
+    // assigned to one customer without reading JD's encrypted message DB.
+    if nextDelta - bestDelta < 4 { return nil }
+  }
+  return best
+}
+
 private func downloadableImages(in directory: URL) -> [String: DownloadedImageCandidate] {
   let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
   guard let urls = try? FileManager.default.contentsOfDirectory(
@@ -539,6 +644,81 @@ private func downloadableImages(in directory: URL) -> [String: DownloadedImageCa
       size: values.fileSize ?? 0)
   }
   return result
+}
+
+/// Finds an original cached image only when its pixels, dimensions, and cache
+/// time agree with the sender-bounded image visible in the verified customer
+/// conversation. JD keeps multiple customers below the same account cache, so
+/// a merely "newest file" lookup is not safe enough.
+private func matchingRecentJDCachedImage(
+  visibleImage: CGImage,
+  expectedAt: Date?,
+  now: Date = Date(),
+  maximumAge: TimeInterval = 15 * 60
+) -> JDCachedImageCandidate? {
+  let root = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/JingDong/咚咚工作台",
+                           isDirectory: true)
+  let keys: Set<URLResourceKey> = [
+    .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
+  ]
+  guard let enumerator = FileManager.default.enumerator(
+    at: root, includingPropertiesForKeys: Array(keys),
+    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+  let extensions = Set(["jpg", "jpeg", "png", "webp"])
+  let visibleFingerprint = averageImageHash(visibleImage)
+  guard let visibleBits = UInt64(visibleFingerprint, radix: 16) else { return nil }
+  let visibleRatio = Double(visibleImage.width) / Double(max(visibleImage.height, 1))
+  let referenceTime = expectedAt ?? now
+  var candidates: [JDCachedImageCandidate] = []
+
+  for case let url as URL in enumerator {
+    let parent = url.deletingLastPathComponent()
+    let chatDirectory = parent.deletingLastPathComponent().lastPathComponent
+    guard parent.lastPathComponent == "images",
+          chatDirectory.hasPrefix("chat_"),
+          extensions.contains(url.pathExtension.lowercased()),
+          let values = try? url.resourceValues(forKeys: keys),
+          values.isRegularFile == true,
+          let modified = values.contentModificationDate,
+          let size = values.fileSize,
+          size > 0, size <= 25 * 1024 * 1024 else { continue }
+    let age = now.timeIntervalSince(modified)
+    guard age >= -5, age <= maximumAge else { continue }
+    let timeDelta = abs(referenceTime.timeIntervalSince(modified))
+    guard timeDelta <= maximumAge,
+          let image = NSImage(contentsOf: url),
+          let cgImage = image.cgImage(
+            forProposedRect: nil, context: nil, hints: nil) else { continue }
+    let ratio = Double(cgImage.width) / Double(max(cgImage.height, 1))
+    let ratioDelta = abs(log(max(ratio, 0.001) / max(visibleRatio, 0.001)))
+    guard ratioDelta <= 0.40 else { continue }
+    let fingerprint = averageImageHash(cgImage)
+    guard let candidateBits = UInt64(fingerprint, radix: 16) else { continue }
+    let hashDistance = (visibleBits ^ candidateBits).nonzeroBitCount
+    // The visible crop can include JD's rounded border, but a distance beyond
+    // 20/64 is too ambiguous to replace the safe screenshot with cache data.
+    guard hashDistance <= 20 else { continue }
+    let score = Double(hashDistance) * 4 + timeDelta / 5 + ratioDelta * 30
+    candidates.append(JDCachedImageCandidate(
+      url: url, modified: modified, size: size,
+      fingerprint: fingerprint, score: score))
+  }
+
+  let ranked = candidates.sorted {
+    if $0.score != $1.score { return $0.score < $1.score }
+    return $0.modified > $1.modified
+  }
+  guard let best = ranked.first else { return nil }
+  if ranked.count > 1 {
+    let next = ranked[1]
+    // Equal fingerprints are duplicate copies of the same visible content.
+    // Different-looking near-ties are unsafe in a shared multi-customer cache.
+    if next.fingerprint != best.fingerprint && next.score - best.score < 8 {
+      return nil
+    }
+  }
+  return best
 }
 
 /// JD 10.4 downloads an incoming video into its own per-chat media cache before
@@ -745,8 +925,8 @@ private func exactCustomerIdentityMatches(_ left: String, _ right: String) -> Bo
 }
 
 /// Vision can read a narrow digit 1 in a JD account ID as a lowercase l.
-/// This is only a candidate for locating a row, never proof of identity:
-/// opening and sending still require the exact AX chat-header identity.
+/// This is only a candidate for locating one unique row. The OCR value is
+/// never rewritten; the exact AX chat-header identity is returned separately.
 private func oneVsEllOCRConfusion(_ observed: String, _ expected: String) -> Bool {
   let left = Array(normalizedCustomerIdentity(observed))
   let right = Array(normalizedCustomerIdentity(expected))
@@ -900,6 +1080,7 @@ final class QianniuAXCollector {
   func captureImageRegion(expectedCustomer: String, windowID: CGWindowID,
                           normalizedX: Double, normalizedY: Double,
                           normalizedWidth: Double, normalizedHeight: Double,
+                          expectedMediaAt: Date? = nil,
                           allowActivationForVideoDetection: Bool = false,
                           completion: @escaping FlutterResult) {
     queue.async { [weak self] in
@@ -922,7 +1103,7 @@ final class QianniuAXCollector {
               .null, .optionIncludingWindow, windowID,
               [.boundsIgnoreFraming, .bestResolution]) else {
         finish(["error": "image_crop_window_failed",
-                "message": "Could not capture the selected Qianniu window."])
+                "message": "Could not capture the selected JingMai window."])
         return
       }
       let crop = CGRect(
@@ -975,13 +1156,130 @@ final class QianniuAXCollector {
           videoDetected = looksLikeVideoThumbnail(composite)
         }
       }
+      if !videoDetected,
+         let cached = matchingRecentJDCachedImage(
+           visibleImage: image, expectedAt: expectedMediaAt),
+         activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
+         let data = try? Data(contentsOf: cached.url),
+         data.count == cached.size,
+         let verifiedValues = try? cached.url.resourceValues(
+           forKeys: [.contentModificationDateKey, .fileSizeKey]),
+         verifiedValues.fileSize == cached.size,
+         verifiedValues.contentModificationDate == cached.modified,
+         let cachedImage = NSImage(data: data),
+         let cachedCGImage = cachedImage.cgImage(
+           forProposedRect: nil, context: nil, hints: nil) {
+        let ext = cached.url.pathExtension.lowercased()
+        let mime = ext == "png" ? "image/png" :
+          (ext == "webp" ? "image/webp" : "image/jpeg")
+        finish([
+          "kind": "image",
+          "mimeType": mime,
+          "extension": ext,
+          "originalName": cached.url.lastPathComponent,
+          "dataBase64": data.base64EncodedString(),
+          "visualFingerprint": averageImageHash(cachedCGImage),
+          "captureSource": "jd-image-cache",
+        ])
+        return
+      }
       finish([
         "kind": videoDetected ? "video" : "image",
         "mimeType": "image/png",
         "extension": "png",
         "dataBase64": png.base64EncodedString(),
         "visualFingerprint": averageImageHash(image),
+        "captureSource": "verified-window-crop",
       ])
+    }
+  }
+
+  /// Checks JD's local media cache for a newly detected customer turn even
+  /// when a pale/low-contrast thumbnail produced no Vision rectangle. This is
+  /// intentionally clock-bounded and ambiguity-rejecting; it never returns a
+  /// merely "newest" file from the shared multi-customer cache.
+  func captureRecentCachedMedia(expectedCustomer: String,
+                                expectedMediaAt: Date?,
+                                destinationDirectory: String,
+                                completion: @escaping FlutterResult) {
+    videoCacheQueue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) {
+        DispatchQueue.main.async { completion(payload) }
+      }
+      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard AXIsProcessTrusted(), !expected.isEmpty,
+            let expectedMediaAt,
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
+        finish(["kind": "none", "reason": "customer_or_clock_unverified"])
+        return
+      }
+      guard let cached = uniquelyTimedRecentJDCachedMedia(expectedAt: expectedMediaAt) else {
+        finish(["kind": "none", "reason": "no_unique_recent_cache_media"])
+        return
+      }
+      let common: [String: Any] = [
+        "cacheKey": cached.cacheKey,
+        "cacheModifiedAtMs": Int(cached.modified.timeIntervalSince1970 * 1000),
+        "captureSource": cached.kind == "video" ? "jd-video-cache" : "jd-image-cache",
+      ]
+      if cached.kind == "image" {
+        guard let data = try? Data(contentsOf: cached.url),
+              data.count == cached.size,
+              let image = NSImage(data: data),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
+          finish(["kind": "none", "reason": "cache_image_changed"])
+          return
+        }
+        let ext = cached.url.pathExtension.lowercased()
+        let mime = ext == "png" ? "image/png" :
+          (ext == "webp" ? "image/webp" : "image/jpeg")
+        finish(common.merging([
+          "kind": "image",
+          "mimeType": mime,
+          "extension": ext,
+          "originalName": cached.url.lastPathComponent,
+          "dataBase64": data.base64EncodedString(),
+          "visualFingerprint": averageImageHash(cgImage),
+        ]) { _, new in new })
+        return
+      }
+
+      let destination = URL(fileURLWithPath: destinationDirectory, isDirectory: true)
+        .standardizedFileURL
+      guard FileManager.default.fileExists(atPath: destination.path) else {
+        finish(["kind": "none", "reason": "video_destination_missing"])
+        return
+      }
+      var file = destination.appendingPathComponent(cached.url.lastPathComponent)
+      if FileManager.default.fileExists(atPath: file.path) {
+        file = destination.appendingPathComponent(
+          "\(UUID().uuidString).\(cached.url.pathExtension)")
+      }
+      do {
+        try FileManager.default.copyItem(at: cached.url, to: file)
+      } catch {
+        finish(["kind": "none", "reason": "cache_video_copy_failed"])
+        return
+      }
+      guard activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
+            let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
+            values.fileSize == cached.size else {
+        try? FileManager.default.removeItem(at: file)
+        finish(["kind": "none", "reason": "cache_video_changed"])
+        return
+      }
+      let ext = file.pathExtension.lowercased()
+      let mime = ext == "mov" || ext == "m4v" ? "video/quicktime" :
+        (ext == "webm" ? "video/webm" : "video/mp4")
+      finish(common.merging([
+        "kind": "video",
+        "path": file.path,
+        "originalName": cached.url.lastPathComponent,
+        "mimeType": mime,
+        "size": cached.size,
+      ]) { _, new in new })
     }
   }
 
@@ -1348,7 +1646,7 @@ final class QianniuAXCollector {
               settable.boolValue,
               AXUIElementSetAttributeValue(composer.element, kAXValueAttribute as CFString, text as CFTypeRef) == .success else {
           finish(["error": "composer_not_settable",
-                  "message": "Qianniu did not allow safe AX insertion; nothing was sent."])
+                  "message": "JingMai did not allow safe AX insertion; nothing was sent."])
           return
         }
       } else {
@@ -1375,7 +1673,7 @@ final class QianniuAXCollector {
           }
           guard inserted, postCommandV() else {
             finish(["error": "media_paste_failed",
-                    "message": "Qianniu did not accept an approved media attachment; nothing was sent."])
+                    "message": "JingMai did not accept an approved media attachment; nothing was sent."])
             return
           }
           usleep(550_000)
@@ -1395,7 +1693,7 @@ final class QianniuAXCollector {
         let afterPaste = composerVisualFingerprint(pid: pid, frame: composer.frame)
         guard beforePaste != nil, afterPaste != nil, beforePaste != afterPaste else {
           finish(["error": "media_insert_unverified",
-                  "message": "Qianniu did not visibly confirm the media insertion; nothing was sent."])
+                  "message": "JingMai did not visibly confirm the media insertion; nothing was sent."])
           return
         }
       }
@@ -1440,7 +1738,7 @@ final class QianniuAXCollector {
             let afterComposer = after.first(where: { $0.role == kAXTextAreaRole as String }),
             (stringAttribute(afterComposer.element, kAXValueAttribute) ?? "").isEmpty else {
         finish(["error": "send_unconfirmed",
-                "message": "Send was clicked once, but Qianniu did not clear the composer. Do not retry automatically; verify in Qianniu."])
+                "message": "Send was clicked once, but JingMai did not clear the composer. Do not retry automatically; verify in JingMai."])
         return
       }
       finish(["sent": true, "customer": expected, "reply": text,
@@ -1684,7 +1982,7 @@ final class QianniuAXCollector {
               }
               guard let app else {
                 finish(["error": "qianniu_launch_failed",
-                        "message": "Qianniu did not launch."])
+                        "message": "JingMai did not launch."])
                 return
               }
               // Reopening the already-running bundle can take noticeably
@@ -1698,14 +1996,14 @@ final class QianniuAXCollector {
                 usleep(250_000)
               }
               finish(["error": "reception_window_missing",
-                      "message": "Qianniu launched, but its reception center did not become available."])
+                      "message": "JingMai launched, but its reception center did not become available."])
             }
           }
         }
       }
       guard AXIsProcessTrusted() else {
         finish(["error": "accessibility_not_allowed",
-                "message": "Accessibility permission is required to open Qianniu's reception center."])
+                "message": "Accessibility permission is required to open JingMai's reception center."])
         return
       }
       if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
@@ -1720,7 +2018,7 @@ final class QianniuAXCollector {
             $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
           }) else {
             finish(["error": "reception_window_missing",
-                    "message": "Qianniu is running, but the reception window is not open. Passive monitoring will not activate it."])
+                    "message": "JingMai is running, but the reception window is not open. Passive monitoring will not activate it."])
             return
           }
           var minimizedValue: CFTypeRef?
@@ -1729,7 +2027,7 @@ final class QianniuAXCollector {
             (minimizedValue as? NSNumber)?.boolValue == true
           guard !minimized, !app.isHidden else {
             finish(["error": "reception_window_hidden",
-                    "message": "Qianniu's reception window is hidden or minimized. Passive monitoring will not restore it."])
+                    "message": "JingMai's reception window is hidden or minimized. Passive monitoring will not restore it."])
             return
           }
           finish(["ready": true, "opened": false, "method": "passive_existing_window"])
@@ -1755,12 +2053,12 @@ final class QianniuAXCollector {
       }
       guard allowActivation else {
         finish(["error": "qianniu_not_running",
-                "message": "Qianniu is not running. Passive monitoring will not launch it."])
+                "message": "JingMai is not running. Passive monitoring will not launch it."])
         return
       }
       guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
         finish(["error": "qianniu_not_installed",
-                "message": "The installed Qianniu application could not be located."])
+                "message": "The installed JingMai application could not be located."])
         return
       }
       launchOrReopen(at: url)
@@ -1805,7 +2103,7 @@ final class QianniuAXCollector {
         $0.actions.contains(kAXPressAction as String)
     }) else {
       return ["error": "reception_button_missing",
-              "message": "Qianniu is running, but its verified 接待中心 button is unavailable."]
+              "message": "JingMai is running, but its verified 接待中心 button is unavailable."]
     }
     _ = AXUIElementPerformAction(button.element, kAXPressAction as CFString)
     for _ in 0..<12 {
@@ -1818,7 +2116,7 @@ final class QianniuAXCollector {
       }
     }
     return ["error": "reception_open_failed",
-            "message": "Qianniu did not expose a reception window after the verified 接待中心 button was pressed."]
+            "message": "JingMai did not expose a reception window after the verified 接待中心 button was pressed."]
   }
 
   /// Returns exact AX identities plus screenshot-derived unread evidence.
@@ -1908,7 +2206,7 @@ final class QianniuAXCollector {
       }
       let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !expected.isEmpty, AXIsProcessTrusted(), let pid = runningPID() else {
-        finish(["error": "conversation_unavailable", "message": "Qianniu, Accessibility, or customer ID is unavailable."])
+        finish(["error": "conversation_unavailable", "message": "JingMai, Accessibility, or customer ID is unavailable."])
         return
       }
       let root = AXUIElementCreateApplication(pid)
@@ -1918,7 +2216,7 @@ final class QianniuAXCollector {
         $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
       }) else {
         finish(["error": "conversation_window_missing",
-                "message": "Qianniu's reception window is not available."])
+                "message": "JingMai's reception window is not available."])
         return
       }
       let scoped = nodes.filter {
@@ -1943,6 +2241,7 @@ final class QianniuAXCollector {
       }
       let exact = rowCandidates.filter { exactCustomerIdentityMatches($0.1, expected) }
       let ambiguous = rowCandidates.filter { oneVsEllOCRConfusion($0.1, expected) }
+      let selectedViaUniqueOCRAlias = exact.isEmpty && ambiguous.count == 1
       let candidates = !exact.isEmpty ? exact.map(\.0) :
         (ambiguous.count == 1 ? ambiguous.map(\.0) : [])
       guard let target = candidates.min(by: {
@@ -1953,19 +2252,27 @@ final class QianniuAXCollector {
         return
       }
 
-      func verified() -> Bool {
-        if activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true {
-          return true
+      func verifiedIdentity() -> String? {
+        if let active = activeCustomerIdentity() {
+          if exactCustomerIdentityMatches(active, expected) {
+            return active
+          }
+          // A unique row may be located through the OCR 1/l ambiguity, but
+          // retain the exact active-header identity as a separate value. This
+          // never changes either customer name and cannot merge two rows.
+          if selectedViaUniqueOCRAlias && oneVsEllOCRConfusion(active, expected) {
+            return active
+          }
         }
         var current: [AXNode] = []
         walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
           node, _ in current.append(node)
         }
-        return activeCustomerMatches(expected, nodes: current)
+        return activeCustomerMatches(expected, nodes: current) ? expected : nil
       }
 
-      if verified() {
-        finish(["opened": true, "customer": expected, "method": "already_active"])
+      if let verified = verifiedIdentity() {
+        finish(["opened": true, "customer": verified, "method": "already_active"])
         return
       }
 
@@ -1975,7 +2282,7 @@ final class QianniuAXCollector {
       guard allowActivation ||
               NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
         finish(["error": "qianniu_not_frontmost",
-                "message": "Unread conversation is queued until Qianniu is frontmost; focus was not stolen."])
+                "message": "Unread conversation is queued until JingMai is frontmost; focus was not stolen."])
         return
       }
 
@@ -1992,8 +2299,8 @@ final class QianniuAXCollector {
       _ = AXUIElementPerformAction(target.element, kAXPressAction as CFString)
       for _ in 0..<8 {
         usleep(125_000)
-        if verified() {
-          finish(["opened": true, "customer": expected, "method": "ax_press"])
+        if let verified = verifiedIdentity() {
+          finish(["opened": true, "customer": verified, "method": "ax_press"])
           return
         }
       }
@@ -2003,7 +2310,7 @@ final class QianniuAXCollector {
       // verify the active customer again before OCR is allowed to continue.
       guard let frame = target.frame else {
         finish(["error": "conversation_verification_failed",
-                "message": "Qianniu ignored AXPress for \(expected), and the verified sidebar row had no clickable frame."])
+                "message": "JingMai ignored AXPress for \(expected), and the verified sidebar row had no clickable frame."])
         return
       }
       // Reaching this point proves either activation was explicitly allowed or
@@ -2026,13 +2333,13 @@ final class QianniuAXCollector {
       up.post(tap: .cghidEventTap)
       for _ in 0..<12 {
         usleep(125_000)
-        if verified() {
-          finish(["opened": true, "customer": expected, "method": "guarded_click"])
+        if let verified = verifiedIdentity() {
+          finish(["opened": true, "customer": verified, "method": "guarded_click"])
           return
         }
       }
       finish(["error": "conversation_verification_failed",
-              "message": "Qianniu did not activate the expected customer \(expected) after AXPress and a guarded row click."])
+              "message": "JingMai did not activate the expected customer \(expected) after AXPress and a guarded row click."])
     }
   }
 
@@ -2054,7 +2361,7 @@ final class QianniuAXCollector {
       }
       guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
         finish(["error": "qianniu_not_frontmost",
-                "message": "Qianniu is not active. Chat scrolling was deferred without stealing focus."])
+                "message": "JingMai is not active. Chat scrolling was deferred without stealing focus."])
         return
       }
       let root = AXUIElementCreateApplication(pid)
@@ -2115,7 +2422,7 @@ final class QianniuAXCollector {
       $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
     }) else {
       onDiagnostic?(["event": "reception_window_missing",
-                     "hint": "Open Qianniu's customer-service reception center."])
+                     "hint": "Open JingMai's customer-service reception center."])
       return
     }
     let scopedNodes = nodes.filter {

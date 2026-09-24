@@ -105,6 +105,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   final Map<String, String> _handledIncomingSenderKeys = {};
   final Map<String, DateTime> _lastUnreadProbeAt = {};
   final Map<String, UnreadCaptureRecovery> _unreadRecovery = {};
+  final Map<String, String> _claimedJdCacheMediaOwners = {};
   final Set<String> _startingUnreadRecovery = {};
   final Map<String, Timer> _unreadHoldingTimers = {};
   final Map<String, Timer> _unreadResendTimers = {};
@@ -1691,14 +1692,43 @@ class _CaptureHomeState extends State<CaptureHome> {
       return textCapture;
     }
     final capturedMedia = <CapturedMessage>[];
-    // Automatic image capture stays screenshot-first and never opens JD's
+    // Automatic image capture prefers a strongly matched original from JD's
+    // cache and falls back to the verified screenshot without opening JD's
     // image viewer. A detected video uses JD's bounded local cache copy.
     // Only the newest candidate can create work.
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
+    final inspectedMediaSources = <String>[];
     final confirmedMediaRegions = <OcrVisualRegion>[];
-    for (final region in imageCandidates) {
+    if (_unreadRecovery[customer] case final recovery?) {
       try {
+        final cached = await _captureDirectCachedMedia(
+          customer,
+          recovery,
+          runVideoProcessingUnlocked: runVideoProcessingUnlocked,
+        ).timeout(_captureOperationTimeout);
+        if (cached != null) {
+          capturedMedia.add(cached);
+          inspectedMediaSources.add('direct-jd-cache');
+          if (imageCandidates.isNotEmpty) {
+            confirmedMediaRegions.add(imageCandidates.first);
+          }
+        }
+      } on PlatformException {
+        failures++;
+      } on TimeoutException {
+        failures++;
+      }
+    }
+    for (final region in capturedMedia.isEmpty
+        ? imageCandidates
+        : const <OcrVisualRegion>[]) {
+      try {
+        final messageAt = _unreadRecovery[customer]?.detectedAt ??
+            (extraction.latestVisibleSenderIsIncoming
+                ? extraction.latestIncomingSentAt
+                : null);
+        final expectedMediaAt = messageAt ?? inspection.capturedAt;
         final visible = await _adapter
             .captureImageRegion(
               expectedCustomer: customer,
@@ -1707,13 +1737,12 @@ class _CaptureHomeState extends State<CaptureHome> {
               y: region.y,
               width: region.width,
               height: region.height,
+              expectedMediaAt: expectedMediaAt,
               allowActivationForVideoDetection: allowVideoDetectionActivation,
             )
             .timeout(_unreadOperationTimeout);
-        var turnAt = _unreadRecovery[customer]?.detectedAt ??
-            (extraction.latestVisibleSenderIsIncoming
-                ? extraction.latestIncomingSentAt
-                : null);
+        inspectedMediaSources.add(visible.captureSource ?? visible.kind);
+        var turnAt = messageAt;
         // The sender label can sit above OCR's text band while the media
         // thumbnail is still clearly visible. Start the 20-second recovery
         // clock before a video cache copy or frame extraction can stall.
@@ -1751,14 +1780,25 @@ class _CaptureHomeState extends State<CaptureHome> {
           }
         } else if (visible.kind == 'image' && visible.bytes != null) {
           // A rectangle around a long ordinary text bubble can look like an
-          // image to Vision. Only a non-text-dense rectangle may be saved as a
-          // photo; dense regions were inspected solely for a video overlay.
-          if (!candidateSelector.isTextDense(region, inspection.observations)) {
+          // image to Vision. A screenshot matched pixel-for-pixel to an
+          // original in JD's image cache is already verified media, however,
+          // and must not be discarded merely because the image itself contains
+          // a lot of readable text.
+          final cacheOriginal = visible.captureSource == 'jd-image-cache';
+          if (candidateSelector.shouldSaveImage(
+            region,
+            inspection.observations,
+            fromVerifiedCache: cacheOriginal,
+          )) {
             confirmedMediaRegions.add(region);
-            final saved = await _saveVisibleImage(customer, visible,
-                sentAt: turnAt,
-                viewportFallback: viewportFallbackRegions
-                    .any((item) => identical(item, region)));
+            final saved = await _saveVisibleImage(
+              customer,
+              visible,
+              sentAt: turnAt,
+              viewportFallback: viewportFallbackRegions
+                  .any((item) => identical(item, region)),
+              cacheCopy: cacheOriginal,
+            );
             if (saved != null) {
               capturedMedia.add(saved);
             }
@@ -1775,9 +1815,9 @@ class _CaptureHomeState extends State<CaptureHome> {
       }
     }
     _visibleMediaTrace =
-        'strict routing: image -> screenshot, video -> Save As + 1fps frames; candidates='
+        'strict routing: image -> verified cache original or screenshot, video -> cache + 1fps frames; candidates='
         '${imageCandidates.length}, captured=${capturedMedia.length}, '
-        'failures=$failures; '
+        'failures=$failures, sources=${inspectedMediaSources.join(',')}; '
         'JD image viewer was not opened';
     if (confirmedMediaRegions.isNotEmpty) {
       // Re-read text with the verified media rectangles masked. Otherwise OCR
@@ -1799,6 +1839,87 @@ class _CaptureHomeState extends State<CaptureHome> {
       capturedAt: inspection.capturedAt,
       messages: [...?textCapture?.messages, ...uniqueMedia],
     );
+  }
+
+  Future<CapturedMessage?> _captureDirectCachedMedia(
+    String customer,
+    UnreadCaptureRecovery recovery, {
+    _RunVideoProcessingUnlocked? runVideoProcessingUnlocked,
+  }) async {
+    final store = await _database.history;
+    final videoDestination = Directory(
+      '${store.mediaDirectory.path}/${store.safeUserId(customer)}/videos',
+    );
+    await videoDestination.create(recursive: true);
+    final cached = await _adapter.captureRecentCachedMedia(
+      expectedCustomer: customer,
+      expectedMediaAt: recovery.detectedAt,
+      destinationDirectory: videoDestination.path,
+    );
+    if (cached == null) return null;
+    if (!_claimDirectCachedMedia(customer, recovery, cached)) {
+      await _deleteRejectedCachedVideo(cached.video);
+      return null;
+    }
+    if (cached.image case final image?) {
+      return _saveVisibleImage(
+        customer,
+        image,
+        sentAt: recovery.detectedAt,
+        cacheCopy: true,
+      );
+    }
+    if (cached.video case final video?) {
+      if (cached.cacheKey.isEmpty ||
+          await store.hasSimilarImageFingerprint(
+            customer,
+            cached.cacheKey,
+            maximumDistance: 0,
+            captureSources: const {'jd_video_cache'},
+            capturedAfter: recovery.detectedAt,
+          )) {
+        await _deleteRejectedCachedVideo(video);
+        return null;
+      }
+      return _processDownloadedVideo(
+        customer,
+        video,
+        cached.cacheKey,
+        sentAt: recovery.detectedAt,
+        runVideoProcessingUnlocked: runVideoProcessingUnlocked,
+      );
+    }
+    return null;
+  }
+
+  bool _claimDirectCachedMedia(
+    String customer,
+    UnreadCaptureRecovery recovery,
+    CachedMediaPayload cached,
+  ) {
+    if (cached.cacheKey.isEmpty ||
+        cached.cacheModifiedAt.millisecondsSinceEpoch == 0) {
+      return false;
+    }
+    if (!UnreadCaptureRecovery.cacheClockUniquelyMatches(
+      modifiedAt: cached.cacheModifiedAt,
+      targetCustomer: customer,
+      recoveries: _unreadRecovery,
+    )) {
+      return false;
+    }
+    final existingOwner = _claimedJdCacheMediaOwners[cached.cacheKey];
+    if (existingOwner != null && existingOwner != customer) {
+      return false;
+    }
+    _claimedJdCacheMediaOwners[cached.cacheKey] = customer;
+    return true;
+  }
+
+  Future<void> _deleteRejectedCachedVideo(DownloadedVideoPayload? video) async {
+    if (video == null || video.path.isEmpty) return;
+    final file = File(video.path);
+    if (await file.exists()) await file.delete();
   }
 
   Future<CapturedMessage?> _saveVisibleVideo(
@@ -1835,6 +1956,22 @@ class _CaptureHomeState extends State<CaptureHome> {
         )
         .timeout(_unreadOperationTimeout);
     if (downloaded.path.isEmpty) return null;
+    return _processDownloadedVideo(
+      customer,
+      downloaded,
+      thumbnailFingerprint,
+      sentAt: sentAt,
+      runVideoProcessingUnlocked: runVideoProcessingUnlocked,
+    );
+  }
+
+  Future<CapturedMessage?> _processDownloadedVideo(
+    String customer,
+    DownloadedVideoPayload downloaded,
+    String thumbnailFingerprint, {
+    DateTime? sentAt,
+    _RunVideoProcessingUnlocked? runVideoProcessingUnlocked,
+  }) async {
     Future<CapturedMessage?> processDownloadedVideo() async {
       final extracted =
           await const VideoFrameExtractor().extract(downloaded.path);
@@ -1958,6 +2095,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     bool viewportFallback = false,
     bool originalDownload = false,
     bool clipboardCopy = false,
+    bool cacheCopy = false,
   }) async {
     final bytes = image.bytes!;
     final fingerprint = image.visualFingerprint ?? '';
@@ -1983,16 +2121,20 @@ class _CaptureHomeState extends State<CaptureHome> {
       direction: 'incoming',
       body: clipboardCopy
           ? '[Customer sent an image; copied from JD]'
-          : originalDownload
-              ? '[Customer sent an image; original downloaded]'
-              : '[Customer sent an image; visible portion captured]',
+          : cacheCopy
+              ? '[Customer sent an image; original copied from JD cache]'
+              : originalDownload
+                  ? '[Customer sent an image; original downloaded]'
+                  : '[Customer sent an image; visible portion captured]',
       sender: customer,
       sentAt: sentAt,
       axPath: clipboardCopy
           ? 'ocr:jd-clipboard-image'
-          : viewportFallback
-              ? 'ocr:visible-chat-viewport-fallback'
-              : 'ocr:visible-image-region',
+          : cacheCopy
+              ? 'ocr:jd-image-cache'
+              : viewportFallback
+                  ? 'ocr:visible-chat-viewport-fallback'
+                  : 'ocr:visible-image-region',
       media: [
         CapturedMedia(
           type: 'image',
@@ -2001,12 +2143,14 @@ class _CaptureHomeState extends State<CaptureHome> {
           originalName: originalName,
           captureSource: clipboardCopy
               ? 'jd_clipboard_copy'
-              : originalDownload
-                  ? 'jd_image_viewer_download'
-                  : viewportFallback
-                      ? 'verified_chat_viewport_fallback'
-                      : 'verified_window_crop',
-          isPartial: !originalDownload && !clipboardCopy,
+              : cacheCopy
+                  ? 'jd_image_cache'
+                  : originalDownload
+                      ? 'jd_image_viewer_download'
+                      : viewportFallback
+                          ? 'verified_chat_viewport_fallback'
+                          : 'verified_window_crop',
+          isPartial: !originalDownload && !clipboardCopy && !cacheCopy,
           description: 'Pending Codex visual analysis.',
           visualFingerprint: fingerprint,
         ),

@@ -35,6 +35,28 @@ class UnreadCaptureRecovery {
         .isAfter(handledAt.add(const Duration(seconds: 2)));
   }
 
+  /// A shared JD cache file may be assigned only when its modification clock
+  /// is clearly closer to this customer than to every other active unread
+  /// recovery. Ambiguous simultaneous customer turns are intentionally left
+  /// for visible-region verification instead of risking cross-customer media.
+  static bool cacheClockUniquelyMatches({
+    required DateTime modifiedAt,
+    required String targetCustomer,
+    required Map<String, UnreadCaptureRecovery> recoveries,
+    Duration ambiguityTolerance = const Duration(seconds: 3),
+  }) {
+    final target = recoveries[targetCustomer];
+    if (target == null) return false;
+    final targetDelta = modifiedAt.difference(target.detectedAt).abs();
+    for (final entry in recoveries.entries) {
+      if (entry.key == targetCustomer) continue;
+      final competingDelta =
+          modifiedAt.difference(entry.value.detectedAt).abs();
+      if (competingDelta <= targetDelta + ambiguityTolerance) return false;
+    }
+    return true;
+  }
+
   final String customer;
   final int unreadEvidence;
   final DateTime detectedAt;
