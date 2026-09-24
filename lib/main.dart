@@ -61,8 +61,10 @@ class _CaptureHomeState extends State<CaptureHome> {
   static const _unreadOperationTimeout = Duration(seconds: 12);
   // A holding message must not sit behind a full 90-second OCR/media pass.
   static const _fallbackInspectionTimeout = Duration(seconds: 4);
-  static const _scanInterval = Duration(seconds: 2);
-  static const _batchCollectionWindow = Duration(milliseconds: 2500);
+  static const _scanInterval = Duration(seconds: 1);
+  // Customers often send a photo and then a short instruction a few seconds
+  // later. Hold drafting briefly so both items form one reply batch.
+  static const _batchCollectionWindow = Duration(seconds: 4);
   static const _draftFailureRetryDelay = Duration(seconds: 10);
   static const _deliveryFailureRetryDelay = Duration(seconds: 10);
   late final MacOSCaptureAdapter _adapter;
@@ -240,7 +242,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       _autoCaptureRunning = true;
       _error = null;
       _diagnostics =
-          'Automatic OCR capture started. The sidebar is checked every 2 seconds; saved customer evidence is queued for drafting immediately.';
+          'Automatic OCR capture started. The sidebar is checked every second; saved customer evidence is queued for drafting immediately.';
     });
     _autoCaptureTimer =
         Timer.periodic(_scanInterval, (_) => unawaited(_runAutoCaptureCycle()));
@@ -471,10 +473,12 @@ class _CaptureHomeState extends State<CaptureHome> {
       final capturedAt =
           DateTime.tryParse(message['captured_at']?.toString() ?? '');
       if (capturedAt == null) return false;
-      return recovery.acceptsIncoming(
+      final media = message['media'] as List<Object?>? ?? const [];
+      return recovery.acceptsRecoveredEvidence(
         message['id']?.toString() ?? '',
         sentAt: DateTime.tryParse(message['sent_at']?.toString() ?? ''),
         capturedAt: capturedAt,
+        hasVisualEvidence: media.isNotEmpty,
       );
     });
   }
@@ -728,6 +732,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<void> _queueDraftIfPending(String userId) async {
+    // A verified customer message block is still waiting for its screenshot.
+    // Do not let a partial OCR-only batch reach Codex or the delivery queue.
+    if (_unreadRecovery[userId]?.visualSnapshotRequired == true) return;
     if (!await _database.hasPendingUnanswered(userId) ||
         await _database.isHumanContacting(userId)) {
       return;
@@ -1014,9 +1021,12 @@ class _CaptureHomeState extends State<CaptureHome> {
                   capture != null &&
                   capture.messages.any((message) =>
                       message.direction == 'incoming' &&
-                      recovery!.acceptsIncoming(message.stableId,
-                          sentAt: message.sentAt,
-                          capturedAt: capture.capturedAt))) {
+                      recovery!.acceptsRecoveredEvidence(
+                        message.stableId,
+                        sentAt: message.sentAt,
+                        capturedAt: capture.capturedAt,
+                        hasVisualEvidence: message.media.isNotEmpty,
+                      ))) {
                 await _database.capSlaFallbackDue(
                   userId: activeCustomer,
                   dueAt: recovery.detectedAt
@@ -1139,8 +1149,12 @@ class _CaptureHomeState extends State<CaptureHome> {
               capture != null &&
               capture.messages.any((message) =>
                   message.direction == 'incoming' &&
-                  recovery!.acceptsIncoming(message.stableId,
-                      sentAt: message.sentAt, capturedAt: capture.capturedAt));
+                  recovery!.acceptsRecoveredEvidence(
+                    message.stableId,
+                    sentAt: message.sentAt,
+                    capturedAt: capture.capturedAt,
+                    hasVisualEvidence: message.media.isNotEmpty,
+                  ));
           if (capturedNewIncoming) {
             await _database.capSlaFallbackDue(
               userId: customer,
@@ -1214,7 +1228,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     } on TimeoutException {
       if (mounted) {
         setState(() => _diagnostics =
-            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next 2-second sidebar check will retry.');
+            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next one-second sidebar check will retry.');
       }
     } catch (error) {
       if (mounted) setState(() => _error = error);
@@ -1660,27 +1674,38 @@ class _CaptureHomeState extends State<CaptureHome> {
       includeTextDense: true,
     );
     final viewportFallbackRegions = <OcrVisualRegion>[];
-    if (imageCandidates.isEmpty && allowUnlabeledLatestImage) {
-      final fallback =
-          candidateSelector.fallbackLatestCustomerBlock(inspection, customer);
-      if (fallback != null) {
-        imageCandidates = [fallback];
-        viewportFallbackRegions.add(fallback);
+    if (allowUnlabeledLatestImage) {
+      final recovery = _unreadRecovery[customer];
+      final recoveryBatch = candidateSelector.fallbackRecentCustomerBatch(
+            inspection,
+            customer,
+          ) ??
+          (recovery == null
+              ? null
+              : candidateSelector.fallbackVerifiedChatViewport(
+                  inspection,
+                ));
+      if (recoveryBatch != null) {
+        // Recovery uses one authoritative screenshot for the whole customer
+        // event batch. One bounded crop is fast and cannot be delayed behind
+        // several speculative image classifications.
+        imageCandidates = [recoveryBatch];
+        viewportFallbackRegions.add(recoveryBatch);
+        final sentAt = candidateSelector.ownerSentAtForRegion(
+              inspection,
+              customer,
+              recoveryBatch,
+            ) ??
+            recovery?.detectedAt;
+        if (recovery != null &&
+            recovery.acceptsIncoming(
+              'visible-block:${sentAt?.microsecondsSinceEpoch ?? inspection.capturedAt.microsecondsSinceEpoch}',
+              sentAt: sentAt,
+              capturedAt: inspection.capturedAt,
+            )) {
+          recovery.visualSnapshotRequired = true;
+        }
       }
-    }
-    if ((latestVisible?.direction == 'outgoing' && !onlyOurHoldingIsBelow) ||
-        extraction.latestIncomingHasText) {
-      imageCandidates = imageCandidates.where((region) {
-        final bottom = region.y + region.height;
-        final sellerActivityBelow = inspection.observations.any((item) {
-          final text = item.text.trim();
-          final sellerLabel = (text.contains('旗舰店') &&
-                  (text.contains(':') || text.contains('：'))) ||
-              RegExp(r'格志打印机[\u3400-\u9fffA-Za-z0-9_-]{1,12}').hasMatch(text);
-          return sellerLabel && item.y > bottom + .005;
-        });
-        return !sellerActivityBelow;
-      }).toList(growable: false);
     }
     if (!extraction.latestVisibleSenderIsIncoming &&
         !onlyOurHoldingIsBelow &&
@@ -1691,14 +1716,33 @@ class _CaptureHomeState extends State<CaptureHome> {
       return textCapture;
     }
     final capturedMedia = <CapturedMessage>[];
-    // Automatic image capture stays screenshot-first and never opens JD's
-    // image viewer. A detected video uses JD's bounded local cache copy.
-    // Only the newest candidate can create work.
+    // Recovery normally supplies one sender-bounded batch. Outside recovery,
+    // retain one region per customer sender and process only the newest one.
+    final candidateByOwner = <String, OcrVisualRegion>{};
+    for (final region in imageCandidates) {
+      final ownerKey =
+          candidateSelector.ownerKeyForRegion(inspection, customer, region) ??
+              'unowned:${region.x}:${region.y}';
+      final existing = candidateByOwner[ownerKey];
+      if (existing == null ||
+          region.width * region.height > existing.width * existing.height) {
+        candidateByOwner[ownerKey] = region;
+      }
+    }
+    imageCandidates = candidateByOwner.values.toList()
+      ..sort((a, b) => b.y.compareTo(a.y));
     imageCandidates = imageCandidates.take(1).toList(growable: false);
     var failures = 0;
     final confirmedMediaRegions = <OcrVisualRegion>[];
     for (final region in imageCandidates) {
       try {
+        final viewportFallback =
+            viewportFallbackRegions.any((item) => identical(item, region));
+        final textDense =
+            candidateSelector.isTextDense(region, inspection.observations);
+        final textCharacters = candidateSelector.textCharacterCount(
+            region, inspection.observations);
+
         final visible = await _adapter
             .captureImageRegion(
               expectedCustomer: customer,
@@ -1710,10 +1754,13 @@ class _CaptureHomeState extends State<CaptureHome> {
               allowActivationForVideoDetection: allowVideoDetectionActivation,
             )
             .timeout(_unreadOperationTimeout);
-        var turnAt = _unreadRecovery[customer]?.detectedAt ??
+        var turnAt = candidateSelector.ownerSentAtForRegion(
+                inspection, customer, region) ??
+            _unreadRecovery[customer]?.detectedAt ??
             (extraction.latestVisibleSenderIsIncoming
                 ? extraction.latestIncomingSentAt
-                : null);
+                : null) ??
+            inspection.capturedAt;
         // The sender label can sit above OCR's text band while the media
         // thumbnail is still clearly visible. Start the 20-second recovery
         // clock before a video cache copy or frame extraction can stall.
@@ -1721,8 +1768,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             (visible.kind == 'video' ||
                 (visible.kind == 'image' &&
                     visible.bytes != null &&
-                    !candidateSelector.isTextDense(
-                        region, inspection.observations))) &&
+                    !textDense)) &&
             visible.visualFingerprint?.isNotEmpty == true &&
             !_unreadRecovery.containsKey(customer) &&
             !await (await _database.history).hasSimilarImageFingerprint(
@@ -1750,18 +1796,22 @@ class _CaptureHomeState extends State<CaptureHome> {
             capturedMedia.add(saved);
           }
         } else if (visible.kind == 'image' && visible.bytes != null) {
-          // A rectangle around a long ordinary text bubble can look like an
-          // image to Vision. Only a non-text-dense rectangle may be saved as a
-          // photo; dense regions were inspected solely for a video overlay.
-          if (!candidateSelector.isTextDense(region, inspection.observations)) {
+          // Save the sender-bounded screenshot immediately. Clipboard probing
+          // can stall for many seconds and can report text when the customer
+          // sent a text-heavy screenshot. Reject only a small detected region
+          // that clearly contains ordinary chat text; pale and fallback
+          // regions are preserved for Codex visual analysis.
+          final smallTextBubble =
+              !viewportFallback && region.height < .10 && textCharacters > 0;
+          if (!smallTextBubble || region.height >= .10) {
             confirmedMediaRegions.add(region);
-            final saved = await _saveVisibleImage(customer, visible,
-                sentAt: turnAt,
-                viewportFallback: viewportFallbackRegions
-                    .any((item) => identical(item, region)));
-            if (saved != null) {
-              capturedMedia.add(saved);
-            }
+            final saved = await _saveVisibleImage(
+              customer,
+              visible,
+              sentAt: turnAt,
+              viewportFallback: viewportFallback,
+            );
+            if (saved != null) capturedMedia.add(saved);
           }
         }
       } on PlatformException {
@@ -1985,7 +2035,9 @@ class _CaptureHomeState extends State<CaptureHome> {
           ? '[Customer sent an image; copied from JD]'
           : originalDownload
               ? '[Customer sent an image; original downloaded]'
-              : '[Customer sent an image; visible portion captured]',
+              : viewportFallback
+                  ? '[Verified visual snapshot of customer message block]'
+                  : '[Customer sent an image; visible portion captured]',
       sender: customer,
       sentAt: sentAt,
       axPath: clipboardCopy
