@@ -45,11 +45,6 @@ class UnreadCaptureRecovery {
   bool resendSent = false;
   bool videoProcessing = false;
   bool noticeSending = false;
-  // A sender-bounded screenshot was identified for this unread turn. Text
-  // OCR alone cannot complete the turn until visual evidence for that block
-  // is persisted. This prevents image pixels from being mistaken for the
-  // customer's chat text and answered without the image.
-  bool visualSnapshotRequired = false;
   DateTime? lastCaptureAttemptAt;
   String? latestIncomingSenderKey;
   String? _tentativeRelaxedBody;
@@ -64,20 +59,6 @@ class UnreadCaptureRecovery {
       return !sentAt.isBefore(detectedAt.subtract(detectedTurnClockTolerance));
     }
     return !capturedAt.isBefore(detectedAt);
-  }
-
-  bool acceptsRecoveredEvidence(
-    String messageId, {
-    DateTime? sentAt,
-    required DateTime capturedAt,
-    required bool hasVisualEvidence,
-  }) {
-    if (visualSnapshotRequired && !hasVisualEvidence) return false;
-    return acceptsIncoming(
-      messageId,
-      sentAt: sentAt,
-      capturedAt: capturedAt,
-    );
   }
 
   /// A single low-confidence OCR pass may read JD controls as customer text.

@@ -79,36 +79,6 @@ void main() {
         isFalse);
   });
 
-  test('OCR text cannot close a turn that requires a visual snapshot', () {
-    final detectedAt = DateTime.utc(2026, 9, 24, 3, 49, 41);
-    final recovery = UnreadCaptureRecovery(
-      customer: '上海胜价信息技术',
-      unreadEvidence: 20,
-      detectedAt: detectedAt,
-      knownIncomingIds: const {},
-      knownOutgoingIds: const {},
-    )..visualSnapshotRequired = true;
-
-    expect(
-      recovery.acceptsRecoveredEvidence(
-        'ocr-text-inside-pale-image',
-        sentAt: detectedAt,
-        capturedAt: detectedAt.add(const Duration(seconds: 3)),
-        hasVisualEvidence: false,
-      ),
-      isFalse,
-    );
-    expect(
-      recovery.acceptsRecoveredEvidence(
-        'sender-bounded-message-snapshot',
-        sentAt: detectedAt,
-        capturedAt: detectedAt.add(const Duration(seconds: 4)),
-        hasVisualEvidence: true,
-      ),
-      isTrue,
-    );
-  });
-
   test('late recovery keeps current captured messages out of its baseline', () {
     final detectedAt = DateTime.utc(2026, 9, 23, 3, 6, 53);
     final currentMessageAt = DateTime.utc(2026, 9, 23, 3, 7, 50);
