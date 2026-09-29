@@ -37,7 +37,7 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 11,
+        version: 13,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
@@ -49,8 +49,8 @@ class CaptureDatabase {
     }
     if (!_reviewControlsSynced) {
       // `human_review_open` was used by older builds to pause AI as soon as a
-      // ticket was created. Open tickets are now informational: AI remains
-      // active until an operator explicitly clicks Contacting.
+      // ticket was created. Open tickets are informational: AI remains active
+      // until an operator or the explicit transfer flow starts contacting.
       final now = DateTime.now().millisecondsSinceEpoch;
       await database.update(
           'conversation_control',
@@ -73,6 +73,7 @@ class CaptureDatabase {
     await _createSlaFallbacks(db);
     await _createAnsweredCursors(db);
     await _createHumanTransferRequests(db);
+    await _createChatTransferLogs(db);
   }
 
   Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -111,12 +112,20 @@ class CaptureDatabase {
         WHERE state='pending' ''');
     }
     if (oldVersion < 11) await _createHumanTransferRequests(db);
+    if (oldVersion < 12) await _createChatTransferLogs(db);
+    if (oldVersion < 13) {
+      await _addColumnIfMissing(
+          db, 'human_review_tickets', 'request_message_id TEXT');
+      await _addColumnIfMissing(
+          db, 'chat_transfer_logs', 'request_message_id TEXT');
+    }
   }
 
   Future<void> _addColumnIfMissing(
       Database db, String table, String definition) async {
     final column = definition.split(' ').first;
     final columns = await db.rawQuery('PRAGMA table_info($table)');
+    if (columns.isEmpty) return;
     if (columns.any((row) => row['name'] == column)) return;
     await db.execute('ALTER TABLE $table ADD COLUMN $definition');
   }
@@ -230,7 +239,9 @@ class CaptureDatabase {
   }
 
   Future<void> appendAutomatedNoticeSent(
-      {required String userId, required String reply}) async {
+      {required String userId,
+      required String reply,
+      String model = 'jd-transfer-welcome-v1'}) async {
     final raw = <String, Object?>{
       'reply': reply,
       'decision': 'draft',
@@ -241,7 +252,7 @@ class CaptureDatabase {
       'risk_level': 'low',
       'risk_triggers': <String>[],
       'auto_send_allowed': false,
-      'model': 'jd-transfer-welcome-v1',
+      'model': model,
       'attachments': <Object?>[],
       'image_descriptions': <Object?>[],
       'human_review_required': false,
@@ -286,6 +297,7 @@ class CaptureDatabase {
       reason TEXT NOT NULL,
       status TEXT NOT NULL,
       assigned_to TEXT,
+      request_message_id TEXT,
       created_at_ms INTEGER NOT NULL,
       updated_at_ms INTEGER NOT NULL
     )''');
@@ -297,6 +309,26 @@ class CaptureDatabase {
       resume_after_message_id TEXT,
       updated_at_ms INTEGER NOT NULL
     )''');
+  }
+
+  Future<void> _createChatTransferLogs(Database db) async {
+    await db.execute('''CREATE TABLE IF NOT EXISTS chat_transfer_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL UNIQUE,
+      user_id TEXT NOT NULL,
+      source_account TEXT NOT NULL,
+      target_account TEXT,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      request_message_id TEXT,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL
+    )''');
+    await db.execute('''CREATE INDEX IF NOT EXISTS chat_transfer_log_recent
+      ON chat_transfer_logs(updated_at_ms DESC, id DESC)''');
+    await db.execute('''CREATE INDEX IF NOT EXISTS chat_transfer_log_target
+      ON chat_transfer_logs(status, target_account, updated_at_ms DESC)''');
   }
 
   Future<void> _createHumanTransferRequests(Database db) async {
@@ -448,9 +480,7 @@ class CaptureDatabase {
         where: 'user_id = ?', whereArgs: [userId], limit: 1);
     if (controls.isNotEmpty) {
       final control = controls.first;
-      if (control['state'] == 'human_contacting') {
-        return result.changed;
-      }
+      if (control['state'] == 'human_contacting') return result.changed;
       if (control['state'] == 'waiting_for_customer') {
         final newestId = result.insertedIncomingIds.last;
         if (newestId == control['resume_after_message_id']) {
@@ -982,10 +1012,15 @@ class CaptureDatabase {
 
   /// Saves the reply for a frozen batch. If later customer evidence arrived
   /// during generation, its pending row remains for the next batch.
-  Future<int> saveDraft(int pendingId, AiDraft draft,
-      {String? expectedMessageId}) async {
+  Future<int> saveDraft(
+    int pendingId,
+    AiDraft draft, {
+    String? expectedMessageId,
+    bool deliverable = true,
+  }) async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final deliveryState = deliverable ? 'ready' : 'transfer_only';
     return db.transaction((txn) async {
       final rows = await txn.query('pending_customers',
           where: 'id = ?', whereArgs: [pendingId], limit: 1);
@@ -996,10 +1031,11 @@ class CaptureDatabase {
       await txn.rawInsert('''INSERT INTO generated_drafts(
         user_id,pending_id,reply,model,raw_json,created_at_ms,
         delivery_state,delivery_attempts,retry_at_ms,last_error,batch_end_message_id)
-        VALUES(?,?,?,?,?,?,'ready',0,NULL,NULL,?) ON CONFLICT(user_id) DO UPDATE SET
+        VALUES(?,?,?,?,?,?,?,0,NULL,NULL,?) ON CONFLICT(user_id) DO UPDATE SET
         pending_id=excluded.pending_id,reply=excluded.reply,
         model=excluded.model,raw_json=excluded.raw_json,
-        created_at_ms=excluded.created_at_ms,delivery_state='ready',
+        created_at_ms=excluded.created_at_ms,
+        delivery_state=excluded.delivery_state,
         delivery_attempts=0,retry_at_ms=NULL,last_error=NULL,
         batch_end_message_id=excluded.batch_end_message_id''', [
         row['user_id'],
@@ -1008,6 +1044,7 @@ class CaptureDatabase {
         draft.model,
         draft.rawJson,
         now,
+        deliveryState,
         expectedMessageId ?? row['newest_message_id'],
       ]);
       if (newerBatchPending) return 1;
@@ -1051,6 +1088,24 @@ class CaptureDatabase {
     );
   }
 
+  /// Revalidates a queued reply immediately before UI automation types it.
+  /// A transfer can delete or suppress a draft after the delivery worker has
+  /// already materialized it in memory.
+  Future<bool> isGeneratedDraftReadyForSend({
+    required String userId,
+    required String reply,
+  }) async {
+    final rows = await (await database).query(
+      'generated_drafts',
+      columns: ['user_id'],
+      where:
+          "user_id = ? AND reply = ? AND delivery_state IN ('ready','retry')",
+      whereArgs: [userId, reply],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
   /// Removes an unrecoverable queue item so it cannot permanently block every
   /// later customer. Durable captured conversation history is preserved.
   Future<void> abandonPendingCustomer(String userId) async {
@@ -1065,6 +1120,42 @@ class CaptureDatabase {
     final db = await database;
     await db
         .delete('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
+  }
+
+  /// Removes the non-deliverable draft used only to trigger an automatic
+  /// transfer. Advancing its frozen-batch cursor prevents the same request
+  /// from being regenerated if the transfer attempt itself fails.
+  Future<void> discardTransferOnlyDraft(String userId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'generated_drafts',
+        columns: ['batch_end_message_id'],
+        where: "user_id = ? AND delivery_state = 'transfer_only'",
+        whereArgs: [userId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final batchEnd = rows.first['batch_end_message_id']?.toString();
+      await txn.delete(
+        'generated_drafts',
+        where: "user_id = ? AND delivery_state = 'transfer_only'",
+        whereArgs: [userId],
+      );
+      if (batchEnd == null || batchEnd.isEmpty) return;
+      await txn.rawInsert('''INSERT INTO answered_cursors(user_id,message_id)
+        VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
+        message_id=excluded.message_id''', [userId, batchEnd]);
+      await txn.update(
+        'sla_fallbacks',
+        {
+          'state': 'completed',
+          'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'user_id = ? AND message_id = ?',
+        whereArgs: [userId, batchEnd],
+      );
+    });
   }
 
   Future<void> markGeneratedDraftDeliveryFailure({
@@ -1082,6 +1173,161 @@ class CaptureDatabase {
       error,
       userId,
     ]);
+  }
+
+  Future<List<ChatTransferLog>> chatTransferLogs({int limit = 50}) async {
+    final rows = await (await database).query(
+      'chat_transfer_logs',
+      orderBy: 'updated_at_ms DESC, id DESC',
+      limit: limit,
+    );
+    return rows
+        .map((row) => ChatTransferLog.fromJson(row.cast<String, Object?>()))
+        .toList(growable: false);
+  }
+
+  /// Reserves one in-flight automatic transfer per ticket. A pre-click failure
+  /// or an earlier no-agent result may be overwritten by a later customer
+  /// request; transferring, unconfirmed, and successful outcomes remain
+  /// protected from an automatic duplicate click.
+  Future<ChatTransferLog?> reserveChatTransferLog({
+    required HumanReviewTicket ticket,
+  }) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final existing = await txn.query(
+        'chat_transfer_logs',
+        where: 'ticket_id = ?',
+        whereArgs: [ticket.id],
+        limit: 1,
+      );
+      final ticketRows = await txn.query(
+        'human_review_tickets',
+        columns: ['request_message_id'],
+        where: 'id = ?',
+        whereArgs: [ticket.id],
+        limit: 1,
+      );
+      final requestMessageId = ticketRows.isEmpty
+          ? null
+          : ticketRows.single['request_message_id']?.toString();
+      // This is the durable safety boundary between ordinary human-review
+      // tickets and an explicit, repeated customer request to transfer.
+      if (requestMessageId == null || requestMessageId.isEmpty) return null;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (existing.isNotEmpty) {
+        final row = existing.single.cast<String, Object?>();
+        final status = row['status']?.toString();
+        // Both states are known to be pre-click outcomes. A later explicit
+        // review request is allowed to replace them and inspect live agents.
+        if (status != 'failed' && status != 'agents_busy') return null;
+        // The same triggering message gets exactly one transfer attempt. Only
+        // a later completed two-request cycle writes a new message ID and may
+        // overwrite the failed/no-agent result.
+        if (requestMessageId == row['request_message_id']?.toString()) {
+          return null;
+        }
+        await txn.update(
+          'chat_transfer_logs',
+          {
+            'status': 'pending',
+            'reason': ticket.reason,
+            'target_account': null,
+            'error': null,
+            'request_message_id': requestMessageId,
+            'updated_at_ms': now,
+          },
+          where: 'id = ?',
+          whereArgs: [row['id']],
+        );
+        final refreshed = (await txn.query(
+          'chat_transfer_logs',
+          where: 'id = ?',
+          whereArgs: [row['id']],
+          limit: 1,
+        ))
+            .single;
+        return ChatTransferLog.fromJson(refreshed.cast<String, Object?>());
+      }
+      final id = await txn.insert('chat_transfer_logs', {
+        'ticket_id': ticket.id,
+        'user_id': ticket.conversationId,
+        'source_account': '当前客服账号',
+        'reason': ticket.reason,
+        'status': 'pending',
+        'request_message_id': requestMessageId,
+        'created_at_ms': now,
+        'updated_at_ms': now,
+      });
+      final row = (await txn.query(
+        'chat_transfer_logs',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      ))
+          .single;
+      return ChatTransferLog.fromJson(row.cast<String, Object?>());
+    });
+  }
+
+  Future<void> updateChatTransferLog({
+    required int id,
+    required String status,
+    String? sourceAccount,
+    String? targetAccount,
+    String? error,
+  }) async {
+    await (await database).update(
+      'chat_transfer_logs',
+      {
+        'status': status,
+        if (sourceAccount?.trim().isNotEmpty == true)
+          'source_account': sourceAccount!.trim(),
+        if (targetAccount?.trim().isNotEmpty == true)
+          'target_account': targetAccount!.trim(),
+        'error': error,
+        'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Picks the least-recently used active account. Never-used accounts come
+  /// first, and a stable lexical tie-break keeps the choice deterministic.
+  Future<String> chooseAutomaticTransferAccount(
+      Iterable<String> activeAccounts) async {
+    final accounts = activeAccounts
+        .map((account) => account.trim())
+        .where((account) => account.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (accounts.isEmpty) {
+      throw StateError('No active JD transfer account is available.');
+    }
+    final rows = await (await database).query(
+      'chat_transfer_logs',
+      columns: ['target_account', 'updated_at_ms'],
+      where: "status = 'transferred' AND target_account IS NOT NULL",
+      orderBy: 'updated_at_ms DESC',
+    );
+    final lastUsed = <String, int>{};
+    for (final row in rows) {
+      final account = row['target_account']?.toString();
+      if (account != null) {
+        lastUsed.putIfAbsent(
+            account, () => (row['updated_at_ms'] as num).toInt());
+      }
+    }
+    accounts.sort((left, right) {
+      final leftAt = lastUsed[left];
+      final rightAt = lastUsed[right];
+      if (leftAt == null && rightAt != null) return -1;
+      if (leftAt != null && rightAt == null) return 1;
+      final byTime = (leftAt ?? 0).compareTo(rightAt ?? 0);
+      return byTime != 0 ? byTime : left.compareTo(right);
+    });
+    return accounts.first;
   }
 
   Future<List<HumanReviewTicket>> humanReviewTickets() async {
@@ -1166,6 +1412,7 @@ class CaptureDatabase {
     required String userId,
     required String customerRequest,
     required String reason,
+    String? requestMessageId,
   }) async {
     final db = await database;
     final existing = await db.query('human_review_tickets',
@@ -1181,17 +1428,32 @@ class CaptureDatabase {
           'customer_request': customerRequest,
           'reason': reason,
           'status': 'open',
+          'request_message_id': requestMessageId,
           'created_at_ms': now,
           'updated_at_ms': now,
         });
-        // An open ticket is visible to operators but does not transfer control.
-        // Only markTicketContacting pauses generation and automatic sending.
         await txn.rawInsert('''INSERT INTO conversation_control(
           user_id,state,resume_after_message_id,updated_at_ms)
           VALUES(?,'ai_active',NULL,?) ON CONFLICT(user_id) DO UPDATE SET
           state='ai_active',resume_after_message_id=NULL,
           updated_at_ms=excluded.updated_at_ms''', [userId, now]);
       });
+    } else if (requestMessageId?.isNotEmpty == true) {
+      // A later explicit transfer request supersedes an unresolved transfer
+      // attempt. Ordinary review updates retain the last working behavior.
+      await db.update(
+        'human_review_tickets',
+        {
+          'customer_request': customerRequest,
+          'reason': reason,
+          'status': 'open',
+          'assigned_to': null,
+          'request_message_id': requestMessageId,
+          'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+        },
+        where: 'id = ?',
+        whereArgs: [existing.single['id']],
+      );
     }
     return (await humanReviewTickets())
         .firstWhere((ticket) => ticket.conversationId == userId);
@@ -1228,7 +1490,31 @@ class CaptureDatabase {
     });
   }
 
-  Future<void> markTicketContacted(int ticketId) async {
+  /// Transfer and delivery outcomes never suppress later customer messages.
+  Future<void> markTicketAwaitingCurrentAgent(int ticketId) async {
+    final db = await database;
+    final rows = await db.query('human_review_tickets',
+        where: 'id = ?', whereArgs: [ticketId], limit: 1);
+    if (rows.isEmpty) return;
+    final userId = rows.first['user_id']! as String;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.transaction((txn) async {
+      await txn.update(
+        'human_review_tickets',
+        {'status': 'open', 'updated_at_ms': now},
+        where: 'id = ?',
+        whereArgs: [ticketId],
+      );
+      await txn.rawInsert('''INSERT INTO conversation_control(
+        user_id,state,resume_after_message_id,updated_at_ms)
+        VALUES(?,'ai_active',NULL,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+        state='ai_active',resume_after_message_id=NULL,
+        updated_at_ms=excluded.updated_at_ms''', [userId, now]);
+    });
+  }
+
+  Future<void> markTicketContacted(int ticketId, {String? assignedTo}) async {
     final db = await database;
     final rows = await db.query('human_review_tickets',
         where: 'id = ?', whereArgs: [ticketId], limit: 1);
@@ -1246,8 +1532,15 @@ class CaptureDatabase {
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction((txn) async {
       await txn.update(
-          'human_review_tickets', {'status': 'contacted', 'updated_at_ms': now},
-          where: 'id = ?', whereArgs: [ticketId]);
+          'human_review_tickets',
+          {
+            'status': 'contacted',
+            'updated_at_ms': now,
+            if (assignedTo?.trim().isNotEmpty == true)
+              'assigned_to': assignedTo!.trim(),
+          },
+          where: 'id = ?',
+          whereArgs: [ticketId]);
       await txn.rawInsert('''INSERT INTO conversation_control(
         user_id,state,resume_after_message_id,updated_at_ms)
         VALUES(?,'waiting_for_customer',?,?) ON CONFLICT(user_id) DO UPDATE SET

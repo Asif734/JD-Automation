@@ -207,6 +207,100 @@ void main() {
     expect(rows.single['request_count'], 0);
   });
 
+  test('new request pair overwrites and retries an agents-busy review',
+      () async {
+    final root = await Directory.systemTemp.createTemp('review_retry_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    final morning = DateTime.now().toUtc();
+    expect(
+      await database.recordHumanTransferRequest(
+        userId: 'returning-buyer',
+        messageId: 'morning-request',
+        requestedAt: morning,
+      ),
+      isFalse,
+    );
+    final morningTicket = await database.createHumanReviewTicket(
+      userId: 'returning-buyer',
+      customerRequest: 'Please transfer me this morning',
+      reason: 'Morning review request',
+      requestMessageId: 'morning-second-request',
+    );
+    final morningLog =
+        await database.reserveChatTransferLog(ticket: morningTicket);
+    await database.updateChatTransferLog(
+      id: morningLog!.id,
+      status: 'agents_busy',
+    );
+    await database.markTicketAwaitingCurrentAgent(morningTicket.id);
+    expect(
+      await database.reserveChatTransferLog(ticket: morningTicket),
+      isNull,
+    );
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:returning-buyer',
+      customerName: 'returning-buyer',
+      customerExternalId: 'returning-buyer',
+      capturedAt: morning.add(const Duration(hours: 2)),
+      messages: const [
+        CapturedMessage(
+          stableId: 'afternoon-first-request',
+          direction: 'incoming',
+          body: 'I want another human review',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    expect(await database.hasPendingUnanswered('returning-buyer'), isTrue);
+
+    // A failed earlier attempt does not change the two-request policy. The
+    // first new request starts a fresh sequence.
+    expect(
+      await database.recordHumanTransferRequest(
+        userId: 'returning-buyer',
+        messageId: 'afternoon-first-request',
+        requestedAt: morning.add(const Duration(hours: 2)),
+      ),
+      isFalse,
+    );
+    // The second distinct request in the normal ten-minute window triggers a
+    // new attempt, despite the earlier agents-busy record.
+    expect(
+      await database.recordHumanTransferRequest(
+        userId: 'returning-buyer',
+        messageId: 'afternoon-second-request',
+        requestedAt: morning.add(const Duration(hours: 2, minutes: 1)),
+      ),
+      isTrue,
+    );
+    final afternoonTicket = await database.createHumanReviewTicket(
+      userId: 'returning-buyer',
+      customerRequest: 'No, please transfer me',
+      reason: 'Afternoon review request',
+      requestMessageId: 'afternoon-second-request',
+    );
+    expect(afternoonTicket.id, morningTicket.id);
+    expect(afternoonTicket.customerRequest, 'No, please transfer me');
+    expect(afternoonTicket.reason, 'Afternoon review request');
+    expect(afternoonTicket.status, 'open');
+    expect(await database.hasPendingUnanswered('returning-buyer'), isTrue);
+
+    final retried =
+        await database.reserveChatTransferLog(ticket: afternoonTicket);
+    expect(retried, isNotNull);
+    expect(retried!.id, morningLog.id);
+    expect(retried.status, 'pending');
+    expect(retried.reason, 'Afternoon review request');
+    expect(retried.targetAccount, isNull);
+    expect(retried.error, isNull);
+  });
+
   test('transfer welcome reservation rejects the same exact event', () async {
     final root = await Directory.systemTemp.createTemp('welcome_guard_test_');
     final database = CaptureDatabase(storageRoot: root);
@@ -544,6 +638,71 @@ void main() {
         .query('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
     expect(rows, hasLength(1));
     expect(rows.single['delivery_state'], 'delivery_unknown');
+  });
+
+  test('explicit transfer drafts never enter the delivery queue', () async {
+    final root = await Directory.systemTemp.createTemp('transfer_draft_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    const userId = 'transfer-customer';
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: DateTime(2026, 9, 29, 11),
+      messages: const [
+        CapturedMessage(
+          stableId: 'transfer-message',
+          direction: 'incoming',
+          body: 'Transfer me to another agent',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final pending = (await database.conversations()).single;
+    const draft = AiDraft(
+      reply: 'A colleague can continue from here.',
+      decision: 'human_review',
+      confidence: 1,
+      riskLevel: 'high',
+      model: 'test',
+      usedRecordIds: [],
+      actions: ['transfer_to_human'],
+      attachments: [],
+      rawJson:
+          '{"reply":"A colleague can continue from here.","decision":"human_review","confidence":1,"risk_level":"high","model":"test","used_record_ids":[],"actions":["transfer_to_human"],"attachments":[]}',
+    );
+
+    await database.saveDraft(
+      pending.id,
+      draft,
+      expectedMessageId: 'transfer-message',
+      deliverable: false,
+    );
+
+    expect(await database.nextReadyDelivery(), isNull);
+    expect(
+      await database.isGeneratedDraftReadyForSend(
+        userId: userId,
+        reply: draft.reply,
+      ),
+      isFalse,
+    );
+    final rows = await (await database.database).query(
+      'generated_drafts',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+    );
+    expect(rows.single['delivery_state'], 'transfer_only');
+
+    await database.discardTransferOnlyDraft(userId);
+
+    expect(await database.hasUndeliveredDraft(userId), isFalse);
+    expect(await database.answeredMessageId(userId), 'transfer-message');
+    expect(await database.ensurePendingForUnanswered(userId), isFalse);
   });
 
   test('fallback reservation uses the JD China-time message clock', () async {
@@ -1057,7 +1216,7 @@ void main() {
         containsAll(['image-1', 'text-2']));
   });
 
-  test('human contacting pauses AI and contacted resumes only on next message',
+  test('automatic transfer preserves the existing human-contacting boundary',
       () async {
     final root = await Directory.systemTemp.createTemp('ticket_state_test_');
     final database = CaptureDatabase(storageRoot: root);
@@ -1082,13 +1241,13 @@ void main() {
     final ticket = await database.createHumanReviewTicket(
         userId: 'test-buyer',
         customerRequest: 'I want a refund',
-        reason: 'Refund requires a human');
+        reason: 'Customer explicitly requested human assistance.',
+        requestMessageId: 'message-1');
     expect(ticket.status, 'open');
     expect(await database.isHumanContacting('test-buyer'), isFalse);
     expect(await database.hasPendingUnanswered('test-buyer'), isTrue);
 
-    // An open ticket is informational. Codex keeps processing follow-up
-    // messages until an operator explicitly starts contacting the customer.
+    // An open review ticket remains informational until transfer starts.
     await database.saveCapture(CapturedConversation(
       stableKey: 'customer:test-buyer',
       customerName: 'test-buyer',
@@ -1155,8 +1314,20 @@ void main() {
     ));
     expect((await database.conversations()).single.userId, 'other-buyer');
 
-    await database.markTicketContacted(ticket.id);
+    await database.markTicketContacted(
+      ticket.id,
+      assignedTo: '格志打印机小秦',
+    );
     expect(await database.humanReviewTickets(), isEmpty);
+    final transferredTicket = await (await database.database).query(
+      'human_review_tickets',
+      columns: ['status', 'assigned_to'],
+      where: 'id = ?',
+      whereArgs: [ticket.id],
+      limit: 1,
+    );
+    expect(transferredTicket.single['status'], 'contacted');
+    expect(transferredTicket.single['assigned_to'], '格志打印机小秦');
     await database.saveCapture(CapturedConversation(
       stableKey: 'customer:test-buyer',
       customerName: 'test-buyer',
@@ -1172,6 +1343,230 @@ void main() {
     ));
     expect((await database.conversations()).map((item) => item.userId),
         containsAll(<String>['other-buyer', 'test-buyer']));
+  });
+
+  test('records one automatic transfer per ticket and rotates active accounts',
+      () async {
+    final root = await Directory.systemTemp.createTemp('transfer_log_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    final first = await database.createHumanReviewTicket(
+      userId: 'buyer-1',
+      customerRequest: 'Please help',
+      reason: 'Technical review required',
+    );
+    expect(await database.reserveChatTransferLog(ticket: first), isNull);
+    final explicitFirst = await database.createHumanReviewTicket(
+      userId: 'buyer-1',
+      customerRequest: 'No, please transfer me',
+      reason: 'Customer explicitly requested human assistance.',
+      requestMessageId: 'buyer-1-second-transfer-request',
+    );
+    final firstLog =
+        await database.reserveChatTransferLog(ticket: explicitFirst);
+    expect(firstLog, isNotNull);
+    expect(
+        await database.reserveChatTransferLog(ticket: explicitFirst), isNull);
+
+    final firstTarget = await database.chooseAutomaticTransferAccount(
+      const ['格志打印机小雨', '格志打印机小秦'],
+    );
+    expect(firstTarget, '格志打印机小秦');
+    await database.updateChatTransferLog(
+      id: firstLog!.id,
+      status: 'transferred',
+      sourceAccount: '格志打印机小甘',
+      targetAccount: firstTarget,
+    );
+
+    final second = await database.createHumanReviewTicket(
+      userId: 'buyer-2',
+      customerRequest: 'Please help too',
+      reason: 'Warranty review required',
+      requestMessageId: 'buyer-2-original-review',
+    );
+    final secondLog = await database.reserveChatTransferLog(ticket: second);
+    final secondTarget = await database.chooseAutomaticTransferAccount(
+      const ['格志打印机小雨', '格志打印机小秦'],
+    );
+    expect(secondTarget, '格志打印机小雨');
+    await database.updateChatTransferLog(
+      id: secondLog!.id,
+      status: 'failed',
+      sourceAccount: '格志打印机小甘',
+      targetAccount: secondTarget,
+      error: 'JD dialog closed',
+    );
+
+    final logs = await database.chatTransferLogs();
+    expect(logs, hasLength(2));
+    expect(logs.first.sourceAccount, '格志打印机小甘');
+    expect(logs.first.targetAccount, '格志打印机小雨');
+    expect(logs.first.reason, 'Warranty review required');
+    expect(logs.first.status, 'failed');
+    expect(logs.first.error, 'JD dialog closed');
+
+    expect(await database.reserveChatTransferLog(ticket: second), isNull);
+    final retryTicket = await database.createHumanReviewTicket(
+      userId: 'buyer-2',
+      customerRequest: 'Please help again',
+      reason: 'New warranty review request',
+      requestMessageId: 'buyer-2-new-review',
+    );
+    final retried = await database.reserveChatTransferLog(ticket: retryTicket);
+    expect(retried, isNotNull);
+    expect(retried!.id, secondLog.id);
+    expect(retried.status, 'pending');
+    expect(retried.targetAccount, isNull);
+    expect(retried.error, isNull);
+    expect(await database.reserveChatTransferLog(ticket: second), isNull);
+  });
+
+  test('pre-click transfer failure restores capture and current-account AI',
+      () async {
+    final root =
+        await Directory.systemTemp.createTemp('transfer_capture_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:failed-transfer',
+      customerName: 'failed-transfer',
+      customerExternalId: 'failed-transfer',
+      capturedAt: DateTime.fromMillisecondsSinceEpoch(1),
+      messages: const [
+        CapturedMessage(
+          stableId: 'before-transfer',
+          direction: 'incoming',
+          body: 'Please transfer me',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    final ticket = await database.createHumanReviewTicket(
+      userId: 'failed-transfer',
+      customerRequest: 'Please transfer me',
+      reason: 'Customer requested another agent',
+      requestMessageId: 'before-transfer',
+    );
+    expect(await database.isHumanContacting('failed-transfer'), isFalse);
+
+    await database.markTicketContacting(ticket.id);
+    expect(await database.isHumanContacting('failed-transfer'), isTrue);
+
+    await database.markTicketAwaitingCurrentAgent(ticket.id);
+    expect(await database.isHumanContacting('failed-transfer'), isFalse);
+
+    final inserted = await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:failed-transfer',
+      customerName: 'failed-transfer',
+      customerExternalId: 'failed-transfer',
+      capturedAt: DateTime.fromMillisecondsSinceEpoch(2),
+      messages: const [
+        CapturedMessage(
+          stableId: 'after-failure',
+          direction: 'incoming',
+          body: 'This message must still reload',
+          axPath: 'ocr',
+        ),
+      ],
+    ));
+    expect(inserted, 1);
+    expect(await database.hasPendingUnanswered('failed-transfer'), isTrue);
+    expect((await database.conversations()).single.userId, 'failed-transfer');
+    final document = await database.history.then(
+      (history) => history.read('failed-transfer'),
+    );
+    final messages = (document!['messages'] as List<Object?>)
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+    expect(messages.last['body'], 'This message must still reload');
+    expect((await database.humanReviewTickets()).single.status, 'open');
+  });
+
+  test('human-contacting pause remains until the operator resolves it',
+      () async {
+    final root = await Directory.systemTemp.createTemp('legacy_pause_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+
+    final db = await database.database;
+    await db.insert('conversation_control', {
+      'user_id': 'legacy-paused-buyer',
+      'state': 'human_contacting',
+      'resume_after_message_id': null,
+      'updated_at_ms': 1,
+    });
+
+    expect(
+      await database.saveCapture(CapturedConversation(
+        stableKey: 'customer:legacy-paused-buyer',
+        customerName: 'legacy-paused-buyer',
+        customerExternalId: 'legacy-paused-buyer',
+        capturedAt: DateTime.fromMillisecondsSinceEpoch(2),
+        messages: const [
+          CapturedMessage(
+            stableId: 'first-message-after-old-transfer',
+            direction: 'incoming',
+            body: 'Please answer this message',
+            axPath: 'ocr',
+          ),
+        ],
+      )),
+      1,
+    );
+    expect(await database.isHumanContacting('legacy-paused-buyer'), isTrue);
+    expect(await database.hasPendingUnanswered('legacy-paused-buyer'), isFalse);
+    expect(await database.conversations(), isEmpty);
+  });
+
+  test('unconfirmed transfer also preserves future automatic replies',
+      () async {
+    final root = await Directory.systemTemp.createTemp('uncertain_transfer_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final ticket = await database.createHumanReviewTicket(
+      userId: 'uncertain-transfer',
+      customerRequest: 'Please transfer me',
+      reason: 'Customer requested another agent',
+    );
+    await database.markTicketAwaitingCurrentAgent(ticket.id);
+    expect(await database.isHumanContacting('uncertain-transfer'), isFalse);
+    expect(
+      await database.saveCapture(CapturedConversation(
+        stableKey: 'customer:uncertain-transfer',
+        customerName: 'uncertain-transfer',
+        customerExternalId: 'uncertain-transfer',
+        capturedAt: DateTime.fromMillisecondsSinceEpoch(3),
+        messages: const [
+          CapturedMessage(
+            stableId: 'after-uncertain-click',
+            direction: 'incoming',
+            body: 'Can anyone see this?',
+            axPath: 'ocr',
+          ),
+        ],
+      )),
+      1,
+    );
+    expect(await database.hasPendingUnanswered('uncertain-transfer'), isTrue);
+    expect(
+      (await database.conversations()).single.userId,
+      'uncertain-transfer',
+    );
   });
 
   test('deduplicates a recently re-ordered OCR reading of one message',

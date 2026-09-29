@@ -248,7 +248,7 @@ void main() {
         isFalse);
   });
 
-  test('excludes truncated Qianniu sidebar previews from Codex context', () {
+  test('excludes truncated Jingmai sidebar previews from Codex context', () {
     expect(
         isLikelySidebarPreviewLeak({
           'source': 'jd_automation',
@@ -258,7 +258,7 @@ void main() {
         isTrue);
     expect(
         isLikelySidebarPreviewLeak({
-          'source': 'qianniu_capture',
+          'source': 'jd_automation',
           'direction': 'outgoing',
           'body': 'For 300 employees, our confirm... You\'re welcome!',
         }),
@@ -589,11 +589,14 @@ void main() {
     expect(firstHuman.reply, contains('请问您遇到了什么问题'));
     expect(firstHuman.reply.toLowerCase(), isNot(contains('human agent')));
     expect(draftRequiresHumanReview(repeatedHuman), isTrue);
+    expect(isExplicitHumanTransfer(repeatedHuman), isTrue);
     expect(draftHumanReviewReason(repeatedHuman),
         contains('explicitly requested'));
     expect(draftRequiresHumanReview(dissatisfied), isTrue);
+    expect(isExplicitHumanTransfer(dissatisfied), isFalse);
     expect(draftHumanReviewReason(dissatisfied), contains('dissatisfied'));
     expect(draftRequiresHumanReview(unresolved), isTrue);
+    expect(isExplicitHumanTransfer(unresolved), isFalse);
     expect(draftHumanReviewReason(unresolved), contains('reliable solution'));
     for (final guarded in [repeatedHuman, dissatisfied, unresolved]) {
       expect(guarded.reply, isNot(contains('senior customer service agent')));

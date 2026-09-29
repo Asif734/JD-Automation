@@ -41,6 +41,21 @@ Set<String> codexHumanTransferRequestIds(AiDraft draft) {
   return ids.whereType<String>().where((id) => id.isNotEmpty).toSet();
 }
 
+/// Only the completed two-request transfer flow may move a JD conversation.
+/// Other human-review reasons (refunds, technical review, delivery uncertainty,
+/// and similar cases) must remain in the existing review queue.
+bool isExplicitHumanTransfer(AiDraft draft) {
+  if (!draftRequiresHumanReview(draft)) return false;
+  try {
+    final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
+    final triggers = (raw['risk_triggers'] as List<Object?>? ?? const [])
+        .map((value) => value.toString());
+    return triggers.contains('explicit_human_request');
+  } on FormatException {
+    return false;
+  }
+}
+
 bool isRefundRequest(String text) => RegExp(
       r'\brefund(?:ed|ing|s)?\b|退款|退钱|仅退款',
       caseSensitive: false,
@@ -884,9 +899,11 @@ class CodexReplyService {
     final dataRoot = await database.storageRoot;
     final projectRoot = dataRoot.parent;
     final environment = Platform.environment;
-    final workspace = Directory(environment['QIANNIU_CODEX_WORKSPACE'] ??
+    final workspace = Directory(environment['JD_CODEX_WORKSPACE'] ??
+        environment['QIANNIU_CODEX_WORKSPACE'] ??
         p.join(projectRoot.path, 'codex_workspace'));
-    final knowledge = Directory(environment['QIANNIU_KNOWLEDGE_DIR'] ??
+    final knowledge = Directory(environment['JD_KNOWLEDGE_DIR'] ??
+        environment['QIANNIU_KNOWLEDGE_DIR'] ??
         p.join(projectRoot.path, '格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
     final schema = File(p.join(workspace.path, 'reply.schema.json'));
     final executable = await _findExecutable(environment['CODEX_EXECUTABLE']);
@@ -1328,9 +1345,12 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
       for (final message in currentCustomerTurn) {
         final messageId = message['id']?.toString() ?? '';
         if (!transferRequestIds.contains(messageId)) continue;
+        // Capture time is monotonic for newly observed JD messages. The
+        // displayed bubble clock can be stale or misread when an older row is
+        // rediscovered, which must not reset the transfer-request sequence.
         final requestedAt =
-            DateTime.tryParse(message['sent_at']?.toString() ?? '') ??
-                DateTime.tryParse(message['captured_at']?.toString() ?? '') ??
+            DateTime.tryParse(message['captured_at']?.toString() ?? '') ??
+                DateTime.tryParse(message['sent_at']?.toString() ?? '') ??
                 DateTime.now();
         final repeated = await database.recordHumanTransferRequest(
           userId: conversation.userId,

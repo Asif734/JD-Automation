@@ -196,6 +196,58 @@ class HumanReviewTicket {
   final String? assignedTo;
 }
 
+class TransferAccountPreview {
+  const TransferAccountPreview({
+    required this.sourceAccount,
+    required this.activeAccounts,
+  });
+
+  final String sourceAccount;
+  final List<String> activeAccounts;
+}
+
+class ChatTransferLog {
+  const ChatTransferLog({
+    required this.id,
+    required this.ticketId,
+    required this.conversationId,
+    required this.sourceAccount,
+    required this.reason,
+    required this.status,
+    required this.createdAt,
+    required this.updatedAt,
+    this.targetAccount,
+    this.error,
+  });
+
+  factory ChatTransferLog.fromJson(Map<String, Object?> json) =>
+      ChatTransferLog(
+        id: (json['id'] as num).toInt(),
+        ticketId: (json['ticket_id'] as num).toInt(),
+        conversationId: json['user_id']! as String,
+        sourceAccount: json['source_account']! as String,
+        targetAccount: json['target_account'] as String?,
+        reason: json['reason']! as String,
+        status: json['status']! as String,
+        error: json['error'] as String?,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (json['created_at_ms'] as num).toInt()),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(
+            (json['updated_at_ms'] as num).toInt()),
+      );
+
+  final int id;
+  final int ticketId;
+  final String conversationId;
+  final String sourceAccount;
+  final String? targetAccount;
+  final String reason;
+  final String status;
+  final String? error;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+}
+
 class DraftAttachment {
   const DraftAttachment({
     required this.mediaId,

@@ -163,6 +163,19 @@ final class AccessibilityBridge {
         expectedCustomer: args?["expectedCustomer"] as? String ?? "",
         allowActivation: args?["allowActivation"] as? Bool ?? true,
         completion: result)
+    case "listActiveTransferAccounts":
+      let args = call.arguments as? [String: Any]
+      collector.listActiveTransferAccounts(
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "",
+        completion: result)
+    case "transferConversation":
+      let args = call.arguments as? [String: Any]
+      collector.transferConversation(
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "",
+        targetAccount: args?["targetAccount"] as? String ?? "",
+        completion: result)
+    case "cancelTransferSelection":
+      collector.cancelTransferSelection(completion: result)
     case "scrollConversation":
       let args = call.arguments as? [String: Any]
       collector.scrollConversation(
@@ -521,6 +534,40 @@ private struct UnreadScreenshot {
   let image: CGImage
 }
 
+private struct TransferTextLine {
+  let text: String
+  let confidence: Float
+  /// Pixel coordinates with a top-left origin, matching the captured image.
+  let frame: CGRect
+}
+
+private struct TransferDialogSnapshot {
+  let windowID: CGWindowID
+  let bounds: CGRect
+  let image: CGImage
+  let lines: [TransferTextLine]
+
+  var imageWidth: CGFloat { CGFloat(image.width) }
+  var imageHeight: CGFloat { CGFloat(image.height) }
+
+  func globalPoint(for imagePoint: CGPoint) -> CGPoint {
+    CGPoint(
+      x: bounds.minX + imagePoint.x * bounds.width / max(imageWidth, 1),
+      y: bounds.minY + imagePoint.y * bounds.height / max(imageHeight, 1))
+  }
+}
+
+private struct TransferAccountCandidate {
+  let name: String
+  let frame: CGRect
+  let greenPixelEvidence: Int
+  let redPixelEvidence: Int
+
+  var isActive: Bool {
+    greenPixelEvidence >= 3 && redPixelEvidence < 3
+  }
+}
+
 private struct DownloadedImageCandidate {
   let url: URL
   let modified: Date
@@ -779,6 +826,191 @@ private func namedWindowBounds(pid: pid_t, containing title: String) -> CGRect? 
     }
   }
   return nil
+}
+
+private func compactTransferText(_ value: String) -> String {
+  value.trimmingCharacters(in: .whitespacesAndNewlines)
+    .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+}
+
+private func recognizeTransferText(in image: CGImage) -> [TransferTextLine] {
+  let request = VNRecognizeTextRequest()
+  request.recognitionLevel = .accurate
+  request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+  request.usesLanguageCorrection = false
+  try? VNImageRequestHandler(cgImage: image, orientation: .up)
+    .perform([request])
+  let width = CGFloat(image.width)
+  let height = CGFloat(image.height)
+  return (request.results ?? []).compactMap { observation in
+    guard let candidate = observation.topCandidates(1).first else { return nil }
+    let box = observation.boundingBox
+    return TransferTextLine(
+      text: candidate.string.trimmingCharacters(in: .whitespacesAndNewlines),
+      confidence: candidate.confidence,
+      frame: CGRect(
+        x: box.minX * width,
+        y: (1 - box.maxY) * height,
+        width: box.width * width,
+        height: box.height * height))
+  }.sorted {
+    if abs($0.frame.midY - $1.frame.midY) > height * 0.015 {
+      return $0.frame.midY < $1.frame.midY
+    }
+    return $0.frame.minX < $1.frame.minX
+  }
+}
+
+private func captureTransferDialog(pid: pid_t) -> TransferDialogSnapshot? {
+  guard CGPreflightScreenCaptureAccess(),
+        let raw = CGWindowListCopyWindowInfo(
+          [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+          as? [[String: Any]] else { return nil }
+  let candidates = raw.compactMap { info -> (CGWindowID, CGRect, String)? in
+    guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+          (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+          let number = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+          let dictionary = info[kCGWindowBounds as String] as? [String: Any],
+          let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+          bounds.width >= 320, bounds.width <= 1_100,
+          bounds.height >= 260, bounds.height <= 1_100 else { return nil }
+    return (CGWindowID(number), bounds,
+            info[kCGWindowName as String] as? String ?? "")
+  }
+  let ordered = candidates.sorted {
+    let leftTitle = $0.2.contains("请选择转接对象")
+    let rightTitle = $1.2.contains("请选择转接对象")
+    if leftTitle != rightTitle { return leftTitle }
+    return $0.1.width * $0.1.height < $1.1.width * $1.1.height
+  }
+  for candidate in ordered {
+    guard let image = CGWindowListCreateImage(
+      .null, .optionIncludingWindow, candidate.0,
+      [.boundsIgnoreFraming, .bestResolution]) else { continue }
+    let lines = recognizeTransferText(in: image)
+    let hasVerifiedTitle = candidate.2.contains("请选择转接对象") ||
+      lines.contains { compactTransferText($0.text).contains("请选择转接对象") }
+    guard hasVerifiedTitle else { continue }
+    return TransferDialogSnapshot(
+      windowID: candidate.0, bounds: candidate.1, image: image, lines: lines)
+  }
+  return nil
+}
+
+private func transferAccountName(from compact: String,
+                                 line: TransferTextLine,
+                                 imageWidth: CGFloat) -> String? {
+  // Vision sometimes merges the small Latin Grozziie logo inside the avatar
+  // with the Chinese account name. Keep the real name from its stable marker.
+  if let marker = compact.range(of: "格志打印机") {
+    return String(compact[marker.lowerBound...])
+  }
+  // A standalone logo sits farther left than a normal account label and must
+  // not become a transfer target by itself.
+  guard line.frame.minX > imageWidth * 0.18 else { return nil }
+  return compact
+}
+
+private func transferBadgePixelEvidence(line: TransferTextLine,
+                                        image: CGImage) -> (green: Int, red: Int) {
+  let width = CGFloat(image.width)
+  let height = CGFloat(image.height)
+  let nameRelative = CGRect(
+    x: line.frame.minX - width * 0.045,
+    y: line.frame.midY - height * 0.008,
+    width: width * 0.043,
+    height: height * 0.055)
+  // When Vision merges the avatar logo and account name, line.minX points to
+  // the logo. JD's status badge itself remains in this stable dialog band.
+  let dialogRelative = CGRect(
+    x: width * 0.165,
+    y: line.frame.midY - height * 0.020,
+    width: width * 0.045,
+    height: height * 0.065)
+  let imageBounds = CGRect(x: 0, y: 0, width: width, height: height)
+  let bitmap = NSBitmapImageRep(cgImage: image)
+
+  func count(in candidate: CGRect) -> (green: Int, red: Int) {
+    let rect = candidate.integral.intersection(imageBounds)
+    guard rect.width >= 4, rect.height >= 4 else { return (0, 0) }
+    var greenResult = 0
+    var redResult = 0
+    for y in stride(from: Int(rect.minY), to: Int(rect.maxY), by: 1) {
+      for x in stride(from: Int(rect.minX), to: Int(rect.maxX), by: 1) {
+        guard let color = bitmap.colorAt(x: x, y: y)?
+          .usingColorSpace(.deviceRGB) else { continue }
+        let red = Int(color.redComponent * 255)
+        let green = Int(color.greenComponent * 255)
+        let blue = Int(color.blueComponent * 255)
+        // JD 10.4 renders the online badge as turquoise on some display
+        // scales, where the blue channel can be close to (or slightly above)
+        // green. Keep the strong red separation so offline red badges cannot
+        // pass, while accepting both green and turquoise antialiasing.
+        if green >= 105 && red <= 140 && blue <= 240 &&
+            green >= red + 35 && green + 25 >= blue {
+          greenResult += 1
+        }
+        if red >= 170 && green <= 145 && blue <= 150 && red >= green + 35 {
+          redResult += 1
+        }
+      }
+    }
+    return (greenResult, redResult)
+  }
+
+  func evidence(in rect: CGRect) -> (green: Int, red: Int) {
+    let direct = count(in: rect)
+    let flippedRect = CGRect(
+      x: rect.minX, y: height - rect.maxY,
+      width: rect.width, height: rect.height)
+    let flipped = count(in: flippedRect)
+    return direct.green + direct.red >= flipped.green + flipped.red
+      ? direct : flipped
+  }
+
+  let nearName = evidence(in: nameRelative)
+  let stableBand = evidence(in: dialogRelative)
+  return nearName.green + nearName.red >= stableBand.green + stableBand.red
+    ? nearName : stableBand
+}
+
+private func transferAccountCandidates(
+  in dialog: TransferDialogSnapshot
+) -> [TransferAccountCandidate] {
+  let width = dialog.imageWidth
+  let height = dialog.imageHeight
+  let groupBottom = dialog.lines.first(where: {
+    compactTransferText($0.text).contains("默认咨询组")
+  })?.frame.maxY ?? height * 0.31
+  let ignored = [
+    "请选择转接对象", "指定客服", "指定咨询组", "搜索账号/名字",
+    "转接", "备注原因", "默认咨询组",
+  ]
+  var seen = Set<String>()
+  return dialog.lines.compactMap { line -> TransferAccountCandidate? in
+    let compact = compactTransferText(line.text)
+    guard let accountName = transferAccountName(
+      from: compact, line: line, imageWidth: width) else { return nil }
+    guard line.confidence >= 0.35,
+          line.frame.midY > groupBottom + height * 0.025,
+          line.frame.midY < height * 0.96,
+          line.frame.minX > width * 0.08,
+          line.frame.midX < width * 0.64,
+          line.frame.height >= height * 0.018,
+          line.frame.height <= height * 0.075,
+          accountName.count >= 2, accountName.count <= 48,
+          !ignored.contains(where: { compact.contains($0) }),
+          accountName.range(of: #"^\d+/\d+$"#, options: .regularExpression) == nil,
+          seen.insert(normalizedCustomerIdentity(accountName)).inserted else {
+      return nil
+    }
+    let evidence = transferBadgePixelEvidence(line: line, image: dialog.image)
+    return TransferAccountCandidate(
+      name: accountName,
+      frame: line.frame,
+      greenPixelEvidence: evidence.green,
+      redPixelEvidence: evidence.red)
+  }
 }
 
 private func unreadScreenshot(pid: pid_t, matching target: CGRect) -> UnreadScreenshot? {
@@ -1044,7 +1276,7 @@ private struct AXNode {
   }
 }
 
-/// AX discovery and conservative capture for com.taobao.Aliworkbench.
+/// AX discovery and conservative capture for JD Dingdong (Qianniu-style desktop).
 /// It uses structural traits only; install-specific labels must be learned from Inspect Tree output.
 final class QianniuAXCollector {
   var onCapture: (([String: Any]) -> Void)?
@@ -1058,6 +1290,7 @@ final class QianniuAXCollector {
   private var timer: DispatchSourceTimer?
   private var seenFingerprints = Set<String>()
   private var lastActiveConversation: String?
+  private var pendingTransferCustomer: String?
 
   func status() -> [String: Any] {
     let pid = runningPID()
@@ -1367,7 +1600,7 @@ final class QianniuAXCollector {
             activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
             let pid = runningPID(),
             let jdApp = NSRunningApplication(processIdentifier: pid) else {
-        finish(["kind": "unavailable", "reason": "qianniu_unavailable"])
+        finish(["kind": "unavailable", "reason": "jingmai_unavailable"])
         return
       }
       let previouslyFrontmost = NSWorkspace.shared.frontmostApplication
@@ -1815,6 +2048,32 @@ final class QianniuAXCollector {
     }
   }
 
+  /// Reads the signed-in service account from the reception window's account
+  /// header. This label is exposed by AX even though transfer rows are not.
+  private func currentServiceAccount(in reception: AXNode,
+                                     nodes: [AXNode],
+                                     excluding customer: String) -> String {
+    guard let window = reception.frame else { return "当前客服账号" }
+    let ignored = ["接待", "未授权", "搜索", "官方", "联系人", "工具", "数据", "待办"]
+    let candidates = nodes.compactMap { node -> (String, CGRect)? in
+      guard node.role == kAXStaticTextRole as String,
+            let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let frame = node.frame,
+            !text.isEmpty, text.count >= 2, text.count <= 40,
+            !exactCustomerIdentityMatches(text, customer),
+            !ignored.contains(where: { text == $0 || text.hasPrefix($0 + " ") }),
+            frame.minX >= window.minX,
+            frame.maxX <= window.minX + window.width * 0.32,
+            frame.minY >= window.minY,
+            frame.maxY <= window.minY + 115 else { return nil }
+      return (text, frame)
+    }
+    return candidates.sorted {
+      if abs($0.1.minY - $1.1.minY) > 2 { return $0.1.minY < $1.1.minY }
+      return $0.1.minX < $1.1.minX
+    }.first?.0 ?? "当前客服账号"
+  }
+
   func inspectTree(maxDepth: Int) -> [String: Any] {
     guard AXIsProcessTrusted() else { return ["error": "accessibility_not_trusted", "tree": "Grant Accessibility access, then retry."] }
     guard let pid = runningPID() else { return ["error": "jd_not_running", "tree": "JD 咚咚工作台 is not running."] }
@@ -1976,12 +2235,12 @@ final class QianniuAXCollector {
             guard let self else { return }
             self.queue.async {
               if let error {
-                finish(["error": "qianniu_launch_failed",
+                finish(["error": "jingmai_launch_failed",
                         "message": error.localizedDescription])
                 return
               }
               guard let app else {
-                finish(["error": "qianniu_launch_failed",
+                finish(["error": "jingmai_launch_failed",
                         "message": "JingMai did not launch."])
                 return
               }
@@ -2052,12 +2311,12 @@ final class QianniuAXCollector {
         return
       }
       guard allowActivation else {
-        finish(["error": "qianniu_not_running",
+        finish(["error": "jingmai_not_running",
                 "message": "JingMai is not running. Passive monitoring will not launch it."])
         return
       }
       guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
-        finish(["error": "qianniu_not_installed",
+        finish(["error": "jingmai_not_installed",
                 "message": "The installed JingMai application could not be located."])
         return
       }
@@ -2340,6 +2599,348 @@ final class QianniuAXCollector {
       }
       finish(["error": "conversation_verification_failed",
               "message": "JingMai did not activate the expected customer \(expected) after AXPress and a guarded row click."])
+    }
+  }
+
+  /// Opens the verified active customer's transfer dialog and returns only
+  /// visible service accounts with a green online badge. JD's account rows are
+  /// canvas-rendered and absent from AX, so names come from Vision OCR while
+  /// status comes from an independent pixel-color check beside each name.
+  func listActiveTransferAccounts(expectedCustomer: String,
+                                  completion: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) {
+        DispatchQueue.main.async { completion(payload) }
+      }
+      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      self.pendingTransferCustomer = nil
+      guard !expected.isEmpty, AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+            let pid = self.runningPID() else {
+        finish(["error": "transfer_precondition_failed",
+                "message": "JingMai, Accessibility, Screen Recording, or the customer ID is unavailable."])
+        return
+      }
+
+      let root = AXUIElementCreateApplication(pid)
+      var nodes: [AXNode] = []
+      self.walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
+        node, _ in nodes.append(node)
+      }
+      guard let reception = nodes.first(where: {
+        $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
+      }) else {
+        finish(["error": "transfer_window_missing",
+                "message": "The JD Dingdong reception window is not available."])
+        return
+      }
+      let scoped = nodes.filter {
+        $0.path == reception.path || $0.path.hasPrefix(reception.path + "/")
+      }
+      guard self.activeCustomerMatches(expected, nodes: scoped) else {
+        finish(["error": "transfer_customer_mismatch",
+                "message": "The exact customer \(expected) is not the active JD conversation."])
+        return
+      }
+      let sourceAccount = self.currentServiceAccount(
+        in: reception, nodes: scoped, excluding: expected)
+      guard let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }),
+            (stringAttribute(composer.element, kAXValueAttribute)?
+              .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) else {
+        finish(["error": "transfer_composer_not_empty",
+                "message": "Clear the current JD composer before transferring this chat."])
+        return
+      }
+      guard let transferButton = scoped.first(where: {
+        $0.role == kAXButtonRole as String &&
+          ($0.description?.contains("快捷转接") == true) &&
+          $0.actions.contains(kAXPressAction as String)
+      }) else {
+        finish(["error": "transfer_button_missing",
+                "message": "JD's verified 快捷转接 button is unavailable for this conversation."])
+        return
+      }
+
+      _ = NSRunningApplication(processIdentifier: pid)?
+        .activate(options: [.activateIgnoringOtherApps])
+      usleep(150_000)
+      let pressed = AXUIElementPerformAction(
+        transferButton.element, kAXPressAction as CFString) == .success
+      if !pressed, let frame = transferButton.frame {
+        _ = postClick(at: CGPoint(x: frame.midX, y: frame.midY))
+      }
+
+      var snapshot: TransferDialogSnapshot?
+      // The modal title is painted before the canvas body. Do not treat that
+      // first title-only frame as a ready dialog: it can make Vision miss the
+      // group label and force coordinate fallback while the body is blank.
+      for _ in 0..<24 {
+        usleep(125_000)
+        guard let observed = captureTransferDialog(pid: pid) else { continue }
+        snapshot = observed
+        if observed.lines.contains(where: {
+          compactTransferText($0.text).contains("默认咨询组")
+        }) { break }
+      }
+      guard var dialog = snapshot else {
+        finish(["error": "transfer_dialog_missing",
+                "message": "JD did not open the verified transfer dialog."])
+        return
+      }
+
+      var candidates = transferAccountCandidates(in: dialog)
+      func waitForStableExpandedAccounts() {
+        var bestDialog = dialog
+        var bestCandidates = candidates
+        var latestDialog = dialog
+        var previousActiveKey: String?
+        var consecutiveActiveFrames = 0
+
+        for _ in 0..<16 {
+          usleep(125_000)
+          guard let expanded = captureTransferDialog(pid: pid) else { continue }
+          latestDialog = expanded
+          let observed = transferAccountCandidates(in: expanded)
+          let observedActive = observed.filter(\.isActive)
+          let bestActive = bestCandidates.filter(\.isActive)
+          if observedActive.count > bestActive.count ||
+              (observedActive.count == bestActive.count &&
+                observed.count > bestCandidates.count) {
+            bestDialog = expanded
+            bestCandidates = observed
+          }
+
+          let activeKey = observedActive
+            .map { normalizedCustomerIdentity($0.name) }
+            .sorted()
+            .joined(separator: "|")
+          if !activeKey.isEmpty && activeKey == previousActiveKey {
+            consecutiveActiveFrames += 1
+          } else {
+            previousActiveKey = activeKey.isEmpty ? nil : activeKey
+            consecutiveActiveFrames = activeKey.isEmpty ? 0 : 1
+          }
+          // JD renders the account text before its status badges during the
+          // expansion animation. Require the same non-empty green set twice
+          // so a transient name-only frame cannot become an agents-busy result.
+          if consecutiveActiveFrames >= 2 {
+            dialog = expanded
+            candidates = observed
+            return
+          }
+        }
+        // When no row is recognized, retain the latest frame for diagnostics
+        // instead of reporting the title-only frame captured during opening.
+        dialog = bestCandidates.isEmpty ? latestDialog : bestDialog
+        candidates = bestCandidates
+      }
+
+      var expansionClickPoint: CGPoint?
+      if candidates.isEmpty {
+        let group = dialog.lines.first(where: {
+          compactTransferText($0.text).contains("默认咨询组")
+        })
+        // This JD build expands the group by clicking its visible name/row.
+        // Its top offset is stable while the modal height changes between
+        // collapsed and expanded states. Never normalize Y by window height:
+        // on a 506-point collapsed modal that clicked the search field at
+        // y=104 instead of the verified group row at y=157.
+        let globalGroupPoint: CGPoint
+        if let group {
+          globalGroupPoint = dialog.globalPoint(for: CGPoint(
+            x: group.frame.midX, y: group.frame.midY))
+        } else {
+          globalGroupPoint = CGPoint(
+            x: dialog.bounds.minX + dialog.bounds.width * 0.215,
+            y: dialog.bounds.minY + min(157, dialog.bounds.height - 24))
+        }
+        expansionClickPoint = globalGroupPoint
+        _ = postHover(at: globalGroupPoint)
+        _ = postClick(at: globalGroupPoint)
+        waitForStableExpandedAccounts()
+      }
+
+      guard !candidates.isEmpty else {
+        let recognized = dialog.lines
+          .map { compactTransferText($0.text) }
+          .filter { !$0.isEmpty }
+          .joined(separator: " | ")
+        let boundsSummary = String(
+          format: "bounds=(%.0f,%.0f %.0fx%.0f), image=%.0fx%.0f",
+          dialog.bounds.minX, dialog.bounds.minY,
+          dialog.bounds.width, dialog.bounds.height,
+          dialog.imageWidth, dialog.imageHeight)
+        let clickSummary = expansionClickPoint.map {
+          String(format: "click=(%.0f,%.0f), local=(%.0f,%.0f)",
+                 $0.x, $0.y,
+                 $0.x - dialog.bounds.minX, $0.y - dialog.bounds.minY)
+        } ?? "click=not-required"
+        _ = postEscape()
+        finish(["error": "transfer_group_not_expanded",
+                "message": "JD's 默认咨询组 did not expose recognizable account rows after one deliberate group-row click. No second toggle was sent. \(boundsSummary), \(clickSummary). OCR: \(recognized.prefix(500))"])
+        return
+      }
+
+      let active = candidates.filter(\.isActive)
+      var seen = Set<String>()
+      let accounts = active.map(\.name).filter {
+        seen.insert(normalizedCustomerIdentity($0)).inserted
+      }
+      guard !accounts.isEmpty else {
+        let evidence = candidates.map {
+          "\($0.name)[green=\($0.greenPixelEvidence),red=\($0.redPixelEvidence)]"
+        }.joined(separator: ", ")
+        _ = postEscape()
+        finish(["error": "no_active_transfer_accounts",
+                "message": evidence.isEmpty
+                  ? "No JD sub-account rows were recognized after expanding the consultation group."
+                  : "No visible JD sub-account had a confirmed green active badge. Observed: \(evidence)"])
+        return
+      }
+      self.pendingTransferCustomer = expected
+      finish(["accounts": accounts, "customer": expected,
+              "sourceAccount": sourceAccount])
+    }
+  }
+
+  /// Revalidates the selected account's green badge, selects its row to reveal
+  /// actions, and clicks only that row's explicit blue 转接 control. The
+  /// adjacent 备注原因 control is never used.
+  func transferConversation(expectedCustomer: String, targetAccount: String,
+                            completion: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) {
+        DispatchQueue.main.async { completion(payload) }
+      }
+      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      let target = targetAccount.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !expected.isEmpty, !target.isEmpty, AXIsProcessTrusted(),
+            CGPreflightScreenCaptureAccess(), let pid = self.runningPID(),
+            self.pendingTransferCustomer.map({
+              exactCustomerIdentityMatches($0, expected)
+            }) == true else {
+        finish(["error": "transfer_selection_expired",
+                "message": "The verified JD transfer selection expired. Inspect active accounts again."])
+        return
+      }
+      guard var dialog = captureTransferDialog(pid: pid),
+            let candidate = transferAccountCandidates(in: dialog).first(where: {
+              $0.isActive && exactCustomerIdentityMatches($0.name, target)
+            }) else {
+        self.pendingTransferCustomer = nil
+        finish(["error": "transfer_target_not_active",
+                "message": "The selected account \(target) no longer has a confirmed green badge."])
+        return
+      }
+
+      _ = NSRunningApplication(processIdentifier: pid)?
+        .activate(options: [.activateIgnoringOtherApps])
+      usleep(150_000)
+      // Click inside the account-name portion of the row. This reveals the
+      // row-specific 转接 and 备注原因 actions; neither exists while collapsed.
+      // Keep the click well left of the action area observed in JD 10.4.5 so
+      // selecting the account can never accidentally invoke 转接 itself.
+      let rowSelectionX = min(
+        max(candidate.frame.midX, dialog.imageWidth * 0.24),
+        dialog.imageWidth * 0.50)
+      _ = postClick(at: dialog.globalPoint(for: CGPoint(
+        x: rowSelectionX,
+        y: candidate.frame.midY)))
+
+      var actionPoint: CGPoint?
+      for _ in 0..<12 {
+        usleep(125_000)
+        guard let selected = captureTransferDialog(pid: pid) else { break }
+        dialog = selected
+        guard let selectedCandidate = transferAccountCandidates(in: selected).first(where: {
+          $0.isActive && exactCustomerIdentityMatches($0.name, target)
+        }) else { continue }
+        // Re-anchor to the freshly captured row. Selecting an account can
+        // slightly change row geometry when JD reveals 转接 / 备注原因.
+        if let action = selected.lines
+          .filter({
+            compactTransferText($0.text) == "转接" &&
+              $0.frame.midX > selected.imageWidth * 0.55 &&
+              $0.frame.midX < selected.imageWidth * 0.85 &&
+              abs($0.frame.midY - selectedCandidate.frame.midY) <
+                selected.imageHeight * 0.06
+          })
+          .min(by: {
+            abs($0.frame.midY - selectedCandidate.frame.midY) <
+              abs($1.frame.midY - selectedCandidate.frame.midY)
+          }) {
+          actionPoint = selected.globalPoint(for: CGPoint(
+            x: action.frame.midX, y: action.frame.midY))
+          break
+        }
+      }
+      guard let actionPoint else {
+        self.pendingTransferCustomer = nil
+        finish(["error": "transfer_action_missing",
+                "message": "JD did not reveal the selected row's explicit 转接 action. Nothing was transferred."])
+        return
+      }
+
+      // The caller showed an explicit confirmation before invoking this
+      // method. Clear the one-shot token before the external transfer click so
+      // an unconfirmed outcome can never be retried automatically.
+      self.pendingTransferCustomer = nil
+      guard postClick(at: actionPoint) else {
+        finish(["error": "transfer_click_failed",
+                "message": "Could not click JD's explicit 转接 action."])
+        return
+      }
+      for _ in 0..<20 {
+        usleep(150_000)
+        if captureTransferDialog(pid: pid) == nil {
+          finish(["transferred": true, "customer": expected,
+                  "targetAccount": target, "verification": "dialog_closed"])
+          return
+        }
+      }
+      finish(["error": "transfer_unconfirmed",
+              "message": "JD's 转接 action was clicked once, but the dialog did not close. Do not retry automatically; verify in JD."])
+    }
+  }
+
+  func cancelTransferSelection(completion: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) {
+        DispatchQueue.main.async { completion(payload) }
+      }
+      self.pendingTransferCustomer = nil
+      guard let pid = self.runningPID() else {
+        finish(["closed": true])
+        return
+      }
+      guard captureTransferDialog(pid: pid) != nil else {
+        finish(["closed": true])
+        return
+      }
+      let root = AXUIElementCreateApplication(pid)
+      var nodes: [AXNode] = []
+      self.walk(root, path: "app", depth: 0, maxDepth: 12, maxNodes: 1_000) {
+        node, _ in nodes.append(node)
+      }
+      if let close = nodes.first(where: {
+        $0.role == kAXButtonRole as String && $0.description == "关闭" &&
+          $0.actions.contains(kAXPressAction as String)
+      }) {
+        _ = AXUIElementPerformAction(close.element, kAXPressAction as CFString)
+      } else {
+        _ = postEscape()
+      }
+      for _ in 0..<8 {
+        usleep(100_000)
+        if captureTransferDialog(pid: pid) == nil {
+          finish(["closed": true])
+          return
+        }
+      }
+      finish(["error": "transfer_dialog_close_failed",
+              "message": "The JD transfer dialog is still open."])
     }
   }
 

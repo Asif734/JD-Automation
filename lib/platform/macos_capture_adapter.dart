@@ -93,7 +93,7 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return OcrInspection.fromMap(value);
   }
 
-  /// Waits until JingMai's active header proves that a requested row switch
+  /// Waits until Qianniu's active header proves that a requested row switch
   /// completed. Callers must not persist OCR under the requested customer
   /// name until this independent identity check succeeds.
   Future<OcrInspection> inspectExpectedCustomer({
@@ -321,6 +321,69 @@ class MacOSCaptureAdapter implements CaptureAdapter {
               value['message'] as String? ?? 'Could not open conversation.');
     }
     _rememberVerifiedIdentity(expectedCustomer, value['customer']);
+  }
+
+  /// Opens JD's transfer dialog and returns the current service account plus
+  /// only visible sub-accounts whose status badge is independently confirmed
+  /// green by the native adapter. The dialog remains open so
+  /// [transferConversation] can revalidate the automatically selected account.
+  Future<TransferAccountPreview> listActiveTransferAccounts(
+      String expectedCustomer) async {
+    final value = await _mapCall(
+      'listActiveTransferAccounts',
+      <String, Object?>{
+        'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+      },
+    );
+    if (value['error'] case final String code) {
+      throw PlatformException(
+        code: code,
+        message: value['message'] as String? ??
+            'Could not inspect active JD transfer accounts.',
+      );
+    }
+    final accounts = (value['accounts'] as List<Object?>? ?? const [])
+        .map((account) => account.toString())
+        .where((account) => account.trim().isNotEmpty)
+        .toList(growable: false);
+    return TransferAccountPreview(
+      sourceAccount:
+          (value['sourceAccount'] as String?)?.trim().isNotEmpty == true
+              ? (value['sourceAccount'] as String).trim()
+              : '当前客服账号',
+      activeAccounts: accounts,
+    );
+  }
+
+  /// Selects the already-previewed green account, reveals its row actions,
+  /// clicks that row's explicit 转接 control, and verifies that the transfer
+  /// dialog closes. Native code never clicks 备注原因 or an inactive row.
+  Future<Map<String, Object?>> transferConversation({
+    required String expectedCustomer,
+    required String targetAccount,
+  }) async {
+    final value = await _mapCall('transferConversation', <String, Object?>{
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+      'targetAccount': targetAccount,
+    });
+    if (value['error'] case final String code) {
+      throw PlatformException(
+        code: code,
+        message: value['message'] as String? ?? 'JD chat transfer failed.',
+      );
+    }
+    return value;
+  }
+
+  Future<void> cancelTransferSelection() async {
+    final value = await _mapCall('cancelTransferSelection');
+    if (value['error'] case final String code) {
+      throw PlatformException(
+        code: code,
+        message: value['message'] as String? ??
+            'Could not close the JD transfer dialog.',
+      );
+    }
   }
 
   Future<void> scrollConversation(

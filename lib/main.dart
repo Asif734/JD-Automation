@@ -74,7 +74,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   Map<String, Object?> _status = const {};
   String _diagnostics = 'No AX inspection yet.';
   Object? _error;
-  Map<String, HumanReviewTicket> _tickets = const {};
+  List<ChatTransferLog> _transferLogs = const [];
   OcrInspection? _ocrInspection;
   bool _autoCaptureRunning = false;
   bool _autoCaptureStarting = false;
@@ -110,6 +110,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   final Map<String, Timer> _unreadHoldingTimers = {};
   final Map<String, Timer> _unreadResendTimers = {};
   final Set<String> _visibleTransferWelcomes = {};
+  final Set<String> _transferringCustomers = {};
   String _visibleMediaTrace = 'visible image candidates=0, saved=0';
 
   @override
@@ -146,63 +147,245 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   Future<void> _refreshTickets() async {
     try {
-      await _database.improveGenericTicketReasons();
-      final tickets = await _database.humanReviewTickets();
+      final logs = await _database.chatTransferLogs();
       if (!mounted) return;
-      setState(() => _tickets = {
-            for (final ticket in tickets)
-              if (ticket.status != 'resolved' && ticket.status != 'cancelled')
-                ticket.conversationId: ticket,
-          });
+      setState(() => _transferLogs = logs);
     } catch (_) {
       // Capture remains available if local ticket storage is unavailable.
     }
   }
 
-  Future<void> _markContacting(HumanReviewTicket ticket) async {
-    try {
-      _finishUnreadRecovery(ticket.conversationId);
-      _draftRetryTimers.remove(ticket.conversationId)?.cancel();
-      _slaFallbackTimers.remove(ticket.conversationId)?.cancel();
-      _draftQueue.remove(ticket.conversationId);
-      await _database.markTicketContacting(ticket.id);
-      await _coordinator.refresh();
-      await _refreshTickets();
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
-    }
+  bool _customerPrefersChinese(String text) =>
+      RegExp(r'[\u3400-\u9fff]').hasMatch(text);
+
+  String _briefTransferProblem(HumanReviewTicket ticket) {
+    final compact =
+        ticket.customerRequest.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (compact.isEmpty) return '';
+    return compact.length <= 80 ? compact : '${compact.substring(0, 80)}…';
   }
 
-  Future<void> _markContacted(HumanReviewTicket ticket) async {
+  String _transferAcknowledgement(HumanReviewTicket ticket) {
+    final problem = _briefTransferProblem(ticket);
+    if (_customerPrefersChinese(ticket.customerRequest)) {
+      return problem.isEmpty
+          ? '我已了解并记录您反馈的问题。现在正为您转接其他客服同事，请稍等。'
+          : '我已了解并记录您反馈的“$problem”问题。现在正为您转接其他客服同事，请稍等。';
+    }
+    return problem.isEmpty
+        ? 'I understand your concern and have noted the details. I’m transferring this conversation to another customer service colleague now. Please wait a moment.'
+        : 'I understand your concern about “$problem” and have noted the details. I’m transferring this conversation to another customer service colleague now. Please wait a moment.';
+  }
+
+  String _allAgentsBusyMessage(HumanReviewTicket ticket) =>
+      _customerPrefersChinese(ticket.customerRequest)
+          ? '目前其他客服同事都在忙，暂时无法转接。我会继续在这里为您处理这个问题。'
+          : 'All our other customer service colleagues are busy right now, so I can’t transfer the conversation yet. I’ll continue helping you with your question here.';
+
+  Future<void> _sendTransferStatusNotice({
+    required String customer,
+    required String message,
+    required String model,
+  }) async {
+    await _adapter
+        .openConversation(customer, allowActivation: true)
+        .timeout(_captureOperationTimeout);
+    await _adapter.sendDraftOnce(
+      expectedCustomer: customer,
+      reply: message,
+      mediaPaths: const [],
+    ).timeout(_captureOperationTimeout);
+    await _database.appendAutomatedNoticeSent(
+      userId: customer,
+      reply: message,
+      model: model,
+    );
+  }
+
+  Future<void> _beginAutomaticTransfer(HumanReviewTicket ticket) async {
+    final customer = ticket.conversationId;
+    await _database.markTicketContacting(ticket.id);
+    _finishUnreadRecovery(customer);
+    _draftRetryTimers.remove(customer)?.cancel();
+    _slaFallbackTimers.remove(customer)?.cancel();
+    _draftQueue.remove(customer);
+    await _coordinator.refresh();
+    await _refreshTickets();
+  }
+
+  Future<void> _autoTransferTicket(HumanReviewTicket ticket) async {
+    final customer = ticket.conversationId;
+    if (!_transferringCustomers.add(customer)) return;
+    ChatTransferLog? log;
+    String? target;
+    var transferStarted = false;
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _diagnostics = 'Automatically transferring $customer…';
+      });
+    }
     try {
-      // Snapshot the human-handled chat before reopening AI eligibility. This
-      // records both the customer's existing question and a manual seller
-      // reply while the conversation is still in human_contacting state.
-      final windows = await _adapter.listOcrWindows();
-      if (windows.isEmpty) {
-        throw StateError(
-            'Keep the JD conversation visible before marking it Contacted.');
+      log = await _database.reserveChatTransferLog(ticket: ticket);
+      if (log == null) return;
+
+      await _withJdUiOperation(() async {
+        await _adapter
+            .ensureReceptionWindow(allowActivation: true)
+            .timeout(_captureOperationTimeout);
+        await _adapter
+            .openConversation(customer, allowActivation: true)
+            .timeout(_captureOperationTimeout);
+        var preview = await _adapter
+            .listActiveTransferAccounts(customer)
+            .timeout(_captureOperationTimeout);
+        var eligible = preview.activeAccounts
+            .where((account) =>
+                account.trim().toLowerCase() !=
+                preview.sourceAccount.trim().toLowerCase())
+            .toList(growable: false);
+        if (eligible.isEmpty) {
+          await _adapter.cancelTransferSelection();
+          throw PlatformException(
+            code: 'no_active_transfer_accounts',
+            message: 'No other JD sub-account is currently active.',
+          );
+        }
+        target = await _database.chooseAutomaticTransferAccount(eligible);
+        await _database.updateChatTransferLog(
+          id: log!.id,
+          status: 'ready',
+          sourceAccount: preview.sourceAccount,
+          targetAccount: target,
+        );
+        await _refreshTickets();
+
+        // The customer must receive a problem acknowledgement before the
+        // external handoff. Close the modal, send once with exact-customer
+        // verification, then reopen and revalidate the target's live badge.
+        await _adapter
+            .cancelTransferSelection()
+            .timeout(_captureOperationTimeout);
+        await _beginAutomaticTransfer(ticket);
+        transferStarted = true;
+        await _sendTransferStatusNotice(
+          customer: customer,
+          message: _transferAcknowledgement(ticket),
+          model: 'jd-transfer-acknowledgement-v1',
+        );
+        preview = await _adapter
+            .listActiveTransferAccounts(customer)
+            .timeout(_captureOperationTimeout);
+        eligible = preview.activeAccounts
+            .where((account) =>
+                account.trim().toLowerCase() !=
+                preview.sourceAccount.trim().toLowerCase())
+            .toList(growable: false);
+        if (eligible.isEmpty) {
+          await _adapter.cancelTransferSelection();
+          throw PlatformException(
+            code: 'no_active_transfer_accounts',
+            message: 'No other JD sub-account is currently active.',
+          );
+        }
+        if (!eligible.contains(target)) {
+          target = await _database.chooseAutomaticTransferAccount(eligible);
+        }
+
+        // `transferring` is written before the irreversible click. If the app
+        // exits afterward, the unique ticket log prevents an unsafe retry.
+        await _database.updateChatTransferLog(
+          id: log!.id,
+          status: 'transferring',
+          sourceAccount: preview.sourceAccount,
+          targetAccount: target,
+        );
+
+        await _adapter
+            .transferConversation(
+              expectedCustomer: customer,
+              targetAccount: target!,
+            )
+            .timeout(_captureOperationTimeout);
+        await _database.markTicketContacted(
+          ticket.id,
+          assignedTo: target,
+        );
+        await _database.updateChatTransferLog(
+          id: log!.id,
+          status: 'transferred',
+          sourceAccount: preview.sourceAccount,
+          targetAccount: target,
+        );
+        await _coordinator.refresh();
+        await _refreshTickets();
+        if (mounted) {
+          setState(() =>
+              _diagnostics = 'Automatically transferred $customer to $target.');
+        }
+      });
+    } catch (caughtError) {
+      Object error = caughtError;
+      final noActive = error is PlatformException &&
+          error.code == 'no_active_transfer_accounts';
+      if (noActive && log != null) {
+        try {
+          if (!transferStarted) {
+            await _beginAutomaticTransfer(ticket);
+            transferStarted = true;
+          }
+          await _withJdUiOperation(() => _sendTransferStatusNotice(
+                customer: customer,
+                message: _allAgentsBusyMessage(ticket),
+                model: 'jd-transfer-no-active-agent-v1',
+              ));
+          await _database.updateChatTransferLog(
+            id: log.id,
+            status: 'agents_busy',
+            // Preserve the native badge evidence for diagnosis. A genuinely
+            // busy result is still terminal for this request, but it must not
+            // erase which rows/colors were observed.
+            error: error.toString(),
+          );
+          await _database.markTicketAwaitingCurrentAgent(ticket.id);
+          await _coordinator.refresh();
+          await _refreshTickets();
+          if (mounted) {
+            setState(() => _diagnostics =
+                'No active transfer target for $customer; sent the busy-agent notice and kept the conversation on this account.');
+          }
+          return;
+        } catch (noticeError) {
+          error = noticeError;
+        }
       }
-      final reception = windows.firstWhere(
-          (window) => window.title.contains('咚咚融合工作台'),
-          orElse: () => windows.first);
-      final inspection =
-          await _adapter.inspectOcr(windowId: reception.windowId);
-      if (inspection.activeCustomerId?.trim() != ticket.conversationId) {
-        throw StateError('Open ${ticket.conversationId} in JD before marking '
-            'the ticket Contacted. The current chat was not changed.');
+      final unconfirmed =
+          error is PlatformException && error.code == 'transfer_unconfirmed';
+      if (log != null) {
+        await _database.updateChatTransferLog(
+          id: log.id,
+          status: unconfirmed ? 'unconfirmed' : 'failed',
+          targetAccount: target,
+          error: error.toString(),
+        );
+        if (transferStarted) {
+          await _database.markTicketAwaitingCurrentAgent(ticket.id);
+        }
       }
-      final baseline = const OcrCaptureExtractor().analyze(inspection).capture;
-      if (baseline == null) {
-        throw StateError('The visible human-handled conversation could not be '
-            'verified. Keep it open and try Contacted again.');
+      if (!unconfirmed) {
+        try {
+          await _adapter
+              .cancelTransferSelection()
+              .timeout(_captureOperationTimeout);
+        } catch (_) {
+          // There may be no open dialog when an earlier precondition failed.
+        }
       }
-      await _database.saveCapture(baseline);
-      await _database.markTicketContacted(ticket.id);
-      await _coordinator.refresh();
       await _refreshTickets();
-    } catch (error) {
       if (mounted) setState(() => _error = error);
+    } finally {
+      _transferringCustomers.remove(customer);
+      if (mounted) setState(() {});
     }
   }
 
@@ -1381,8 +1564,10 @@ class _CaptureHomeState extends State<CaptureHome> {
       _scheduleDraftGeneration(userId, newEvidence: true);
       return;
     }
+    final explicitTransfer = isExplicitHumanTransfer(draft);
     final saved = await _database.saveDraft(conversation.id, draft,
-        expectedMessageId: messageIdAtGenerationStart);
+        expectedMessageId: messageIdAtGenerationStart,
+        deliverable: !explicitTransfer);
     // Contacting or a manually observed seller reply may remove the queue
     // while Codex is generating. Never send a result from that stale turn.
     if (saved == 0 || await _database.isHumanContacting(userId)) return;
@@ -1394,12 +1579,20 @@ class _CaptureHomeState extends State<CaptureHome> {
           .toList(growable: false);
       final latestIncoming = messages.reversed
           .firstWhere((message) => message['direction'] == 'incoming');
-      await _database.createHumanReviewTicket(
+      final ticket = await _database.createHumanReviewTicket(
         userId: userId,
         customerRequest: latestIncoming['body']?.toString() ?? '',
         reason: draftHumanReviewReason(draft),
+        requestMessageId:
+            explicitTransfer ? latestIncoming['id']?.toString() : null,
       );
       await _refreshTickets();
+      if (explicitTransfer) {
+        // This draft records the transfer decision but must never be sent.
+        // The transfer flow sends its own acknowledgement before handoff.
+        await _autoTransferTicket(ticket);
+        await _database.discardTransferOnlyDraft(userId);
+      }
       if (draft.attachments.isNotEmpty && mounted) {
         setState(() => _diagnostics =
             'Human-review acknowledgement for $userId unexpectedly contained media and was not sent.');
@@ -1584,7 +1777,13 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<bool> _sendAutomaticallyUnlocked(String userId, AiDraft draft) async {
-    if (await _database.isHumanContacting(userId)) return false;
+    if (!await _database.isGeneratedDraftReadyForSend(
+          userId: userId,
+          reply: draft.reply,
+        ) ||
+        await _database.isHumanContacting(userId)) {
+      return false;
+    }
     try {
       // Draft generation is independent from sidebar scanning. Another unread
       // customer may have become visible while Codex was working, so reopen
@@ -1599,6 +1798,15 @@ class _CaptureHomeState extends State<CaptureHome> {
       if (mediaPaths.length != draft.attachments.length) {
         throw StateError(
             'Automatic media sending requires verified local files.');
+      }
+      // Re-check after opening the conversation. A transfer may have removed
+      // a delivery that was claimed before it acquired the JD UI lock.
+      if (!await _database.isGeneratedDraftReadyForSend(
+            userId: userId,
+            reply: draft.reply,
+          ) ||
+          await _database.isHumanContacting(userId)) {
+        return false;
       }
       await _adapter.sendDraftOnce(
         expectedCustomer: userId,
@@ -2345,87 +2553,70 @@ class _CaptureHomeState extends State<CaptureHome> {
               child: Row(
                 children: [
                   const Expanded(
-                    child: Text('Human review',
+                    child: Text('Transfer records',
                         style: TextStyle(fontWeight: FontWeight.w700)),
                   ),
-                  if (_tickets.isNotEmpty)
-                    Badge(label: Text('${_tickets.length}')),
+                  if (_transferLogs.isNotEmpty)
+                    Badge(label: Text('${_transferLogs.length}')),
                 ],
               ),
             ),
-            if (_tickets.isEmpty)
+            if (_transferLogs.isEmpty)
               const Padding(
                 padding: EdgeInsets.fromLTRB(12, 2, 12, 10),
-                child: Text('No open tickets',
+                child: Text('No transfer records',
                     style: TextStyle(color: Colors.grey)),
               )
-            else ...[
-              for (final ticket in _tickets.values)
-                ListTile(
-                  dense: true,
-                  title: Text(ticket.conversationId),
-                  subtitle: Text('${ticket.status}: ${ticket.reason}',
-                      maxLines: 2, overflow: TextOverflow.ellipsis),
-                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                    IconButton(
-                      tooltip: 'Contacting — pause AI for this customer',
-                      onPressed: ticket.status == 'open'
-                          ? () => _markContacting(ticket)
-                          : null,
-                      icon: const Icon(Icons.support_agent),
-                    ),
-                    IconButton(
-                      tooltip: 'Contacted/solved — resume on next new message',
-                      onPressed: ticket.status == 'contacting'
-                          ? () => _markContacted(ticket)
-                          : null,
-                      icon: const Icon(Icons.task_alt),
-                    ),
-                  ]),
+            else
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final log in _transferLogs.take(20))
+                      ListTile(
+                        dense: true,
+                        leading: Icon(
+                          log.status == 'transferred'
+                              ? Icons.check_circle
+                              : log.status == 'failed' ||
+                                      log.status == 'unconfirmed'
+                                  ? Icons.error_outline
+                                  : Icons.sync,
+                          color: log.status == 'transferred'
+                              ? Colors.green
+                              : log.status == 'failed' ||
+                                      log.status == 'unconfirmed'
+                                  ? Colors.red
+                                  : Colors.orange,
+                          size: 20,
+                        ),
+                        title: Text(
+                          '${log.sourceAccount} → ${log.targetAccount ?? '正在选择在线账号'}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          '${log.conversationId} · ${log.status}\n${log.reason}',
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
                 ),
-            ],
+              ),
             const Divider(),
             Expanded(
                 child: ListView.builder(
               itemCount: _conversations.length,
               itemBuilder: (context, index) {
                 final item = _conversations[index];
-                final ticket = _tickets[item.userId];
                 return ListTile(
-                  title: Row(children: [
-                    Expanded(child: Text(item.customerName)),
-                    Tooltip(
-                      message: ticket == null
-                          ? 'No human-review ticket'
-                          : ticket.status == 'contacting'
-                              ? 'Human is contacting customer'
-                              : 'Start contacting; pauses AI for this customer',
-                      child: IconButton(
-                        visualDensity: VisualDensity.compact,
-                        onPressed: ticket != null && ticket.status == 'open'
-                            ? () => _markContacting(ticket)
-                            : null,
-                        icon: const Icon(Icons.support_agent, size: 19),
-                      ),
-                    ),
-                    Tooltip(
-                      message:
-                          'Contacted; AI waits for the next customer message',
-                      child: IconButton(
-                        visualDensity: VisualDensity.compact,
-                        onPressed: ticket?.status == 'contacting'
-                            ? () => _markContacted(ticket!)
-                            : null,
-                        icon: const Icon(Icons.task_alt, size: 19),
-                      ),
-                    ),
-                  ]),
+                  title: Text(item.customerName),
                   subtitle: Text(
-                      ticket == null
-                          ? (item.messages.isEmpty
-                              ? 'No messages'
-                              : item.messages.last.body)
-                          : '${ticket.status}: ${ticket.reason}',
+                      item.messages.isEmpty
+                          ? 'No messages'
+                          : item.messages.last.body,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis),
                   onTap: () => showDialog<void>(

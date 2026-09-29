@@ -80,6 +80,66 @@ void main() {
     expect(calls, 2);
   });
 
+  test('previews active accounts and transfers only the verified customer',
+      () async {
+    var calls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls++;
+      final arguments = (call.arguments as Map<Object?, Object?>?) ?? const {};
+      switch (call.method) {
+        case 'openConversation':
+          expect(arguments['expectedCustomer'], 'jd_4laeec7741d05');
+          return <String, Object?>{
+            'opened': true,
+            'customer': 'jd_41aeec7741d05',
+          };
+        case 'listActiveTransferAccounts':
+          expect(arguments['expectedCustomer'], 'jd_41aeec7741d05');
+          return <String, Object?>{
+            'sourceAccount': '格志打印机小甘',
+            'accounts': <String>['格志打印机小秦', '格志打印机小雨(小雨)'],
+          };
+        case 'transferConversation':
+          expect(arguments['expectedCustomer'], 'jd_41aeec7741d05');
+          expect(arguments['targetAccount'], '格志打印机小秦');
+          return <String, Object?>{
+            'transferred': true,
+            'targetAccount': '格志打印机小秦',
+          };
+      }
+      fail('Unexpected method ${call.method}');
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+
+    await adapter.openConversation('jd_4laeec7741d05');
+    final preview =
+        await adapter.listActiveTransferAccounts('jd_4laeec7741d05');
+    expect(preview.sourceAccount, '格志打印机小甘');
+    expect(preview.activeAccounts, ['格志打印机小秦', '格志打印机小雨(小雨)']);
+    final result = await adapter.transferConversation(
+      expectedCustomer: 'jd_4laeec7741d05',
+      targetAccount: preview.activeAccounts.first,
+    );
+
+    expect(result['transferred'], isTrue);
+    expect(calls, 3);
+  });
+
+  test('cancels an open transfer selection without choosing an account',
+      () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'cancelTransferSelection');
+      return <String, Object?>{'closed': true};
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+
+    await adapter.cancelTransferSelection();
+  });
+
   test('passes image time and preserves a verified JD cache source', () async {
     final expectedAt = DateTime.utc(2026, 9, 24, 2, 54, 58);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

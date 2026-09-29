@@ -1,6 +1,6 @@
-# Qianniu message-capture MVP
+# JD Jingmai customer-service automation
 
-Flutter desktop UI plus a native Swift/macOS Accessibility adapter for **capture only**. It detects `com.taobao.Aliworkbench`, requests Accessibility access, dumps its AX tree, polls the selected conversation, fingerprints visible messages, queues captures, and stores them in SQLite. There is deliberately no native method for inserting or sending a reply.
+Flutter desktop UI plus a native Swift/macOS Accessibility adapter for JD Jingmai. It detects `com.jd.jdmddwb`, requests Accessibility access, monitors the selected conversation, fingerprints visible messages, queues captures, stores them in SQLite, and sends guarded replies only after verifying the active customer.
 
 ## Run
 
@@ -13,7 +13,7 @@ flutter run -d macos
 
 ## RAG backend
 
-The backend loads 91 curated customer-service cards and 535 supporting source chunks. It provides lexical retrieval immediately, optional FAISS vector retrieval using OpenAI embeddings, and structured Simplified-Chinese reply drafts using `gpt-5.4-mini`. Every reply is returned as a reviewable draft with `auto_send_allowed: false`; the API has no Qianniu send capability.
+The backend loads curated customer-service cards and supporting source chunks. It provides lexical retrieval immediately, optional FAISS vector retrieval using OpenAI embeddings, and structured Simplified-Chinese reply drafts. Desktop delivery remains guarded by exact JD customer verification.
 
 Create the local configuration and start it:
 
@@ -32,18 +32,20 @@ The tester also accepts customer screenshots, photos, and videos. Images are sup
 
 The macOS JD capture path separately recognizes the centered play overlay on an incoming video bubble. JD 10.4 already stores received videos in its per-chat media cache, so the app copies the newest fresh cached video into the private customer media directory without clicking, typing, opening a menu, or changing the selected conversation. It then runs local FFmpeg at one frame per second with a hard limit of 20 frames. Those chronological JPEG frames are passed to Codex through the same guarded image-input path and their factual descriptions are saved back to the conversation JSON. FFmpeg also detects and extracts a mono 16 kHz audio track; meaningful audio is transcribed in Chinese and English through macOS Speech, while silent and no-audio videos are explicitly recorded as such.
 
+Only a customer's second explicit transfer request within ten minutes starts an automatic JD sub-account transfer. The native adapter verifies the exact active customer, opens `快捷转接`, expands `默认咨询组` once, reads account names with Apple Vision, and independently checks green/turquoise status badges. JD Automation fairly rotates among confirmed active accounts, sends a concise transfer acknowledgement, reopens the dialog, revalidates the target, and clicks only that row's explicit blue `转接` action. Red/offline accounts and `备注原因` are never clicked. Transfer attempts are durably logged; successful, transferring, and unconfirmed clicks are never retried automatically. The sidebar shows transfer records only and provides no manual human-review controls.
+
 Local Codex drafts use low reasoning effort and low verbosity, ignore unrelated user-level Codex plugin configuration, and run at most 20 customer workers concurrently. Each customer keeps one frozen active batch: later messages wait for the current reply and are processed afterward. New evidence is collected for 2.5 seconds before a batch starts. Ready replies can be sent while other customers are still generating. If no real reply is sent for a waiting customer within 20 seconds, the app sends one randomly selected short holding message in the customer's language while Codex continues working. Any real reply cancels that holding deadline and gives remaining newer work a fresh 20-second window. Invalid output and process errors remain pending for retry.
 
 The reply service represents the JD store only. Retrieval removes other-marketplace material before it reaches Codex, media analysis stays internal, and transferred conversations answer the most recent unresolved customer request before considering a generic welcome.
 JD remains an internal service boundary rather than sales wording. Ordinary product and technical replies do not push JD purchasing or append order reminders unless the customer asks about buying, stock, an order, or an exact SKU.
 
-Local Codex replies use the extracted `格志中国市场客服完整知识库-2026-09-15-r21-consolidated` directory by default, including its app-specific `product_model_feature_catalog_kb.md`. Set `QIANNIU_KNOWLEDGE_DIR` to a different directory to override it. Retrieval reads active RAG cards, source chunks, and root-level customer knowledge Markdown; the package's plans and READMEs are excluded. The app checks these files for changes before each retrieval and reloads them when needed. On macOS it reranks up to 35 lexical candidates with sentence embeddings made from the loaded text; if embedding is unavailable or exceeds 1.5 seconds, lexical results are used. Requests for a product model list load the catalog and ask Codex to list the full Current category before asking about preferences. Questions about a named model's features also load the catalog and pass matching model rows as primary evidence, including grouped paper-width rows. Keep the curated RAG cards, source chunks, and catalog consistent when editing the raw Markdown knowledge; file reload does not regenerate those authored records.
+Local Codex replies use the extracted `格志中国市场客服完整知识库-2026-09-15-r21-consolidated` directory by default, including its app-specific `product_model_feature_catalog_kb.md`. Set `JD_KNOWLEDGE_DIR` to a different directory to override it. Retrieval reads active RAG cards, source chunks, and root-level customer knowledge Markdown; the package's plans and READMEs are excluded. The app checks these files for changes before each retrieval and reloads them when needed. On macOS it reranks up to 35 lexical candidates with sentence embeddings made from the loaded text; if embedding is unavailable or exceeds 1.5 seconds, lexical results are used. Requests for a product model list load the catalog and ask Codex to list the full Current category before asking about preferences. Questions about a named model's features also load the catalog and pass matching model rows as primary evidence, including grouped paper-width rows. Keep the curated RAG cards, source chunks, and catalog consistent when editing the raw Markdown knowledge; file reload does not regenerate those authored records.
 
 Technical follow-ups retain a wider conversation window and up to eight recent customer turns so a short complaint does not lose the model, operating system, or original problem. Technical retrieval considers up to 35 candidates and passes up to 20 matching records. Codex must inspect all supplied evidence, must not ask customers for the store's own product link, and may use safe general technical knowledge after local evidence. An unresolved technical result triggers one fresh second investigation before review. Review acknowledgements preserve the details already collected and avoid scripted transfer language.
 
 `codex_workspace/AGENTS.md` contains only the small global output and trust contract. Dart selects an exclusive reply route before generation (`technical_support`, product features/list/recommendation, refund review, requested senior service, or general support), and only the matching route instructions and data are added to that request.
 
-The macOS `.app` does not embed the extracted r21 directory. When installing it outside this project, deploy that directory alongside it and set `QIANNIU_KNOWLEDGE_DIR` to its absolute path. The catalog file must be present in that directory.
+The macOS `.app` does not embed the extracted r21 directory. When installing it outside this project, deploy that directory alongside it and set `JD_KNOWLEDGE_DIR` to its absolute path. The catalog file must be present in that directory.
 
 Media API:
 
@@ -133,14 +135,14 @@ PYTHONPATH=backend pytest backend/tests
 
 ## Accessibility setup and AX mapping
 
-1. Start Qianniu/Aliworkbench and log in.
+1. Start JD Jingmai and log in.
 2. In this app, click **Request Accessibility access**.
 3. In **System Settings → Privacy & Security → Accessibility**, enable the built `.app` (or the Terminal/IDE launching `flutter run`). Restart the app after changing permission if macOS does not refresh it.
-4. Select a real Qianniu conversation, click **Inspect AX tree**, and save the displayed output.
+4. Select a real JD conversation, click **Inspect AX tree**, and save the displayed output.
 5. Validate which reported paths correspond to the sidebar row, unread marker, customer identity, message list, and composer before tightening selectors.
 6. Click **Start capture** only after the tree is visible.
 
-The installed app found during development is `/Applications/Aliworkbench.app`, bundle `com.taobao.Aliworkbench`, version `9.95.01`.
+The native adapter targets the installed JD Jingmai bundle `com.jd.jdmddwb` and the `咚咚融合工作台` reception window.
 
 ## Current capture behavior and limitations
 
@@ -149,7 +151,7 @@ The installed app found during development is `/Applications/Aliworkbench.app`, 
 - Uses native AX identifiers when exposed; otherwise SHA-256 fingerprints include conversation, content, geometry, and AX path.
 - SQLite uniqueness is a second dedupe boundary. `messages_recent` supports efficient last-20 retrieval.
 - Direction is inferred from message position relative to the message container; it remains `unknown` when geometry is absent.
-- Opening unread rows is intentionally not performed until an actual tree dump identifies the unread marker and conversation row on this installed Qianniu build. Blindly pressing a guessed row would violate conversation safety.
+- Opening unread rows requires a verified JD conversation row and unread marker. Blindly pressing a guessed row would violate conversation safety.
 - Customer IDs and message timestamps are saved when exposed by a validated mapping; the generic discovery pass cannot invent them.
 
 If the AX dump lacks customer identity, message text, unread state, or actionable conversation rows, record precisely those missing attributes first. Clipboard or targeted vision should be considered only for the missing fields.
@@ -157,11 +159,11 @@ If the AX dump lacks customer identity, message text, unread state, or actionabl
 For a minimal permission probe independent of Flutter:
 
 ```sh
-clang -framework ApplicationServices tools/ax_probe.c -o /tmp/qianniu_ax_probe
-/tmp/qianniu_ax_probe <qianniu-pid>
+clang -framework ApplicationServices tools/ax_probe.c -o /tmp/jingmai_ax_probe
+/tmp/jingmai_ax_probe <jingmai-pid>
 ```
 
-Development probe result on 2026-08-18: Qianniu launched as PID `32562`, but the calling process was not Accessibility-trusted, so macOS returned only `AXUnknown` and no child tree. Consequently the exact unread marker, customer ID, message container, composer attributes, and safe row action remain unmapped; the MVP does not guess or press them.
+If the calling process is not Accessibility-trusted, macOS returns `AXUnknown` and no child tree. Grant Accessibility permission before mapping JD unread markers, customer identity, message containers, composer attributes, or safe row actions.
 
 ## Safety boundary
 
