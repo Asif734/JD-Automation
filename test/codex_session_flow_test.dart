@@ -9,6 +9,76 @@ import 'package:jd_automation/storage/capture_database.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('capacity failure retries primary model then uses fallback', () async {
+    final root = await Directory.systemTemp.createTemp('jd_capacity_fallback_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final knowledge = await Directory('${root.path}/knowledge').create();
+    final modelLog = File('${root.path}/models.log');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+model=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  elif [ "\$1" = '--model' ]; then
+    shift
+    model="\$1"
+  fi
+  shift
+done
+cat >/dev/null
+printf '%s\n' "\$model" >> "${modelLog.path}"
+if [ "\$model" = 'gpt-5.6-sol' ]; then
+  printf '%s\n' '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
+  exit 1
+fi
+printf '%s\n' '{"reply":"Recovered with fallback.","decision":"draft","confidence":0.9,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"untrusted","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+printf '%s\n' '{"type":"thread.started","thread_id":"fallback-thread"}'
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:capacity-test',
+      customerName: 'capacity-test',
+      customerExternalId: 'capacity-test',
+      capturedAt: DateTime.now(),
+      messages: const [
+        CapturedMessage(
+          stableId: 'question',
+          direction: 'incoming',
+          body: 'My printer is not connecting by USB. How can I fix it?',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory: knowledge,
+      outputSchema: File('${root.path}/reply.schema.json'),
+      capacityRetryDelays: const [Duration.zero],
+    );
+
+    final draft = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+
+    expect(draft.reply, 'Recovered with fallback.');
+    expect(draft.model, 'gpt-5.6-luna');
+    expect(
+      (await modelLog.readAsLines()),
+      ['gpt-5.6-sol', 'gpt-5.6-sol', 'gpt-5.6-luna'],
+    );
+  });
+
   test('Codex timeout leaves the customer batch pending for retry', () async {
     final root = await Directory.systemTemp.createTemp('jd_codex_timeout_');
     final database =
@@ -117,7 +187,7 @@ printf '%s\\n' '{"reply":"Here is the verified answer.","decision":"draft","conf
     expect((history!['messages'] as List<Object?>), hasLength(3));
   });
 
-  test('feature replies receive exact r21 model evidence', () async {
+  test('feature replies receive exact JD catalog model evidence', () async {
     final root = await Directory.systemTemp.createTemp('jd_model_evidence_');
     final database =
         CaptureDatabase(storageRoot: Directory('${root.path}/data'));
@@ -144,8 +214,8 @@ printf '%s\\n' '{"reply":"The documented paper width is available.","decision":"
     final service = CodexReplyService(
       executable: fakeCodex.path,
       workspace: workspace,
-      knowledgeDirectory: Directory(
-          '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'),
+      knowledgeDirectory:
+          Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'),
       outputSchema: File('${root.path}/reply.schema.json'),
     );
 
@@ -333,6 +403,71 @@ fi
     expect(await counter.readAsString(), '2');
     expect(draft.decision, 'draft');
     expect(draft.reply, contains('Restart the printer'));
+    expect(draftRequiresHumanReview(draft), isFalse);
+  });
+
+  test('an unconfirmed product fact gets one full second lookup', () async {
+    final root = await Directory.systemTemp.createTemp('jd_product_recheck_');
+    final database =
+        CaptureDatabase(storageRoot: Directory('${root.path}/data'));
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final workspace = await Directory('${root.path}/workspace').create();
+    final counter = File('${root.path}/attempt-count');
+    final fakeCodex = File('${root.path}/fake-codex.sh');
+    await fakeCodex.writeAsString('''#!/bin/sh
+output=''
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = '--output-last-message' ]; then
+    shift
+    output="\$1"
+  fi
+  shift
+done
+cat >/dev/null
+count=0
+if [ -f "${counter.path}" ]; then count=\$(cat "${counter.path}"); fi
+count=\$((count + 1))
+printf '%s' "\$count" > "${counter.path}"
+if [ "\$count" -eq 1 ]; then
+  printf '%s\n' '{"reply":"The TP730 driver is not confirmed in the current product information.","decision":"human_review_required","confidence":0.5,"used_record_ids":[],"required_slots":[],"actions":[],"risk_level":"high","risk_triggers":["unconfirmed driver"],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":true,"reason":"Not found on first pass"}' > "\$output"
+else
+  printf '%s\n' '{"reply":"The TP730 Windows driver is documented in the matching product manual.","decision":"draft","confidence":0.9,"used_record_ids":["manual"],"required_slots":[],"actions":[],"risk_level":"low","risk_triggers":[],"auto_send_allowed":false,"model":"test","attachments":[],"image_descriptions":[],"human_review_required":false,"reason":null}' > "\$output"
+fi
+''');
+    expect((await Process.run('chmod', ['+x', fakeCodex.path])).exitCode, 0);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:product-recheck',
+      customerName: 'product-recheck',
+      customerExternalId: 'product-recheck',
+      capturedAt: DateTime.now(),
+      messages: const [
+        CapturedMessage(
+          stableId: 'driver-question',
+          direction: 'incoming',
+          body: 'Where is the TP730 driver?',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final service = CodexReplyService(
+      executable: fakeCodex.path,
+      workspace: workspace,
+      knowledgeDirectory:
+          Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'),
+      outputSchema: File('${root.path}/reply.schema.json'),
+    );
+
+    final draft = await service.generate(
+      conversation: (await database.conversations()).single,
+      database: database,
+    );
+
+    expect(await counter.readAsString(), '2');
+    expect(draft.reply, contains('matching product manual'));
+    expect(draft.decision, 'draft');
     expect(draftRequiresHumanReview(draft), isFalse);
   });
 

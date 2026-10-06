@@ -75,9 +75,11 @@ tmp/
 *.dylib
 **/flutter_assets/kernel_blob.bin
 
-# r21 knowledge package: keep text KB and rag_cards available for Git, but
-# leave the large archive, media originals, and generated index local.
+# Old r21 knowledge package: keep the entire package and archive local.
 /Grozziie-KB-Consolidated-2026-09-15-r21.zip
-/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/assets/
-/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/sources/
-/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/rag_index/
+/格志中国市场客服完整知识库-2026-09-15-r21-consolidated/
+
+# New JD knowledge package: keep text KB and RAG data available for Git,
+# but leave media assets and original uploads local.
+/格志京东客服知识库-2026-10-04/assets/
+/格志京东客服知识库-2026-10-04/sources/

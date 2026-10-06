@@ -1,0 +1,21 @@
+{
+  "platform": "JD",
+  "brand_zh": "格志",
+  "brand_en": "Grozziie",
+  "version": "2026-10-04-jd-grozziie-v1",
+  "technical_knowledge": true,
+  "flutter_static_dataset": true,
+  "python_runtime_required": false,
+  "tutorial_selection_platform": "JD",
+  "automatic_product_card_send": false,
+  "automatic_invite_order": false,
+  "automatic_order_card_actions": false,
+  "automatic_invoice_card_actions": false,
+  "native_emoji_codes": false,
+  "email_delivery_adapter_included": false,
+  "human_transfer_adapter_included": false,
+  "runtime_state_included": false,
+  "shipping_policy": "user_approved_same_as_source_2026-10-04",
+  "rebuild_destination_embeddings": true,
+  "source_materials_are_nonindexed_reference_only": true
+}

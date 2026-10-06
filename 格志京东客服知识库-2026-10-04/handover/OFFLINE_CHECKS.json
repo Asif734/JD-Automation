@@ -1,0 +1,68 @@
+{
+  "active_cards": 527,
+  "source_chunks": 824,
+  "jd_tutorial_entries": 63,
+  "high_frequency_routes": 971,
+  "exact_route_checks_passed": 971,
+  "target_software_live_test": "not_performed",
+  "flutter_runtime_test": "passed",
+  "flutter_test_command": "flutter test",
+  "flutter_tests_passed": 206,
+  "flutter_tests_failed": 0,
+  "dataset_semantic_checks": "passed",
+  "probes": [
+    {
+      "query": "本店是什么品牌",
+      "top_card": "jd_grozziie_brand_identity_20260925",
+      "result": "pass"
+    },
+    {
+      "query": "你们从哪里发货",
+      "top_card": "jd_shipping_shanghai_zto_no_sf_20260925",
+      "result": "pass"
+    },
+    {
+      "query": "能发顺丰吗",
+      "top_card": "jd_shipping_shanghai_zto_no_sf_20260925",
+      "result": "pass"
+    },
+    {
+      "query": "有色带吗",
+      "top_card": "dot_matrix_ribbon_model_match",
+      "result": "pass"
+    },
+    {
+      "query": "京东手机App可以直接打印吗",
+      "top_card": "thermal_mobile_platform_direct_print_boundary",
+      "result": "pass"
+    },
+    {
+      "query": "当前有哪些针式打印机型号",
+      "top_card": "jd_product_model_current_catalog",
+      "result": "pass"
+    },
+    {
+      "query": "TD630电脑可以WiFi打印吗",
+      "top_card": "dot_matrix_connectivity_os_support",
+      "result": "pass"
+    },
+    {
+      "query": "TP876PLUS支持多宽纸",
+      "top_card": "thermal_paper_label_size_selling_point",
+      "result": "pass"
+    },
+    {
+      "query": "M880D停电还能打卡吗",
+      "top_card": "attendance_power_outage_selling_point",
+      "result": "pass"
+    },
+    {
+      "query": "支持速印通的型号都支持安卓和iPhone吗",
+      "top_card": "official_mobile_app_android_ios_implication_jd",
+      "result": "pass"
+    }
+  ],
+  "schema_and_reference_integrity": "pass",
+  "source_unchanged": "pass",
+  "source_sha256": "3c04e1ef992c651cf00dbc63e446d9632479eab9977925ba59af96816990eddc"
+}

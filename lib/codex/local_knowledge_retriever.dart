@@ -134,7 +134,7 @@ class LocalKnowledgeRetriever {
       defaultPriority: 40,
     );
 
-    // The r21 package also contains plans, source evidence, and READMEs.
+    // The JD knowledge package also contains source evidence and READMEs.
     // Only root-level customer knowledge belongs in reply retrieval.
     final markdownFiles = await knowledgeDirectory
         .list(followLinks: false)
@@ -519,7 +519,7 @@ class LocalKnowledgeRetriever {
   }
 
   bool _containsUnsupportedPlatform(String value) => RegExp(
-        r'天猫|淘宝|拼多多|抖音|闲鱼|tmall|taobao|pinduoduo|douyin|pddpic|tiktok\s*shop|amazon|ebay|aliexpress',
+        r'微信|微信小程序|微信商城|wechat|weixin|天猫|淘宝|拼多多|抖音|闲鱼|小红书|快手|美团|tmall|taobao|pinduoduo|douyin|xiaohongshu|rednote|kuaishou|meituan|pddpic|tiktok\s*shop|amazon|ebay|aliexpress',
         caseSensitive: false,
       ).hasMatch(value);
 

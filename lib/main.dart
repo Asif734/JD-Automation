@@ -1512,6 +1512,19 @@ class _CaptureHomeState extends State<CaptureHome> {
         await _sendSlaFallback(job);
       }
       _scheduleDraftRetry(userId);
+    } on CodexReplyException catch (error) {
+      if (isCodexModelCapacityError(error.message)) {
+        if (mounted) {
+          setState(() {
+            _error = null;
+            _diagnostics =
+                'Reply generation is retrying because the Codex models are busy.';
+          });
+        }
+      } else if (mounted) {
+        setState(() => _error = error);
+      }
+      _scheduleDraftRetry(userId);
     } catch (error) {
       if (mounted) setState(() => _error = error);
       _scheduleDraftRetry(userId);
@@ -1559,6 +1572,20 @@ class _CaptureHomeState extends State<CaptureHome> {
         database: _database,
         batchEndMessageId: messageIdAtGenerationStart,
         cancellation: cancellation);
+    if (mounted) {
+      setState(() {
+        final visibleError = _error;
+        if (visibleError is CodexReplyException &&
+            isCodexModelCapacityError(visibleError.message)) {
+          _error = null;
+        }
+        if (draft.model == service.capacityFallbackModel &&
+            service.capacityFallbackModel != service.model) {
+          _diagnostics =
+              'The primary Codex model was busy; this reply used ${draft.model}.';
+        }
+      });
+    }
     cancellation.throwIfCancelled();
     if (await _promoteCodexDetectedVideo(conversation, draft)) {
       _scheduleDraftGeneration(userId, newEvidence: true);

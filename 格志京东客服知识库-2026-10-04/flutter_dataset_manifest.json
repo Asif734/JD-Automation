@@ -1,0 +1,40 @@
+{
+  "package": "格志京东客服知识库-2026-10-04",
+  "version": "2026-10-04-jd-grozziie-v1",
+  "platform": "JD",
+  "brand_zh": "格志",
+  "brand_en": "Grozziie",
+  "format": "flutter_static_knowledge_bundle",
+  "entrypoints": {
+    "global_rules": "jd_customer_service_rules.md",
+    "capabilities": "handover/capabilities.json",
+    "model_catalog": "product_model_feature_catalog_kb.md",
+    "cards_json": "rag_cards/customer_service_rag_cards.json",
+    "cards_jsonl": "rag_cards/customer_service_rag_cards.jsonl",
+    "card_schema": "rag_cards/customer_service_rag_card_schema.json",
+    "high_frequency_routes": "rag_cards/high_frequency_queries.json",
+    "tutorial_catalog": "rag_cards/china_market_video_catalog.json",
+    "source_chunks_jsonl": "rag_cards/source_chunks.jsonl",
+    "fallback_index": "rag_index/customer_service_rag_index.json"
+  },
+  "counts": {
+    "active_cards": 527,
+    "high_frequency_routes": 971,
+    "tutorial_entries": 63,
+    "source_chunks": 824
+  },
+  "normalization": {
+    "query": "lowercase_and_remove_whitespace",
+    "platform": "JD",
+    "high_frequency_route_precedence": true
+  },
+  "runtime_boundaries": {
+    "data_only": true,
+    "python_runtime_required": false,
+    "sends_messages": false,
+    "performs_order_actions": false,
+    "human_transfer_adapter_included": false,
+    "email_adapter_included": false,
+    "max_tutorial_links_per_reply": 1
+  }
+}

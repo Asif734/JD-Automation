@@ -154,7 +154,7 @@ class LocalReplyRouter {
   }
 
   bool _isUnsupportedPlatformQuestion(String value) => RegExp(
-        r'天猫|淘宝|拼多多|抖音|闲鱼|tmall|taobao|pinduoduo|douyin|tiktok\s*shop|amazon|ebay|aliexpress',
+        r'微信|微信小程序|微信商城|wechat|weixin|天猫|淘宝|拼多多|抖音|闲鱼|小红书|快手|美团|tmall|taobao|pinduoduo|douyin|xiaohongshu|rednote|kuaishou|meituan|tiktok\s*shop|amazon|ebay|aliexpress',
         caseSensitive: false,
       ).hasMatch(value);
 

@@ -90,6 +90,23 @@ void main() {
         'customer-thread-id');
   });
 
+  test('can select the capacity fallback model for one turn', () {
+    final arguments = service.buildArguments(
+      outputPath: '${root.path}/reply.json',
+      selectedModel: 'gpt-5.6-luna',
+    );
+    expect(arguments, containsAllInOrder(['--model', 'gpt-5.6-luna']));
+  });
+
+  test('recognizes only the Codex model-capacity failure', () {
+    expect(
+      isCodexModelCapacityError(
+          'Selected model is at capacity. Please try a different model.'),
+      isTrue,
+    );
+    expect(isCodexModelCapacityError('Codex returned invalid JSON.'), isFalse);
+  });
+
   test('uses a fast bounded model for contextual query planning', () {
     final arguments =
         service.buildPlannerArguments(outputPath: '${root.path}/plan.json');
@@ -175,6 +192,25 @@ void main() {
     expect(draft.reply, contains('您好'));
     expect(draft.confidence, 0.98);
     expect(draft.model, 'gpt-5.6-sol');
+  });
+
+  test('records the model actually selected for a fallback reply', () {
+    final draft = service.parseResponse('''{
+      "reply": "Fallback reply",
+      "decision": "draft",
+      "confidence": 0.98,
+      "used_record_ids": [],
+      "required_slots": [],
+      "actions": [],
+      "risk_level": "low",
+      "risk_triggers": [],
+      "auto_send_allowed": false,
+      "model": "untrusted",
+      "attachments": [],
+      "human_review_required": false,
+      "reason": null
+    }''', selectedModel: 'gpt-5.6-luna');
+    expect(draft.model, 'gpt-5.6-luna');
   });
 
   test('rejects any response that enables auto-send', () {
@@ -332,21 +368,25 @@ void main() {
 
   test('loads the dedicated product recommendation catalog', () async {
     final projectRoot = Directory.current;
-    final catalog = await loadProductRecommendationCatalog(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final catalog = await loadProductRecommendationCatalog(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
 
     expect(catalog, contains('knowledge_base: product_model_feature_catalog'));
-    expect(catalog, contains('## r21 Current 型号清单'));
+    expect(catalog, contains('## 2. 型号生命周期总表'));
     expect(catalog, contains('TD630G'));
   });
 
-  test('model feature questions use exact r21 catalog evidence', () async {
-    final catalog = await loadProductRecommendationCatalog(Directory(
-        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+  test('model feature questions use exact JD catalog evidence', () async {
+    final catalog = await loadProductRecommendationCatalog(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
     expect(hasProductFeatureIntent('what are the features for tp730?'), isTrue);
     expect(hasProductFeatureIntent('what features tp874 offers?'), isTrue);
     expect(hasProductFeatureIntent('TP874 打印参数和纸宽？'), isTrue);
     expect(hasProductFeatureIntent('Does TP874 support Android?'), isTrue);
+    expect(
+        hasProductFeatureIntent('What is the official app for TP874?'), isTrue);
+    expect(hasProductFeatureIntent('Where is the TP730 driver?'), isTrue);
+    expect(hasProductFeatureIntent('TP730说明书在哪里？'), isTrue);
     expect(hasProductFeatureIntent('Tell me about TP730'), isTrue);
     expect(hasProductFeatureIntent('My TP874 is not connecting'), isFalse);
 
@@ -364,6 +404,11 @@ void main() {
     expect(evidence, contains('USB+蓝牙'));
     expect(evidence, contains('203DPI'));
     expect(evidence, contains('macOS USB'));
+    expect(evidence, contains('Grozziie App'));
+    expect(evidence, contains('速印通'));
+    expect(evidence, contains('Android'));
+    expect(evidence, anyOf(contains('iOS'), contains('iPhone')));
+    expect(evidence, isNot(contains('未确认对应的手机App名称')));
   });
 
   test('counts clarification slots across the current topic only', () {
@@ -458,7 +503,7 @@ void main() {
     expect(guarded.reply, contains('进一步准确核对'));
   });
 
-  test('recognizes refund and video-guide review requests', () {
+  test('recognizes refund and video-guide requests', () {
     expect(isRefundRequest('I need a refund'), isTrue);
     expect(isRefundRequest('我要退款'), isTrue);
     expect(isVideoGuideRequest('Please send the setup video guide'), isTrue);
@@ -508,7 +553,7 @@ void main() {
         isFalse);
   });
 
-  test('forces refund and video-guide requests into human review', () {
+  test('forces refunds but not video-guide requests into human review', () {
     final ordinary = service.parseResponse('''{
       "reply":"I can help.",
       "decision":"draft",
@@ -529,13 +574,63 @@ void main() {
     final refund =
         service.enforceHumanReviewPolicy(ordinary, 'I need a refund');
     final video = service.enforceHumanReviewPolicy(
-        ordinary, 'Please send the setup video guide');
+      ordinary,
+      'Please send the setup video guide',
+      videoGuideRequested: true,
+    );
 
     expect(draftRequiresHumanReview(refund), isTrue);
     expect(refund.reply, contains('退款申请'));
     expect(draftHumanReviewReason(refund), contains('refund'));
-    expect(draftRequiresHumanReview(video), isTrue);
-    expect(video.reply, contains('视频教程'));
+    expect(draftRequiresHumanReview(video), isFalse);
+    expect(video.decision, 'draft');
+    expect(video.riskLevel, 'low');
+  });
+
+  test('loads every unique JD tutorial link for reply selection', () async {
+    final tutorials = await loadJdVideoTutorialCatalog(
+      Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'),
+    );
+
+    expect(tutorials, hasLength(77));
+    expect(
+      tutorials.map((item) => item['jd_url']).toSet(),
+      hasLength(77),
+    );
+    expect(
+      tutorials.every(
+        (item) => item['jd_url'].toString().startsWith('https://'),
+      ),
+      isTrue,
+    );
+    expect(
+      tutorials.any((item) => item['verification'] == 'frame_verified'),
+      isTrue,
+    );
+  });
+
+  test('repairs spaced outgoing URLs so JD can make them clickable', () {
+    const spaced = 'M880 shift-setting video: '
+        'https://jvod. 300hu. com/vod/product/1621802055/21852/'
+        '5690e3a8dbe34b19850d3d84ce215a2d. mp4';
+
+    expect(
+      normalizeCustomerFacingUrls(spaced),
+      'M880 shift-setting video: '
+      'https://jvod.300hu.com/vod/product/1621802055/21852/'
+      '5690e3a8dbe34b19850d3d84ce215a2d.mp4',
+    );
+    expect(
+      normalizeCustomerFacingUrls('Open https://example.com Next step'),
+      'Open https://example.com Next step',
+    );
+    expect(
+      normalizeCustomerFacingUrls(
+        'Driver: https://www.zjweiting.com/download.htm.Turn on the printer.',
+      ),
+      'Driver: https://www.zjweiting.com/download.htm\n'
+      'Turn on the printer.',
+    );
   });
 
   test('first human request offers help and the repeated request transfers',
@@ -771,16 +866,21 @@ void main() {
   });
 
   test('keeps other marketplace questions within JD scope', () {
-    final draft = const LocalReplyRouter().route([
-      <String, dynamic>{
-        'direction': 'incoming',
-        'body': 'Can you check my Tmall order?'
-      },
-    ]);
+    for (final question in [
+      'Can you check my Tmall order?',
+      'Can you help me through WeChat?',
+      '可以加微信吗？',
+    ]) {
+      final draft = const LocalReplyRouter().route([
+        <String, dynamic>{'direction': 'incoming', 'body': question},
+      ]);
 
-    expect(draft, isNotNull);
-    expect(draft!.reply, contains('京东店铺'));
-    expect(draft.reply, isNot(contains('Tmall')));
+      expect(draft, isNotNull);
+      expect(draft!.reply, contains('京东店铺'));
+      expect(draft.reply.toLowerCase(), isNot(contains('tmall')));
+      expect(draft.reply.toLowerCase(), isNot(contains('wechat')));
+      expect(draft.reply, isNot(contains('微信')));
+    }
   });
 
   test('retrieval query contains only the current customer turn', () {
@@ -1069,8 +1169,8 @@ void main() {
 
   test('retrieves compact curated knowledge before Codex', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
     final records = await retriever.retrieve('我要退款', limit: 3);
     expect(records, isNotEmpty);
     expect(records.first['id'], 'global_refund_return_high_risk');
@@ -1117,7 +1217,8 @@ void main() {
     await File('${ragCards.path}/customer_service_rag_cards.jsonl')
         .writeAsString(
       '{"id":"tmall_only","status":"active","title":"Tmall order rule","issue":"scopechecktoken","reply_template":"Tmall answer"}\n'
-      '{"id":"jd_mixed","status":"active","title":"JD support","issue":"scopechecktoken","reply_template":"JD answer. Tmall answer."}\n',
+      '{"id":"wechat_only","status":"active","title":"WeChat support","issue":"scopechecktoken","reply_template":"WeChat answer"}\n'
+      '{"id":"jd_mixed","status":"active","title":"JD support","issue":"scopechecktoken","reply_template":"JD answer. Tmall answer. WeChat answer."}\n',
     );
 
     final records = await LocalKnowledgeRetriever(knowledge)
@@ -1127,15 +1228,18 @@ void main() {
     expect(records.map((record) => record['id']), contains('jd_mixed'));
     expect(
         records.map((record) => record['id']), isNot(contains('tmall_only')));
+    expect(
+        records.map((record) => record['id']), isNot(contains('wechat_only')));
     expect(encoded, isNot(contains('tmall')));
+    expect(encoded, isNot(contains('wechat')));
     expect(encoded, contains('jd answer'));
   });
 
   test('retrieves an available attendance product for a buying conversation',
       () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
     final records = await retriever.retrieve(
       'I need to buy an attendance machine. Which model should we buy? '
       'Paper card, 4,000 employees, one site.',
@@ -1244,8 +1348,8 @@ void main() {
 
   test('retrieves the Android and iOS implication for confirmed app support',
       () async {
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
 
     final records = await retriever.retrieve(
       'If this printer supports the Grozziie app, does it work on Android and iOS?',
@@ -1254,12 +1358,71 @@ void main() {
 
     expect(
       records.map((record) => record['id']),
-      contains('official_mobile_app_android_ios_implication'),
+      contains('official_mobile_app_android_ios_implication_jd'),
     );
     final rule = records.firstWhere((record) =>
-        record['id'] == 'official_mobile_app_android_ios_implication');
+        record['id'] == 'official_mobile_app_android_ios_implication_jd');
     expect(rule['reply_template'].toString(), contains('Android'));
-    expect(rule['reply_template'].toString(), contains('iOS'));
+    expect(
+      rule['reply_template'].toString(),
+      anyOf(contains('iOS'), contains('iPhone')),
+    );
+  });
+
+  test('retrieves confirmed TP874 Grozziie app support for Android and iOS',
+      () async {
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
+
+    final records = await retriever.retrieve(
+      'Can TP874 print from the Grozziie app on Android and iPhone?',
+      limit: 8,
+    );
+
+    final rule = records.firstWhere((record) =>
+        record['id'] == 'official_mobile_app_android_ios_implication_jd');
+    final answer = rule['reply_template'].toString();
+    expect(
+      (rule['models'] as List<dynamic>).map((model) => model.toString()),
+      contains('TP874'),
+    );
+    expect(answer, contains('Grozziie App'));
+    expect(answer, contains('Android'));
+    expect(answer, anyOf(contains('iOS'), contains('iPhone')));
+    expect(answer, isNot(contains('未确认')));
+  });
+
+  test('routes USB phone support without requiring the Grozziie app',
+      () async {
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
+
+    final records = await retriever.retrieve(
+      'Can I use AK910 from Android or iPhone by USB without the app?',
+      limit: 8,
+    );
+
+    final rule = records.firstWhere((record) =>
+        record['id'] == 'official_mobile_app_android_ios_implication_jd');
+    final answer = rule['reply_template'].toString();
+    expect(answer, contains('Android'));
+    expect(answer, anyOf(contains('iOS'), contains('iPhone')));
+    expect(answer, contains('USB'));
+    expect(answer, contains('不需要App'));
+  });
+
+  test('TP731 catalog keeps Android and iOS support on the USB route',
+      () async {
+    final catalog = await loadProductRecommendationCatalog(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
+    final rows = verifiedCatalogRowsForModels(catalog, {'TP731'});
+    final evidence = rows.map((row) => row['source_row']).join('\n');
+
+    expect(evidence, contains('Android'));
+    expect(evidence, contains('iOS'));
+    expect(evidence, contains('USB'));
+    expect(evidence, contains('不需要App'));
+    expect(evidence, isNot(contains('不支持手机')));
   });
 
   test('reloads edited knowledge files without restarting the retriever',
@@ -1289,8 +1452,8 @@ void main() {
 
   test('retrieves M880D previous-year date instructions', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
     final records = await retriever.retrieve(
       'Can I set the M880D system date to last year, 2025?',
       limit: 5,
@@ -1305,8 +1468,8 @@ void main() {
 
   test('retrieves TP874 Mac driver and connection evidence without a link',
       () async {
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${Directory.current.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
     final raw = await retriever.retrieve(
       'TP874 macOS where can I get driver then how to connect?',
       limit: 35,
@@ -1368,8 +1531,8 @@ void main() {
 
   test('retrieves verified media paths linked by selected cards', () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
     final records = await retriever
         .retrieve('Show the 20-slot attendance-card rack', limit: 5);
     final media = await retriever.mediaForRecords(records);
@@ -1387,8 +1550,8 @@ void main() {
   test('retains model context for a short comparison-photo follow-up',
       () async {
     final projectRoot = Directory.current;
-    final retriever = LocalKnowledgeRetriever(Directory(
-        '${projectRoot.path}/格志中国市场客服完整知识库-2026-09-15-r21-consolidated'));
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${projectRoot.path}/格志京东客服知识库-2026-10-04'));
     final records = await retriever.retrieve(
         'M880 paper-card attendance machine\n'
         'Let us continue with M880D\n'
@@ -1555,6 +1718,96 @@ void main() {
     expect(guarded.reply, contains('继续为您核对'));
     expect(guarded.reply.toLowerCase(), isNot(contains('human agent')));
     expect(draftRequiresHumanReview(guarded), isFalse);
+  });
+
+  test('removes colleague verification deferral from an unconfirmed fact', () {
+    final generated = service.parseResponse('''{
+      "reply":"The exact app name for the TP874 is not confirmed in the available product information. My colleague needs to verify it before you download an app.",
+      "decision":"draft",
+      "confidence":0.8,
+      "used_record_ids":["product_model_feature_catalog"],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final guarded = service.enforceCustomerFacingPolicy(
+      generated,
+      'What is the official app for TP874?',
+    );
+
+    expect(guarded.reply, contains('not confirmed'));
+    expect(guarded.reply.toLowerCase(), isNot(contains('my colleague')));
+    expect(guarded.reply.toLowerCase(), isNot(contains('needs to verify')));
+    expect(draftRequiresHumanReview(guarded), isFalse);
+  });
+
+  test('unconfirmed TP874 app does not trigger human review', () {
+    final generated = service.parseResponse('''{
+      "reply":"The TP874 app name isn't confirmed in the current product information. I've asked a customer service colleague to verify the exact official app before you download anything.",
+      "decision":"human_review_required",
+      "confidence":0.7,
+      "used_record_ids":["product_model_feature_catalog"],
+      "required_slots":[],
+      "actions":[{"type":"route_human","description":"Verify exact app."}],
+      "risk_level":"high",
+      "risk_triggers":["unconfirmed app"],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":true,
+      "reason":"No confirmed official app"
+    }''');
+
+    final reviewGuarded = service.enforceHumanReviewPolicy(
+      generated,
+      'What is the official app for TP874?',
+      productFeatureRequested: true,
+    );
+    final guarded = service.enforceCustomerFacingPolicy(
+      reviewGuarded,
+      'What is the official app for TP874?',
+    );
+
+    expect(guarded.reply, contains("isn't confirmed"));
+    expect(
+      guarded.reply.toLowerCase(),
+      isNot(contains('asked a customer service colleague')),
+    );
+    expect(guarded.reply, isNot(contains('进一步准确核对')));
+    expect(guarded.reply, isNot(contains('已保留现有信息')));
+    expect(guarded.decision, 'draft');
+    expect(guarded.riskLevel, 'low');
+    expect(draftRequiresHumanReview(guarded), isFalse);
+  });
+
+  test('detects an unconfirmed product fact for a second lookup', () {
+    final draft = service.parseResponse('''{
+      "reply":"The requested driver is not confirmed in the current product information.",
+      "decision":"draft",
+      "confidence":0.6,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"test",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    expect(modelStatesProductFactUnconfirmed(draft), isTrue);
   });
 
   test('customer-facing guard removes an unsolicited video inventory', () {

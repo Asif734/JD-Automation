@@ -1,0 +1,1581 @@
+{
+  "version": "2026-10-04-jd-grozziie-v1",
+  "catalog_scope": "格志京东已确认教程目录",
+  "source_files": [],
+  "detailed_manifests": [],
+  "platforms": [
+    "JD"
+  ],
+  "selection_policy": {
+    "max_links_per_reply": 1,
+    "same_platform_only": true,
+    "answer_before_link": true,
+    "no_automatic_alternate": true,
+    "no_unreviewed_setting_invention": true
+  },
+  "entries": [
+    {
+      "content_id": "cloud_smart_attendance_machine_how_to_log_in_or_register_a_new_account_in_the_app",
+      "title_zh": "如何登录或注册app新账户",
+      "title_en": "How to log in or register a new account in the app",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "如何登录或注册app新账户",
+        "登录或注册app新账户"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/75c14e70905786149544431617/1097_5000_1_5762f97db_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E2"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_set_penalties_for_late_arrival_and_early_departure",
+      "title_zh": "设置迟到罚款和早退扣款",
+      "title_en": "Set penalties for late arrival and early departure",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "设置迟到罚款和早退扣款"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/5d7a3003905786974576611329/1097_5000_1_2701a4f9a_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E3"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_set_must_pay_attention_to_the_matters",
+      "title_zh": "设置必须注意事项",
+      "title_en": "Set must pay attention to the matters",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "设置必须注意事项"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/2071e77c905786974564036609/1097_5000_1_78b3831a8_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E4"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_set_overtime_rules",
+      "title_zh": "设置加班规则",
+      "title_en": "Set overtime rules",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "设置加班规则"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/4689236c905786974580805633/1097_5000_1_78b703ffe_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E5"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_start_using_the_application_and_set_up_the_payment_cycle",
+      "title_zh": "开始使用应用程序并设置支付周期",
+      "title_en": "Start using the application and set up the payment cycle",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "开始使用应用程序并设置支付周期"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621203611/21852/611a161f7d3548a690bbcb90794e603a.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E6"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_employee_information_management_settings",
+      "title_zh": "员工信息管理设置",
+      "title_en": "Employee Information Management Settings",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "员工信息管理设置"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621203874/21852/3fc26b179f8d43528f2fbaae94101a19.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E7"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_company_salary_rule_settings",
+      "title_zh": "公司薪资规则设置",
+      "title_en": "Company salary rule settings",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "公司薪资规则设置"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621203922/21852/ff6144ca88cf40ceb5f9b02989d907b7.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E8"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_attendance_card_data_reading",
+      "title_zh": "考勤卡数据读取",
+      "title_en": "Attendance card data reading",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "考勤卡数据读取"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621204537/21852/29e0f28720d44c1c90ad5d781ef2aa31.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E9"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_smart_attendance_machine_instructions_for_using_the_smart_attendance_machine_summary",
+      "title_zh": "智能考勤机使用说明汇总",
+      "title_en": "Instructions for Using the Smart Attendance Machine Summary",
+      "product_line": "smart_attendance_machine",
+      "models": [],
+      "keywords": [
+        "智能考勤机使用说明汇总"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/4b90d35b905787058483671041/1097_5000_1_71c48a0cc_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E10"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Smart Attendance Machine"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_introduction_of_dot_matrix_printer",
+      "title_zh": "针式打印机介绍",
+      "title_en": "Introduction of Dot Matrix Printer",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "针式打印机介绍"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621449833/21852/9bc98f72560b41948ab95bd4f9c64c30.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E25"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_identify_the_front_and_back_sides_of_printing_paper",
+      "title_zh": "如何识别打印纸正反面",
+      "title_en": "How to identify the front and back sides of printing paper",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何识别打印纸正反面",
+        "识别打印纸正反面"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621449853/21852/ff6cd511ca2744539001c2fa80ab68a9.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E26"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_setup_printer",
+      "title_zh": "如何设置打印机",
+      "title_en": "How to Setup Printer",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何设置打印机",
+        "设置打印机",
+        "针式打印机后进连续纸怎么装",
+        "后进连续纸怎么装",
+        "打印机后面装纸",
+        "拖纸器装纸",
+        "链孔纸安装",
+        "带孔连续纸安装",
+        "前进纸怎么放",
+        "前面放单张纸",
+        "针式打印机装纸视频"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450426/21852/8eef92f862b74a22884fcb26a7d0c01c.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E27"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "visually_verified_2026_09_25",
+      "verified_topics": [
+        "后部拖纸器安装带孔连续纸",
+        "前部单张纸进纸"
+      ]
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_configure_printer_update_version",
+      "title_zh": "如何配置打印机更新版本",
+      "title_en": "How to Configure Printer Update Version",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何配置打印机更新版本",
+        "配置打印机更新版本"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621449631/21852/d278895d4ce14ea59ecf8ea76a87134f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E28"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_set_up_printer_from_another_laptop_or_pc_by_wifi",
+      "title_zh": "如何通过WiFi从另一台笔记本电脑或PC设置打印机",
+      "title_en": "How to set up printer from another Laptop or PC by WiFi",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何通过WiFi从另一台笔记本电脑或PC设置打印机",
+        "通过WiFi从另一台笔记本电脑或PC设置打印机"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/16f10f67905811151526338561/1097_1115_1_f063e4aee_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E29"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_do_self_test_chinese",
+      "title_zh": "如何进行自测（中文）",
+      "title_en": "How to Do Self Test (Chinese）",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何进行自测（中文）",
+        "进行自测（中文）"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450320/21852/1a3b11345df84b04afc8b7b5a7e2326c.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E30"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_setup_or_configure_by_usb_only",
+      "title_zh": "如何仅通过USB进行设置或配置",
+      "title_en": "How to Setup or Configure by USB only",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何仅通过USB进行设置或配置",
+        "仅通过USB进行设置或配置"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450152/21852/17c2e4edc1504025a1af07f74fb2be55.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E31"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_print_by_bluetooth_updated_version",
+      "title_zh": "如何通过蓝牙打印（更新版）",
+      "title_en": "How to Print by Bluetooth Updated Version",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何通过蓝牙打印（更新版）",
+        "通过蓝牙打印（更新版）"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450122/21852/ae0b0359039544f09a5b04d8389f16ab.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E32"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_adjust_the_paper_width",
+      "title_zh": "如何根据调整纸张宽度",
+      "title_en": "How to adjust the paper width",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何根据调整纸张宽度",
+        "根据调整纸张宽度"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450444/21852/9e15e2b494404bbc89d4510a936ef025.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E33"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_dot_matrix_printer_how_to_replace_ribbon",
+      "title_zh": "如何更换色带",
+      "title_en": "How to Replace Ribbon",
+      "product_line": "dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "如何更换色带",
+        "更换色带",
+        "色带怎么换",
+        "安装色带",
+        "换色带"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621450531/21852/3989a678ddde4b3a8419df6683ccec16.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E34"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_wifi_bluetooth_dot_matrix_printer_downloading_the_app_and_setting_up_your_account",
+      "title_zh": "下载应用程序并创建您的账户",
+      "title_en": "Downloading the App and Setting Up Your Account",
+      "product_line": "wifi_bluetooth_dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "下载应用程序并创建您的账户",
+        "下载APP",
+        "安装APP"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/32f6e13e905825524382740481/1097_5000_1_dda994c79_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E35"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Wifi BT Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_wifi_bluetooth_dot_matrix_printer_selecting_and_preparing_documents_for_printing",
+      "title_zh": "选择和准备要打印的文档",
+      "title_en": "Selecting and Preparing Documents for Printing",
+      "product_line": "wifi_bluetooth_dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "选择和准备要打印的文档"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621613818/21852/3234ab61431e4883a183410775232315.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E36"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Wifi BT Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_wifi_bluetooth_dot_matrix_printer_connecting_your_iphone_and_printer_to_wi_fi",
+      "title_zh": "将您的 iPhone 和打印机连接到 Wi-Fi",
+      "title_en": "Connecting Your iPhone and Printer to Wi-Fi",
+      "product_line": "wifi_bluetooth_dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "将您的 iPhone 和打印机连接到 Wi-Fi",
+        "连接WiFi",
+        "手机连打印机WiFi",
+        "iPhone连接打印机"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/04d0bd8a905825524374364161/1097_5000_1_fa07874e8_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E37"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Wifi BT Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_wifi_bluetooth_dot_matrix_printer_test_printing_and_locating_the_printer_s_ip_address",
+      "title_zh": "测试打印并定位打印机的IP地址",
+      "title_en": "Test Printing and Locating the Printer’s IP Address",
+      "product_line": "wifi_bluetooth_dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "测试打印并定位打印机的IP地址",
+        "查看打印机IP地址",
+        "查找打印机IP",
+        "打印IP地址"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/0d51cc9c905825524391120897/1097_5000_1_fe8639088_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E38"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Wifi BT Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_wifi_bluetooth_dot_matrix_printer_adjusting_print_settings_and_finalizing_your_print",
+      "title_zh": "调整打印设置并完成打印",
+      "title_en": "Adjusting Print Settings and Finalizing Your Print",
+      "product_line": "wifi_bluetooth_dot_matrix_printer",
+      "models": [],
+      "keywords": [
+        "调整打印设置并完成打印"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621614395/21852/86ee208b181b480d8ac11822afffea17.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E39"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "Wifi BT Needle Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_install_driver",
+      "title_zh": "Win10 安装驱动",
+      "title_en": "Win10 Install Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/7d942767905831752865452033/1097_356_1_27d50266e_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E40"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w10 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_print_label_only_shows_border_no_font",
+      "title_zh": "Win10 打印面单只有边框没有字体",
+      "title_en": "Win10 Print Label Only Shows Border No Font",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 打印面单只有边框没有字体"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/65e1866f905831753066782721/1097_409_1_f11097ad2_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E41"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w11 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_print_pause",
+      "title_zh": "Win10 打印暂停",
+      "title_en": "Win10 Print Pause",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 打印暂停",
+        "暂停打印",
+        "打印机暂停",
+        "恢复打印"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684451/21852/f5d3858f58d24778a85ca586094d877b.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E42"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w12 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_adjust_speed",
+      "title_zh": "Win10 调节打印速度",
+      "title_en": "Win10 Adjust Speed",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 调节打印速度",
+        "调整打印速度",
+        "打印速度太慢",
+        "打印速度设置"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684469/21852/e692fef94f914d1cab5d717f07eb936b.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E43"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w13 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_adjust_print_position",
+      "title_zh": "Win10 调节打印位置",
+      "title_en": "Win10 Adjust Print Position",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 调节打印位置",
+        "位置偏移",
+        "打印偏位"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684479/21852/cf2235521cca417cbea1550aefe60af0.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E44"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w14 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_adjust_print_concentration",
+      "title_zh": "Win10 调整打印浓度",
+      "title_en": "Win10 Adjust Print Concentration",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 调整打印浓度"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684497/21852/344ec71ded6541bd803d335965c0d619.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E45"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w15 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_adjust_watermark_concentration",
+      "title_zh": "Win10 调整水印浓度",
+      "title_en": "Win10 Adjust Watermark Concentration",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 调整水印浓度"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/102763f5905831764903104513/1097_320_1_487ebeab2_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E46"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w16 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_solve_print_not_clear",
+      "title_zh": "Win10 解决打印不清晰",
+      "title_en": "Win10 Solve Print Not Clear",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 解决打印不清晰",
+        "打印模糊",
+        "字迹不清楚"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/55302e8a905831765595164673/1097_483_1_8c28237b5_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E47"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w17 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_cancel_print_document",
+      "title_zh": "Win10 取消打印文档",
+      "title_en": "Win10 Cancel Print Document",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 取消打印文档"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684592/21852/7e61593245c545c4bfcbf7b1bfb2d4ad.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E48"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w18 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_how_to_solve_manual_driver_installation_cannot_find_port",
+      "title_zh": "Win10 如何解决手动安装驱动无法找到端口",
+      "title_en": "Win10 How to Solve Manual Driver Installation Cannot Find Port",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 如何解决手动安装驱动无法找到端口",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/536c77cc905831766215925761/1097_340_1_4dd698de1_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E49"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w19 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_how_to_solve_manual_driver_deletion_cannot_remove_package",
+      "title_zh": "Win10 如何解决手动删除驱动时无法删除安装包",
+      "title_en": "Win10 How to Solve Manual Driver Deletion Cannot Remove Package",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 如何解决手动删除驱动时无法删除安装包",
+        "删除不了驱动包",
+        "不能删除驱动安装包",
+        "驱动包无法删除"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/62196f33905831767172231169/1097_385_1_1924f1727_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E50"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w20 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_how_to_print_offline",
+      "title_zh": "Win10 如何脱机打印",
+      "title_en": "Win10 How to Print Offline",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 如何脱机打印"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/6b3ec9a4905831769885941761/1097_407_1_ab13b1091_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E51"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w21 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_delete_driver",
+      "title_zh": "Win10 删除驱动",
+      "title_en": "Win10 Delete Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 删除驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684662/21852/5427ec8bc60547fd85080fec9918c15d.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E52"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w22 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_manual_driver_deletion",
+      "title_zh": "Win10 手动删除驱动",
+      "title_en": "Win10 Manual Driver Deletion",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 手动删除驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684845/21852/705ba57eb1b7427d8407ebd7f3ca212e.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E53"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w23 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_add_print_size",
+      "title_zh": "Win10 添加打印尺寸",
+      "title_en": "Win10 Add Print Size",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 添加打印尺寸"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684763/21852/bc833bc7836a45309b4d7d88adf445c8.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E54"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w24 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_restart_print_service",
+      "title_zh": "Win10 重启打印服务",
+      "title_en": "Win10 Restart Print Service",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 重启打印服务"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684816/21852/2ed98b34e7404b0d8d5fe699ce8db315.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E55"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w25 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_register_installation_driver",
+      "title_zh": "Win10 注册表安装驱动",
+      "title_en": "Win10 Register Installation Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10 注册表安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/4c805905905831780279435265/1097_407_1_f60fbaa6b_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E56"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w26 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_how_to_solve_missing_strokes",
+      "title_zh": "Win10如何解决笔画缺失",
+      "title_en": "Win10 How to Solve Missing Strokes",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10如何解决笔画缺失"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684812/21852/5263ee160c2849c1be2b01885bee9372.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E57"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w27 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_manual_driver_installation",
+      "title_zh": "Win10手动安装驱动",
+      "title_en": "Win10 Manual Driver Installation",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10手动安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684914/21852/d4780df4f6e543cfaad82927bccbe8bc.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E58"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w28 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win10_print_port",
+      "title_zh": "Win10修改打印端口",
+      "title_en": "Win10 Print Port",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 10",
+      "models": [],
+      "keywords": [
+        "Win10修改打印端口"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621684896/21852/7d76f3edf0964b12bfca5fcf1512d20e.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E59"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w29 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_install_driver",
+      "title_zh": "Win11 安装驱动",
+      "title_en": "Win11 Install Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762162/21852/c6e4eb94d68747978ef8fda9fdc5f09b.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E60"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w11 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_print_label_only_shows_border_no_font",
+      "title_zh": "Win11 打印面单只有边框没有字体",
+      "title_en": "Win11 Print Label Only Shows Border No Font",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 打印面单只有边框没有字体"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/39fbc2c1905838750415757313/1097_400_1_9666b012a_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E61"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w12 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_print_pause",
+      "title_zh": "Win11 打印暂停",
+      "title_en": "Win11 Print Pause",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 打印暂停",
+        "暂停打印",
+        "打印机暂停",
+        "恢复打印"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762184/21852/dd5f2105db44427eb60e731a292d4cf1.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E62"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w13 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_adjust_speed",
+      "title_zh": "Win11 调节打印速度",
+      "title_en": "Win11 Adjust Speed",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 调节打印速度",
+        "调整打印速度",
+        "打印速度太慢",
+        "打印速度设置"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762419/21852/3cbb5389717f4aedb621fdf1ed2eb066.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E63"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w14 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_adjust_print_position",
+      "title_zh": "Win11 调节打印位置",
+      "title_en": "Win11 Adjust Print Position",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 调节打印位置",
+        "位置偏移",
+        "打印偏位"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/482f91a1905838780639916033/1097_332_1_c1c2b16cf_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E64"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w15 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_adjust_print_concentration",
+      "title_zh": "Win11 调整打印浓度",
+      "title_en": "Win11 Adjust Print Concentration",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 调整打印浓度"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/0a866ca7905838750365429761/1097_343_1_c34aae689_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E65"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w16 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_adjust_watermark_concentration",
+      "title_zh": "Win11 调整水印浓度",
+      "title_en": "Win11 Adjust Watermark Concentration",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 调整水印浓度"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762438/21852/b2775e1ac60c4a0a9412305f7195f9ce.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E66"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w17 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_solve_print_not_clear",
+      "title_zh": "Win11 解决打印不清晰",
+      "title_en": "Win11 Solve Print Not Clear",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 解决打印不清晰",
+        "打印模糊",
+        "字迹不清楚"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762537/21852/7eff7c469a9643fab49f5ee2e4cd8aa6.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E67"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w18 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_cancel_print_document",
+      "title_zh": "Win11 取消打印文档",
+      "title_en": "Win11 Cancel Print Document",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 取消打印文档"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762096/21852/6090d66e0b63473ab846e7cf8a55db90.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E68"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w19 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_how_to_solve_manual_driver_installation_cannot_find_port",
+      "title_zh": "Win11 如何解决手动安装驱动无法找到端口",
+      "title_en": "Win11 How to Solve Manual Driver Installation Cannot Find Port",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 如何解决手动安装驱动无法找到端口",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/34ed86d5905838750373822465/1097_368_1_6cf50f4cd_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E69"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w20 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_how_to_print_offline",
+      "title_zh": "Win11 如何脱机打印",
+      "title_en": "Win11 How to Print Offline",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 如何脱机打印"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/74aa0d99905838761627131905/1097_397_1_d9640fe70_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E71"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w22 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_delete_driver",
+      "title_zh": "Win11 删除驱动",
+      "title_en": "Win11 Delete Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 删除驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762302/21852/af41b7bfc42341f994e08054c4a48cd1.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E72"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w23 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_manual_driver_deletion",
+      "title_zh": "Win11 手动删除驱动",
+      "title_en": "Win11 Manual Driver Deletion",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 手动删除驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762547/21852/ca2adb8c7cc04b1abfb38b89c575dcae.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E73"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w24 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_add_print_size",
+      "title_zh": "Win11 添加打印尺寸",
+      "title_en": "Win11 Add Print Size",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 添加打印尺寸"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762402/21852/8db6cdec870c4de594b2e37d7315b64a.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E74"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w25 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_restart_print_service",
+      "title_zh": "Win11 重启打印服务",
+      "title_en": "Win11 Restart Print Service",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 重启打印服务"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762304/21852/3ed39e6b60864878842b478b9c7f8a78.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E75"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w26 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_register_installation_driver",
+      "title_zh": "Win11 注册表安装驱动",
+      "title_en": "Win11 Register Installation Driver",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11 注册表安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762551/21852/cffb9b2e69c3491e86b2768fa3a09f52.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E76"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w27 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_how_to_solve_missing_strokes",
+      "title_zh": "Win11如何解决笔画缺失",
+      "title_en": "Win11 How to Solve Missing Strokes",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11如何解决笔画缺失"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762126/21852/d86ecc89be104fb99ea474e788e3f76d.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E77"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w28 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_manual_driver_installation",
+      "title_zh": "Win11手动安装驱动",
+      "title_en": "Win11 Manual Driver Installation",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11手动安装驱动",
+        "驱动安装",
+        "装驱动"
+      ],
+      "platform_urls": {
+        "JD": "https://vod.300hu.com/24/4c1f7a6atransbjngwcloud1oss/7f4cc7f3905838768627429377/1097_338_1_3221b8d59_f.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E78"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w29 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    },
+    {
+      "content_id": "cloud_thermal_printer_win11_print_port",
+      "title_zh": "Win11修改打印端口",
+      "title_en": "Win11 Print Port",
+      "product_line": "thermal_printer",
+      "operating_system": "Windows 11",
+      "models": [],
+      "keywords": [
+        "Win11修改打印端口"
+      ],
+      "platform_urls": {
+        "JD": "https://jvod.300hu.com/vod/product/1621762409/21852/313f2e3182d44de7b0c8e4f4c4f0171e.mp4"
+      },
+      "platform_source_cells": {
+        "JD": [
+          "Sheet1!E79"
+        ]
+      },
+      "alternate_platform_urls": {},
+      "source_labels": [
+        "w30 Thermal Printer"
+      ],
+      "analysis_status": "link_verified_only"
+    }
+  ],
+  "pending_assignments": [],
+  "quarantined_assignments": []
+}

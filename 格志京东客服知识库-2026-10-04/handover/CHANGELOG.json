@@ -1,0 +1,277 @@
+{
+  "version": "2026-10-04-jd-grozziie-v1",
+  "source_sha256": "3c04e1ef992c651cf00dbc63e446d9632479eab9977925ba59af96816990eddc",
+  "source_knowledge_latest_date": "2026-09-29",
+  "user_confirmed_adaptation_date": "2026-10-04",
+  "platform": "JD",
+  "brand": "格志 / Grozziie",
+  "shipping_policy": "same as source, explicitly approved by user",
+  "cards_before": 538,
+  "cards_after": 527,
+  "removed_card_details": [
+    {
+      "id": "thermal_component_cainiao_tmall_taobao_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_douyin_doudian_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_kuaishou_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_meituan_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_meituan_success_no_output_runtime_20260925",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_pinduoduo_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_vipshop_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_vipshop_response_code_router_20260925",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_wechat_channels_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_component_xiaohongshu_20260921",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_platform_douyin_pc_waybill_workflow_20260925",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_platform_pinduoduo_pc_waybill_workflow_20260925",
+      "reason": "other_platform_only_workflow"
+    },
+    {
+      "id": "thermal_platform_qianniu_tmall_pc_waybill_workflow_20260925",
+      "reason": "other_platform_only_workflow"
+    }
+  ],
+  "replies_with_explicit_adaptation": [
+    {
+      "source_id": "attendance_date_video",
+      "export_id": "attendance_date_video",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "attendance_m880_manual_punch_tmall_media",
+      "export_id": "attendance_m880_manual_punch_jd_media",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "attendance_ribbon_video",
+      "export_id": "attendance_ribbon_video",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "bluetooth_attendance_tutorial_catalog",
+      "export_id": "bluetooth_attendance_tutorial_catalog",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "confirmed_platform_shipping_2026_08_18",
+      "export_id": "confirmed_platform_shipping_2026_08_18",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_brand_verify_support_page",
+      "export_id": "dot_matrix_brand_verify_support_page",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_mobile_app_tutorial_universal",
+      "export_id": "dot_matrix_mobile_app_tutorial_universal",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_mobile_video_verified_platform_only",
+      "export_id": "dot_matrix_mobile_video_verified_platform_only",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_multi_device_sequential_jobs",
+      "export_id": "dot_matrix_multi_device_sequential_jobs",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_multipart_paper_two_test_sheets",
+      "export_id": "dot_matrix_multipart_paper_two_test_sheets",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_phone_multi_user_queue",
+      "export_id": "dot_matrix_phone_multi_user_queue",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_review_reward_by_platform",
+      "export_id": "dot_matrix_review_reward_by_platform",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_ribbon_replacement_tmall_video",
+      "export_id": "dot_matrix_ribbon_replacement_jd_video",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_warranty_confirmed",
+      "export_id": "dot_matrix_warranty_confirmed",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "global_grozziie_china_customer_service_policy",
+      "export_id": "global_grozziie_china_customer_service_policy",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "global_invoice_high_risk",
+      "export_id": "global_invoice_high_risk",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "global_tmall_human_style_and_transfer_20260920",
+      "export_id": "global_jd_human_style_and_transfer_20260920",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "jd_corporate_transfer_only",
+      "export_id": "jd_corporate_transfer_only",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "jd_self_operated_company_transfer_payment",
+      "export_id": "jd_self_operated_company_transfer_payment",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "logistics_delivery_delay_check",
+      "export_id": "logistics_delivery_delay_check",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "platform_external_contact_risk",
+      "export_id": "platform_external_contact_risk",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "positive_review_reward_matrix",
+      "export_id": "positive_review_reward_matrix",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "presale_printer_fit_check",
+      "export_id": "presale_printer_fit_check",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "printer_brand_verify_customer_service_disabled",
+      "export_id": "printer_brand_verify_customer_service_disabled",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "standard_invoice_order_page_3_5_days_20260924",
+      "export_id": "standard_invoice_order_page_3_5_days_20260924",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "suyintong_presale_reassurance_video",
+      "export_id": "suyintong_presale_reassurance_video",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "thermal_courier_sheet_fixed_sizes_position_20260921",
+      "export_id": "thermal_courier_sheet_fixed_sizes_position_20260921",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "thermal_mobile_platform_direct_print_boundary",
+      "export_id": "thermal_mobile_platform_direct_print_boundary",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "thermal_paper_label_size_selling_point",
+      "export_id": "thermal_paper_label_size_selling_point",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_order_page_invoice_types",
+      "export_id": "jd_order_page_invoice_types",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_paid_sf_exception_handoff",
+      "export_id": "jd_paid_sf_exception_handoff",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_real_human_transfer_20260920",
+      "export_id": "jd_real_human_transfer_20260920",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_zto_no_sf_no_next_day_promise",
+      "export_id": "jd_zto_no_sf_no_next_day_promise",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "wifi_special_invoice_order_request",
+      "export_id": "wifi_special_invoice_order_request",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_shipping_shanghai_zto_no_sf_20260925",
+      "export_id": "jd_shipping_shanghai_zto_no_sf_20260925",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "tmall_jiapuye_brand_identity_20260925",
+      "export_id": "jd_grozziie_brand_identity_20260925",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "attendance_current_card_size_85x185_20260925",
+      "export_id": "attendance_current_card_size_85x185_20260925",
+      "explicit_reply_override": true
+    },
+    {
+      "source_id": "dot_matrix_front_rear_paper_loading_tmall_video_20260925",
+      "export_id": "dot_matrix_front_rear_paper_loading_jd_video_20260925",
+      "explicit_reply_override": true
+    }
+  ],
+  "excluded_documents": [
+    "CUSTOMER_VIDEO_ANALYSIS.md",
+    "QIANNIU_FIXED_WINDOW_BOT.md",
+    "confirmed_qq_mail_driver_delivery_2026_09_14_kb.md",
+    "confirmed_tmall_human_service_rules_2026_09_20_kb.md",
+    "customer_service_rag_optimization_plan.md",
+    "qianniu_customer_service_training_kb.md",
+    "qianniu_video_materials_kb.md",
+    "tmall_customer_service_rules.md",
+    "tmall_printer_competitor_store_kb.md"
+  ],
+  "notes": [
+    "Technical model names and original media logos were not rebranded.",
+    "Non-JD platform-only capabilities removed instead of renamed.",
+    "JD-unconfirmed invoice/store policy moved to human verification.",
+    "No source database, settings, runtime states or credentials altered/copied.",
+    "Prepared a static Flutter knowledge bundle; no Python runtime or standalone HTTP service is included.",
+    "Added product_model_feature_catalog_kb.md, normalized tutorial references, Flutter JSON cards, and Flutter integration metadata."
+  ],
+  "link_check": "Mapping-only offline validation; no new online accessibility check"
+}
