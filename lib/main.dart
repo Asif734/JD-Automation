@@ -84,6 +84,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   Timer? _activeChatSignalTimer;
   bool _unreadSignalBusy = false;
   bool _activeChatSignalBusy = false;
+  bool _failedSendRetryBusy = false;
   final Map<String, Timer> _draftRetryTimers = {};
   final Map<String, Timer> _batchCollectionTimers = {};
   final Map<String, Timer> _slaFallbackTimers = {};
@@ -591,6 +592,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           await _database.isHumanContacting(customer)) {
         return;
       }
+      _queueFailedSendRetry(customer);
       final extraction = const OcrCaptureExtractor().analyze(inspection);
       final senderKey = extraction.latestIncomingSenderKey;
       final incomingAt = extraction.latestIncomingSentAt;
@@ -616,6 +618,40 @@ class _CaptureHomeState extends State<CaptureHome> {
     } finally {
       _activeChatSignalBusy = false;
     }
+  }
+
+  void _queueFailedSendRetry(String customer) {
+    if (_failedSendRetryBusy || !_autoCaptureRunning) return;
+    _failedSendRetryBusy = true;
+    // Do not delay the existing incoming-message/SLA poll behind the UI lock.
+    unawaited(() async {
+      try {
+        await _withJdUiOperation(() async {
+          if (!mounted ||
+              !_autoCaptureRunning ||
+              await _database.isHumanContacting(customer)) {
+            return;
+          }
+          final retry = await _adapter.retryFailedOutgoingMessage(
+              expectedCustomer: customer);
+          if (retry['retried'] == true && mounted) {
+            setState(() => _diagnostics =
+                'Retried the existing failed JD message for $customer; no reply was regenerated or retyped.');
+            if (retry['cleared'] == true && retry['reply'] is String) {
+              final recorded = await _database.confirmRetriedGeneratedDraft(
+                  userId: customer, reply: retry['reply']! as String);
+              if (recorded) {
+                _scheduleDraftGeneration(customer, newEvidence: false);
+              }
+            }
+          }
+        });
+      } catch (_) {
+        // Retry inspection must never interrupt normal capture or generation.
+      } finally {
+        _failedSendRetryBusy = false;
+      }
+    }());
   }
 
   void _armUnreadRecoveryTimers(UnreadCaptureRecovery recovery) {

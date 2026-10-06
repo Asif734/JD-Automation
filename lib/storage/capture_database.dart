@@ -37,12 +37,24 @@ class CaptureDatabase {
     final database = await databaseFactoryFfi.openDatabase(
       p.join((await storageRoot).path, 'jd_automation.sqlite3'),
       options: OpenDatabaseOptions(
-        version: 13,
+        // The withdrawn connectivity build already opened some stores at v14.
+        // Keep compatibility; no new tables/columns or delivery policy here.
+        version: 14,
         onCreate: _create,
         onUpgrade: _upgrade,
       ),
     );
     _database = database;
+    // Repair only transient states introduced by that withdrawn build.
+    // Never retype an uncertain send; its existing JD bubble owns the retry.
+    if ((await database.rawQuery(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='generated_drafts'"))
+        .isNotEmpty) {
+      await database.rawUpdate(
+          "UPDATE generated_drafts SET delivery_state='retry', retry_at_ms=0 WHERE delivery_state='failed_offline'");
+      await database.rawUpdate(
+          "UPDATE generated_drafts SET delivery_state='delivery_unknown', retry_at_ms=NULL WHERE delivery_state IN ('sending','retry_existing')");
+    }
     if (!_legacyDraftsPurged) {
       await (await history).purgeLegacyUnsentDrafts();
       _legacyDraftsPurged = true;
@@ -1559,6 +1571,19 @@ class CaptureDatabase {
         whereArgs: [userId],
         limit: 1);
     return rows.isNotEmpty && rows.first['state'] == 'human_contacting';
+  }
+
+  /// Reconcile only an earlier uncertain send after its existing JD red icon
+  /// was retried. Never consume a fresh ready draft with coincidentally equal text.
+  Future<bool> confirmRetriedGeneratedDraft(
+      {required String userId, required String reply}) async {
+    final rows = await (await database).query('generated_drafts',
+        columns: ['user_id'],
+        where: "user_id=? AND reply=? AND delivery_state='delivery_unknown'",
+        whereArgs: [userId, reply],
+        limit: 1);
+    if (rows.isEmpty) return false;
+    return markReplySent(userId: userId, reply: reply);
   }
 
   Future<bool> markReplySent(

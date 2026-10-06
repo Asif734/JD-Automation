@@ -22,6 +22,41 @@ void main() {
         isFalse);
   });
 
+  test('failed message retry never requests a new send or inserts text',
+      () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'retryFailedOutgoingMessage');
+      expect(call.arguments, {'expectedCustomer': 'customer'});
+      return {'retried': true};
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+    expect(
+        (await adapter.retryFailedOutgoingMessage(
+            expectedCustomer: 'customer'))['retried'],
+        isTrue);
+  });
+
+  test('retry uses independently verified active customer identity', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'openConversation') {
+        return {'opened': true, 'customer': 'verified-customer'};
+      }
+      expect(call.method, 'retryFailedOutgoingMessage');
+      expect(call.arguments, {'expectedCustomer': 'verified-customer'});
+      return {'retried': false};
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+    await adapter.openConversation('row-name');
+    expect(
+        (await adapter.retryFailedOutgoingMessage(
+            expectedCustomer: 'row-name'))['retried'],
+        isFalse);
+  });
+
   test('keeps OCR row name while using separately verified active identity',
       () async {
     var calls = 0;

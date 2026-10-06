@@ -114,6 +114,10 @@ final class AccessibilityBridge {
         reply: args?["reply"] as? String ?? "",
         mediaPaths: args?["mediaPaths"] as? [String] ?? [],
         completion: result)
+    case "retryFailedOutgoingMessage":
+      let args = call.arguments as? [String: Any]
+      collector.retryFailedOutgoingMessage(
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "", completion: result)
     case "startCapture":
       collector.start(); result(nil)
     case "stopCapture":
@@ -1281,6 +1285,7 @@ private struct AXNode {
 final class QianniuAXCollector {
   var onCapture: (([String: Any]) -> Void)?
   var onDiagnostic: (([String: Any]) -> Void)?
+  private var failedSendRetries: [String: (attempts: Int, next: Date)] = [:]
 
   private let bundleIdentifier = "com.jd.jdmddwb"
   private let queue = DispatchQueue(label: "jd.ax.capture", qos: .userInitiated)
@@ -1976,6 +1981,110 @@ final class QianniuAXCollector {
       }
       finish(["sent": true, "customer": expected, "reply": text,
               "mediaCount": requestedMedia.count])
+    }
+  }
+
+  /// Independent of normal sending. JD owns the unsent bubble; click only its
+  /// verified red failure icon, never regenerate, insert, or send another copy.
+  func retryFailedOutgoingMessage(expectedCustomer: String, completion: @escaping FlutterResult) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      func finish(_ payload: [String: Any]) { DispatchQueue.main.async { completion(payload) } }
+      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !expected.isEmpty, AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
+            let pid = self.runningPID() else { finish(["retried": false]); return }
+      func snapshot() -> [AXNode]? {
+        var nodes: [AXNode] = []
+        self.walk(AXUIElementCreateApplication(pid), path: "app", depth: 0,
+            maxDepth: 22, maxNodes: 5_000) { node, _ in nodes.append(node) }
+        guard let window = nodes.first(where: {
+          $0.role == kAXWindowRole as String && $0.title?.contains("咚咚融合工作台") == true
+        }) else { return nil }
+        return nodes.filter { $0.path == window.path || $0.path.hasPrefix(window.path + "/") }
+      }
+      func evidence(in nodes: [AXNode]) -> [FailedSendBubble]? {
+        guard self.activeCustomerMatches(expected, nodes: nodes),
+              !nodes.contains(where: { $0.role == kAXSheetRole as String ||
+                $0.subrole == "AXDialog" || $0.subrole == "AXSystemDialog" }),
+              let composer = nodes.first(where: { $0.role == kAXTextAreaRole as String }),
+              let composerFrame = composer.frame,
+              (stringAttribute(composer.element, kAXValueAttribute) ?? "").isEmpty,
+              let split = nodes.filter({ $0.role == kAXSplitGroupRole as String &&
+                composer.path.hasPrefix($0.path + "/") }).max(by: { $0.path.count < $1.path.count }),
+              let chatFrame = split.frame,
+              let reception = nodes.first(where: { $0.role == kAXWindowRole as String }),
+              let receptionFrame = reception.frame,
+              let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        // JD may expose text as separate lines, or no AXList at all. Bound a
+        // pixel scan to the same verified chat instead of requiring AX bubbles.
+        let transcript = nodes.compactMap { node -> CGRect? in
+          guard node.path.hasPrefix(split.path + "/"),
+                node.role == kAXScrollAreaRole as String,
+                let frame = node.frame, frame.width >= chatFrame.width * 0.55,
+                frame.minX >= chatFrame.minX, frame.maxX <= chatFrame.maxX,
+                frame.maxY <= composerFrame.minY + 12 else { return nil }
+          return frame
+        }.max(by: { $0.height < $1.height })
+        let bottom = min(transcript?.maxY ?? composerFrame.minY, composerFrame.minY)
+        let region = CGRect(x: chatFrame.minX, y: chatFrame.minY,
+            width: chatFrame.width, height: max(0, bottom - chatFrame.minY))
+        for row in rows where (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid {
+          guard let raw = row[kCGWindowBounds as String] as? [String: Any],
+                let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary),
+                abs(bounds.minX - receptionFrame.minX) < 4,
+                abs(bounds.minY - receptionFrame.minY) < 4,
+                bounds.contains(region),
+                let number = row[kCGWindowNumber as String] as? NSNumber,
+                let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                    CGWindowID(number.uint32Value), [.boundsIgnoreFraming, .bestResolution]) else { continue }
+          return failedSendBubbles(image: image, windowBounds: bounds, chatFrame: region)
+        }
+        return nil
+      }
+      guard let nodes = snapshot(), let bubbles = evidence(in: nodes) else {
+        finish(["retried": false]); return
+      }
+      for bubble in bubbles {
+        let key = sha256(expected + "\u{1f}" + bubble.fingerprint)
+        let previous = self.failedSendRetries[key]
+        if let previous, previous.next > Date() { continue }
+        _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
+        usleep(150_000)
+        guard let verified = snapshot(), let fresh = evidence(in: verified),
+              let same = fresh.first(where: {
+                $0.fingerprint == bubble.fingerprint &&
+                abs($0.point.x - bubble.point.x) < 2 && abs($0.point.y - bubble.point.y) < 2
+              }) else { finish(["retried": false]); return }
+        let attempts = previous?.attempts ?? 0
+        // A window-only screenshot cannot reveal another app covering JD.
+        // Click only if JD really owns the on-screen point after activation.
+        let visible = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+          as? [[String: Any]] ?? []
+        let owner = visible.first { row in
+          guard let raw = row[kCGWindowBounds as String] as? [String: Any],
+                let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
+          return frame.contains(same.point)
+        }?[kCGWindowOwnerPID as String] as? NSNumber
+        guard owner?.int32Value == pid, postClick(at: same.point) else {
+          finish(["retried": false]); return
+        }
+        self.failedSendRetries[key] = (attempts + 1,
+            Date().addingTimeInterval(failedSendRetryDelay(attempts: attempts)))
+        usleep(500_000)
+        // Disappearance of this existing red icon is not a delivery receipt.
+        // Never retype even if JD continues to display the failure.
+        let cleared: Bool
+        if let after = snapshot(), let remaining = evidence(in: after) {
+          cleared = !remaining.contains {
+            abs($0.point.x - same.point.x) < 12 && abs($0.point.y - same.point.y) < 12
+          }
+        } else { cleared = false }
+        let reply = recognizeTransferText(in: same.image).map(\.text).joined(separator: " ")
+        finish(["retried": true, "cleared": cleared, "customer": expected, "reply": reply])
+        return // At most one verified existing-icon click per scan.
+      }
+      finish(["retried": false])
     }
   }
 
@@ -3321,6 +3430,135 @@ private func looksLikeVideoThumbnail(_ image: CGImage) -> Bool {
   }
   return false
 }
+
+func failedSendRetryDelay(attempts: Int) -> TimeInterval {
+  let delays: [TimeInterval] = [15, 30, 60, 120, 300]
+  return delays[min(max(attempts, 0), delays.count - 1)]
+}
+
+struct FailedSendBubble {
+  let point: CGPoint
+  let frame: CGRect
+  let image: CGImage
+  let fingerprint: String
+}
+
+/// Locate JD's white-exclamation/red-circle next to a light-blue outgoing
+/// bubble. No AX text layout, receipt, or network probe is needed.
+func failedSendBubbles(image: CGImage, windowBounds: CGRect,
+    chatFrame: CGRect) -> [FailedSendBubble] {
+  let sx = CGFloat(image.width) / max(windowBounds.width, 1)
+  let sy = CGFloat(image.height) / max(windowBounds.height, 1)
+  let region = CGRect(x: (chatFrame.minX - windowBounds.minX) * sx,
+      y: (chatFrame.minY - windowBounds.minY) * sy,
+      width: chatFrame.width * sx, height: chatFrame.height * sy).integral
+    .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+  guard region.width > 20, region.height > 20,
+        let crop = image.cropping(to: region) else { return [] }
+  let w = crop.width, h = crop.height
+  var pixels = [UInt8](repeating: 0, count: w * h * 4)
+  let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+    guard let context = CGContext(data: buffer.baseAddress, width: w, height: h,
+        bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue |
+          CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+    context.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return true
+  }
+  guard rendered else { return [] }
+  func red(_ i: Int) -> Bool {
+    let p = i * 4, r = Int(pixels[p]), g = Int(pixels[p + 1]), b = Int(pixels[p + 2])
+    return r > 165 && r - g > 65 && r - b > 50
+  }
+  func white(_ x: Int, _ y: Int) -> Bool {
+    let p = (y * w + x) * 4
+    return pixels[p] > 235 && pixels[p + 1] > 235 && pixels[p + 2] > 235
+  }
+  func blue(_ x: Int, _ y: Int) -> Bool {
+    let p = (y * w + x) * 4
+    let r = Int(pixels[p]), g = Int(pixels[p + 1]), b = Int(pixels[p + 2])
+    return r > 165 && r < 238 && g > 185 && b > 240 && b - r > 18 && g >= r
+  }
+  var visited = [Bool](repeating: false, count: w * h)
+  var results: [FailedSendBubble] = []
+  for seed in 0..<(w * h) where !visited[seed] && red(seed) {
+    visited[seed] = true
+    var pending = [seed], count = 0
+    var left = seed % w, right = left, top = seed / w, bottom = top
+    while let i = pending.popLast() {
+      count += 1
+      let x = i % w, y = i / w
+      left = min(left, x); right = max(right, x); top = min(top, y); bottom = max(bottom, y)
+      let neighbors = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+      for (nx, ny) in neighbors where nx >= 0 && nx < w && ny >= 0 && ny < h {
+        let n = ny * w + nx
+        if !visited[n] && red(n) { visited[n] = true; pending.append(n) }
+      }
+    }
+    let bw = right - left + 1, bh = bottom - top + 1
+    let logicalW = CGFloat(bw) / sx, logicalH = CGFloat(bh) / sy
+    let fill = Double(count) / Double(bw * bh)
+    guard logicalW >= 8, logicalW <= 40, logicalH >= 8, logicalH <= 40,
+          logicalW / logicalH > 0.8, logicalW / logicalH < 1.25,
+          fill > 0.5, fill < 0.9 else { continue }
+    // Require the white vertical stem and separate dot inside the red circle.
+    // Avatars, red text, notification counts, and solid red shapes are rejected.
+    let cx = (left + right) / 2, cy = (top + bottom) / 2
+    func centerWhite(at fraction: Double) -> Bool {
+      let y = top + Int(Double(bh - 1) * fraction)
+      return ((cx - max(1, bw / 12))...(cx + max(1, bw / 12))).contains { white($0, y) }
+    }
+    guard centerWhite(at: 0.25), centerWhite(at: 0.45),
+          centerWhite(at: 0.73), !centerWhite(at: 0.65) else { continue }
+    let searchEnd = min(w - 1, right + Int(60 * sx))
+    guard right + 1 < searchEnd,
+          let bubbleLeft = ((right + 1)...searchEnd).first(where: { blue($0, cy) }) else { continue }
+    // Inspect the left padding column, not message glyphs or AX line frames.
+    let column = min(w - 1, bubbleLeft + max(2, Int(4 * sx)))
+    func paddingBlue(_ y: Int) -> Bool {
+      [3, 5, 7, 9].filter {
+        blue(min(w - 1, bubbleLeft + max(1, Int(CGFloat($0) * sx))), y)
+      }.count >= 2
+    }
+    // JD overlays a faint watermark on the bubble. A few non-blue pixels
+    // must not truncate a multiline message in the middle of that watermark.
+    func edge(_ direction: Int) -> Int {
+      var y = cy, lastBlue = cy, gap = 0
+      while y + direction >= 0 && y + direction < h {
+        y += direction
+        if paddingBlue(y) { lastBlue = y; gap = 0 } else { gap += 1 }
+        if gap >= max(3, Int(6 * sy)) { break }
+      }
+      return lastBlue
+    }
+    let bubbleTop = edge(-1), bubbleBottom = edge(1)
+    let paddingRow = min(bubbleBottom, bubbleTop + max(2, Int(3 * sy)))
+    var bubbleRight = column
+    while bubbleRight + 1 < w && blue(bubbleRight + 1, paddingRow) { bubbleRight += 1 }
+    guard CGFloat(bubbleRight - bubbleLeft) / sx >= 45,
+          CGFloat(bubbleBottom - bubbleTop) / sy >= 20,
+          // Outgoing bubbles terminate in the right half of the transcript.
+          bubbleRight > w / 2, bubbleTop > 0, bubbleBottom < h - 1 else { continue }
+    let rect = CGRect(x: region.minX + CGFloat(bubbleLeft),
+        y: region.minY + CGFloat(bubbleTop),
+        width: CGFloat(bubbleRight - bubbleLeft + 1),
+        height: CGFloat(bubbleBottom - bubbleTop + 1))
+    guard let message = image.cropping(to: rect),
+          let data = NSBitmapImageRep(cgImage: message).representation(using: .png, properties: [:])
+    else { continue }
+    results.append(FailedSendBubble(
+        point: CGPoint(x: windowBounds.minX + (region.minX + CGFloat(cx)) / sx,
+                       y: windowBounds.minY + (region.minY + CGFloat(cy)) / sy),
+        frame: CGRect(x: windowBounds.minX + rect.minX / sx,
+                      y: windowBounds.minY + rect.minY / sy,
+                      width: rect.width / sx, height: rect.height / sy),
+        image: message,
+        fingerprint: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+  }
+  return results.sorted { $0.point.y > $1.point.y }
+}
+
 
 private func postClick(at point: CGPoint) -> Bool {
   guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,

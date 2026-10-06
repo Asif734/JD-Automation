@@ -137,6 +137,20 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     return value;
   }
 
+  /// Retry only an existing failed bubble. This never types text or clicks Send.
+  Future<Map<String, Object?>> retryFailedOutgoingMessage({
+    required String expectedCustomer,
+  }) async {
+    final value =
+        await _mapCall('retryFailedOutgoingMessage', <String, Object?>{
+      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+    });
+    if (value['error'] case final String code) {
+      throw PlatformException(code: code, message: value['message'] as String?);
+    }
+    return value;
+  }
+
   Future<VisibleImagePayload> captureImageRegion({
     required String expectedCustomer,
     required int windowId,

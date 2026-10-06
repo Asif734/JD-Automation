@@ -627,6 +627,11 @@ void main() {
       retryDelay: Duration.zero,
     );
     expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
+    expect(
+        await database.confirmRetriedGeneratedDraft(
+            userId: userId, reply: draft.reply),
+        isFalse);
+    expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
 
     await database.markGeneratedDraftDeliveryFailure(
       userId: userId,
@@ -638,6 +643,15 @@ void main() {
         .query('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
     expect(rows, hasLength(1));
     expect(rows.single['delivery_state'], 'delivery_unknown');
+    expect(
+        await database.confirmRetriedGeneratedDraft(
+            userId: userId, reply: 'another message'),
+        isFalse);
+    expect(
+        await database.confirmRetriedGeneratedDraft(
+            userId: userId, reply: draft.reply),
+        isTrue);
+    expect(await database.hasUndeliveredDraft(userId), isFalse);
   });
 
   test('explicit transfer drafts never enter the delivery queue', () async {
