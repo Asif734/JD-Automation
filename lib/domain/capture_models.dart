@@ -48,6 +48,7 @@ class CapturedMessage {
     this.sentAt,
     required this.axPath,
     this.media = const [],
+    this.deliveryConfirmed = false,
   });
 
   factory CapturedMessage.fromMap(Map<Object?, Object?> map) => CapturedMessage(
@@ -59,6 +60,7 @@ class CapturedMessage {
             ? DateTime.fromMillisecondsSinceEpoch(map['sentAtMs']! as int)
             : null,
         axPath: (map['axPath'] as String?) ?? '',
+        deliveryConfirmed: map['deliveryConfirmed'] == true,
         media: (map['media'] as List<Object?>? ?? const [])
             .whereType<Map<Object?, Object?>>()
             .map(CapturedMedia.fromMap)
@@ -72,6 +74,10 @@ class CapturedMessage {
   final DateTime? sentAt;
   final String axPath;
   final List<CapturedMedia> media;
+
+  /// Positive receipt observed next to this exact outgoing bubble. This is
+  /// used only to recover uncertain sends, never to gate ordinary sending.
+  final bool deliveryConfirmed;
 }
 
 class CapturedMedia {

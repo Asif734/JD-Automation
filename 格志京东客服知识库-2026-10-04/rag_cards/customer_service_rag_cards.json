@@ -11050,7 +11050,7 @@
     ],
     "risk_level": "low",
     "auto_reply_allowed": true,
-    "reply_template": "这类针式打印机支持1–6联多联纸，支持手机的具体版本可使用免费速印通。正式多联纸、测试纸数量、配件及赠品按当前京东商品选项和订单核对，不承诺未确认的大礼包。",
+    "reply_template": "这类针式打印机支持1–6联多联纸，支持手机的具体版本可使用免费速印通。标准包装免费附带两张测试纸；TD630和TD630G每台都含2张免费测试纸（2 complimentary sheets of test paper），无需核对SKU。正式多联纸、额外耗材和特殊套餐赠品按订单核对，不承诺未确认的大礼包。",
     "actions": [
       {
         "type": "answer_from_verified_jd_knowledge"
@@ -11065,6 +11065,81 @@
     "escalation": "促销赠品、额外耗材或特殊包装以订单页面和实际包裹为准。",
     "priority": 180,
     "package_version": "2026-10-04-jd-grozziie-v1",
+    "platforms": [
+      "JD"
+    ],
+    "current_platform": "JD"
+  },
+  {
+    "id": "td630_td630g_standard_package_two_free_test_sheets",
+    "version": "2026-10-07-jd-package-confirmed",
+    "package_version": "2026-10-04-jd-grozziie-v1",
+    "status": "active",
+    "source_files": [
+      "td630_td630g_standard_package_kb.md",
+      "printernoble_td630_dot_matrix_kb.md",
+      "product_model_feature_catalog_kb.md"
+    ],
+    "product_line": "dot_matrix_printer",
+    "models": [
+      "TD630",
+      "TD630G"
+    ],
+    "intent": "presale_package_contents",
+    "issue": "TD630、TD630G标准包装每台免费附带2张测试纸",
+    "keywords": [
+      "TD630",
+      "TD630G",
+      "包装清单",
+      "默认包装",
+      "赠纸",
+      "免费纸",
+      "两张测试纸",
+      "2张测试纸",
+      "随机纸",
+      "纸张数量",
+      "package contents",
+      "full package",
+      "box contents",
+      "complimentary paper",
+      "complementary paper",
+      "free paper",
+      "sample paper",
+      "test sheets",
+      "pieces of paper",
+      "comes with papers"
+    ],
+    "synonyms": [
+      "td630, what includes in the full package?",
+      "td630g, what includes in the full package?",
+      "TD630 how many complimentary papers come with the product?",
+      "TD630G how many complementary papers are with the product?",
+      "TD630 does it come with papers?",
+      "TD630G does it comes with papers?",
+      "TD630赠送多少张纸",
+      "TD630G包装里有多少张测试纸",
+      "TD630免费送几张纸",
+      "TD630G随机纸有几张"
+    ],
+    "risk_level": "low",
+    "auto_reply_allowed": true,
+    "always_include_for_matching_models": true,
+    "required_slots": [],
+    "reply_template": "TD630和TD630G每台标准包装均免费附带2张测试纸（2 complimentary sheets of test paper），并含USB数据线、机内预装色带和电源线。默认这两张纸无需核对SKU或订单；额外正式用纸、备用色带和加量套餐才按订单确认。客户只问纸时简短回答：是的，标准包装免费附带2张测试纸。English: Both TD630 and TD630G come with 2 complimentary sheets of test paper each.",
+    "actions": [
+      {
+        "type": "answer_from_verified_jd_knowledge"
+      }
+    ],
+    "do_not_say": [
+      "默认赠纸数量未确认",
+      "需要提供SKU才能确认默认两张测试纸",
+      "赠送2包或2卷纸",
+      "正式长期用纸默认赠送",
+      "虚假声称已转人工核对"
+    ],
+    "escalation": "仅额外套餐、实际缺件或补发问题按订单核对；标准两张测试纸的问答无需人工核实。",
+    "priority": 500,
     "platforms": [
       "JD"
     ],

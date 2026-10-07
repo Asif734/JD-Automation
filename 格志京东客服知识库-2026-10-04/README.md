@@ -15,6 +15,8 @@
 
 `rag_cards/customer_service_rag_cards.jsonl` 与 JSON 数组内容相同，保留给支持 JSONL 流式读取的工具。`rag_index/customer_service_rag_index.json` 是预生成的备用本地索引；Flutter 已有自己的 embedding/检索层时，应基于卡片重建本地索引，不要混用原平台缓存。
 
+2026-10-07 包装修订：`td630_td630g_standard_package_kb.md` 明确 TD630、TD630G 每台标准免费附带 2 张测试纸。卡片 `td630_td630g_standard_package_two_free_test_sheets` 使用 `always_include_for_matching_models=true`：Flutter 将低风险、active、JD、允许自动回答的此类精确型号事实加入生成证据，避免问法变化或语义排序隐藏标准内容。卡片、JSON/JSONL、源分块、高频路由和备用索引应保持同步。
+
 ## 运行边界
 
 - 只有 `status=active`、`platforms=["JD"]`、`current_platform="JD"` 的卡片可进入客服检索。

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'package_knowledge.dart';
 import 'semantic_knowledge_scorer.dart';
 
 class LocalKnowledgeRetriever {
@@ -18,7 +19,34 @@ class LocalKnowledgeRetriever {
       _cache = {};
 
   Future<List<Map<String, Object?>>> retrieve(String query,
-      {int limit = 5}) async {
+      {int limit = 5, bool? packageContentsQuery}) async {
+    final records = await _loadedRecords();
+    return _retrieveFromRecords(query, records,
+        limit: limit, packageContentsQuery: packageContentsQuery);
+  }
+
+  /// Opt-in, reviewed JD model facts remain visible regardless of phrasing.
+  Future<List<Map<String, Object?>>> modelFactsFor(Set<String> models) async {
+    if (models.isEmpty) return const [];
+    final normalized = models
+        .map((model) => model.toLowerCase().replaceAll(RegExp(r'[\s-]'), ''))
+        .toSet();
+    final records = await _loadedRecords();
+    return records
+        .where((record) =>
+            _isJdApplicable(record) &&
+            record['status'] == 'active' &&
+            record['risk_level'] == 'low' &&
+            record['auto_reply_allowed'] == true &&
+            record['always_include_for_matching_models'] == true &&
+            knowledgeProductModels(record['models'])
+                .intersection(normalized)
+                .isNotEmpty)
+        .map(_compact)
+        .toList(growable: false);
+  }
+
+  Future<List<Map<String, dynamic>>> _loadedRecords() async {
     final key = knowledgeDirectory.absolute.path;
     final revision = await _knowledgeRevision();
     var cached = _cache[key];
@@ -33,10 +61,60 @@ class LocalKnowledgeRetriever {
       if (identical(_cache[key]?.records, cached.records)) _cache.remove(key);
       rethrow;
     }
+    return records;
+  }
+
+  Future<List<Map<String, Object?>>> _retrieveFromRecords(
+      String query, List<Map<String, dynamic>> records,
+      {required int limit, bool? packageContentsQuery}) async {
+    final packageQuery =
+        packageContentsQuery ?? hasPackageContentsIntent(query);
+    final queryModels =
+        RegExp(r'\b[a-z]{1,5}[ -]?\d{2,5}[a-z]{0,3}\b', caseSensitive: false)
+            .allMatches(query)
+            .map((match) =>
+                match.group(0)!.toLowerCase().replaceAll(RegExp(r'[ -]'), ''))
+            .toSet();
+    final packageFamilies = <String>{};
+    if (packageQuery) {
+      for (final record in records) {
+        if (!_isJdApplicable(record)) continue;
+        if (knowledgeProductModels(record['models'])
+            .intersection(queryModels)
+            .isNotEmpty) {
+          // Exact-model metadata establishes the family. Mixed-family catalog
+          // sections are not a reliable classification of an individual model.
+          final families = knowledgeProductFamilies(record);
+          if (families.length == 1) packageFamilies.addAll(families);
+        }
+      }
+    }
     final scored = <({double score, Map<String, dynamic> record})>[];
     for (final record in records) {
       if (!_isJdApplicable(record)) continue;
-      final score = _score(query, record);
+      var score = _score(query, record, packageQuery: packageQuery);
+      if (packageQuery && isPackageContentsRecord(record)) {
+        final models = knowledgeProductModels(record['models']);
+        final families = knowledgeProductFamilies(record);
+        if (queryModels.isNotEmpty &&
+            models.isNotEmpty &&
+            models.intersection(queryModels).isEmpty) {
+          continue;
+        }
+        if (packageFamilies.isNotEmpty &&
+            families.isNotEmpty &&
+            families.intersection(packageFamilies).isEmpty) {
+          continue;
+        }
+        // Relevant family defaults must beat unrelated exact-model cards.
+        // No package quantities are encoded here: the answer remains evidence.
+        score += models.intersection(queryModels).isNotEmpty ? 110 : 100;
+        if (record['status'] == 'active') score += 15;
+        if (hasPackageQuantityIntent(query) &&
+            hasPackageContentsEvidence(record, quantityRequired: true)) {
+          score += 35;
+        }
+      }
       if (score > 0) scored.add((score: score, record: record));
     }
     scored.sort((left, right) {
@@ -231,8 +309,9 @@ class LocalKnowledgeRetriever {
     return records;
   }
 
-  double _score(String query, Map<String, dynamic> record) {
-    final searchQuery = _expandEnglishTerms(query);
+  double _score(String query, Map<String, dynamic> record,
+      {required bool packageQuery}) {
+    final searchQuery = _expandEnglishTerms(query, packageQuery: packageQuery);
     final normalizedQuery = _normalize(searchQuery);
     if (normalizedQuery.isEmpty) return 0;
     var score = 0.0;
@@ -364,9 +443,19 @@ class LocalKnowledgeRetriever {
     return paths.where(_isSupportedMedia).toList(growable: false);
   }
 
-  String _expandEnglishTerms(String query) {
+  String _expandEnglishTerms(String query, {required bool packageQuery}) {
     final lower = query.toLowerCase();
     final terms = <String>[];
+    if (packageQuery) {
+      terms.add('包装清单 默认包装 随机配件');
+      if (RegExp(r'\b(papers?|sheets?)\b|纸', caseSensitive: false)
+          .hasMatch(query)) {
+        terms.add('测试纸 赠纸 送多少纸 数量');
+      }
+      if (RegExp(r'\bcards?\b|卡', caseSensitive: false).hasMatch(query)) {
+        terms.add('考勤卡 数量');
+      }
+    }
     for (final (pattern, translation) in const [
       (r'\bdate\b', '日期'),
       (r'\byear\b', '年份'),

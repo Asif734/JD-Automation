@@ -424,6 +424,23 @@ class CaptureDatabase {
     final store = await history;
     final result = await store.appendCapture(capture);
     final userId = capture.customerExternalId ?? capture.customerName;
+    var reconciled = false;
+    for (final message in capture.messages) {
+      if (await confirmObservedGeneratedDraft(
+          userId: userId, message: message, capturedAt: capture.capturedAt)) {
+        reconciled = true;
+        break;
+      }
+    }
+    if (reconciled) {
+      if (result.insertedIncomingIds.isNotEmpty) {
+        await _upsertPending(capture, store);
+      }
+      // This is our older frozen reply, not a manual answer to every newer
+      // message. markReplySent advanced only that frozen batch's cursor.
+      return result.changed > 0 ? result.changed : 1;
+    }
+    // A previously captured bubble can acquire a receipt on a later poll.
     if (result.changed == 0) return 0;
     final db = await database;
     // Clear queued AI work only for a newly discovered seller message. A
@@ -445,6 +462,30 @@ class CaptureDatabase {
               message['direction'] == 'outgoing' &&
               insertedOutgoingIds.contains(message['id']?.toString()))
           .firstOrNull;
+      // Seeing our own failed/pending bubble is not a manual seller answer.
+      // Keep its uncertain draft until a positive receipt reconciles it.
+      final uncertain = await db.query('generated_drafts',
+          columns: ['reply'],
+          where: "user_id=? AND delivery_state='delivery_unknown'",
+          whereArgs: [userId],
+          limit: 1);
+      if (uncertain.isNotEmpty &&
+          lastInsertedOutgoing != null &&
+          lastInsertedOutgoing['body']
+                  ?.toString()
+                  .replaceAll(RegExp(r'\s+'), '') ==
+              uncertain.single['reply']
+                  ?.toString()
+                  .replaceAll(RegExp(r'\s+'), '')) {
+        await store.confirmObservedOutgoing(
+            userId: userId,
+            messageId: lastInsertedOutgoing['id']! as String,
+            deliveryStatus: 'delivery_unknown');
+        if (result.insertedIncomingIds.isNotEmpty) {
+          await _upsertPending(capture, store);
+        }
+        return result.changed;
+      }
       // OCR may discover an older seller bubble after saving a newer customer
       // message. Its position in the append-only file does not make it a reply
       // to that newer message; preserve the pending customer in that case.
@@ -802,7 +843,9 @@ class CaptureDatabase {
   }
 
   bool _isFinalOutgoing(Map<String, dynamic> message) =>
-      message['direction'] == 'outgoing' && message['source'] != 'sla_fallback';
+      message['direction'] == 'outgoing' &&
+      message['source'] != 'sla_fallback' &&
+      message['delivery_status'] != 'delivery_unknown';
 
   bool _newTurnAfterHoldingAndReply(List<Map<String, dynamic>> messages) {
     final holding = messages
@@ -1573,27 +1616,66 @@ class CaptureDatabase {
     return rows.isNotEmpty && rows.first['state'] == 'human_contacting';
   }
 
-  /// Reconcile only an earlier uncertain send after its existing JD red icon
-  /// was retried. Never consume a fresh ready draft with coincidentally equal text.
-  Future<bool> confirmRetriedGeneratedDraft(
-      {required String userId, required String reply}) async {
+  /// A positive receipt on the exact, recent outgoing reply can resolve a
+  /// missed Send confirmation. Missing icons and other seller replies cannot.
+  Future<bool> confirmObservedGeneratedDraft({
+    required String userId,
+    required CapturedMessage message,
+    required DateTime capturedAt,
+  }) async {
+    if (message.direction != 'outgoing' ||
+        !message.deliveryConfirmed ||
+        message.sentAt == null ||
+        await isHumanContacting(userId)) {
+      return false;
+    }
     final rows = await (await database).query('generated_drafts',
-        columns: ['user_id'],
-        where: "user_id=? AND reply=? AND delivery_state='delivery_unknown'",
-        whereArgs: [userId, reply],
+        where: "user_id=? AND delivery_state='delivery_unknown'",
+        whereArgs: [userId],
         limit: 1);
     if (rows.isEmpty) return false;
-    return markReplySent(userId: userId, reply: reply);
+    final row = rows.single;
+    final createdAt =
+        DateTime.fromMillisecondsSinceEpoch(row['created_at_ms']! as int);
+    String normalized(String value) => value.replaceAll(RegExp(r'\s+'), '');
+    final reply = row['reply']! as String;
+    if (normalized(message.body) != normalized(reply) ||
+        message.sentAt!
+            .isBefore(createdAt.subtract(const Duration(seconds: 1))) ||
+        message.sentAt!.isAfter(capturedAt.add(const Duration(seconds: 1)))) {
+      return false;
+    }
+    // appendCapture already stored this observed message. Do not create a
+    // duplicate generated bubble or replace its original timestamp.
+    if (!await (await history)
+        .confirmObservedOutgoing(userId: userId, messageId: message.stableId)) {
+      return false;
+    }
+    return markReplySent(
+        userId: userId,
+        reply: reply,
+        recordHistory: false,
+        expectedUnconfirmedCreatedAt: row['created_at_ms']! as int);
   }
 
   Future<bool> markReplySent(
-      {required String userId, required String reply}) async {
+      {required String userId,
+      required String reply,
+      bool recordHistory = true,
+      int? expectedUnconfirmedCreatedAt}) async {
     final db = await database;
     final rows = await db.query('generated_drafts',
-        where: 'user_id = ? AND reply = ?',
-        whereArgs: [userId, reply],
+        where: expectedUnconfirmedCreatedAt == null
+            ? 'user_id = ? AND reply = ?'
+            : "user_id = ? AND reply = ? AND delivery_state='delivery_unknown' AND created_at_ms=?",
+        whereArgs: [
+          userId,
+          reply,
+          if (expectedUnconfirmedCreatedAt != null) expectedUnconfirmedCreatedAt
+        ],
         limit: 1);
     if (rows.isEmpty) {
+      if (expectedUnconfirmedCreatedAt != null) return false;
       // Compatibility for an unsent draft created by a pre-v5 build.
       return (await history).markReplySent(userId: userId, reply: reply);
     }
@@ -1625,15 +1707,23 @@ class CaptureDatabase {
         }
       }
     }
-    await store.appendSentReply(
-      userId: userId,
-      displayName: userId,
-      stableKey: userId,
-      draft: draft,
-    );
-    await db.transaction((txn) async {
-      await txn.delete('generated_drafts',
-          where: 'user_id = ?', whereArgs: [userId]);
+    if (recordHistory) {
+      await store.appendSentReply(
+        userId: userId,
+        displayName: userId,
+        stableKey: userId,
+        draft: draft,
+      );
+    }
+    final recorded = await db.transaction((txn) async {
+      final deleted = await txn.delete('generated_drafts',
+          where: expectedUnconfirmedCreatedAt == null
+              ? 'user_id = ?'
+              : "user_id=? AND reply=? AND delivery_state='delivery_unknown' AND created_at_ms=?",
+          whereArgs: expectedUnconfirmedCreatedAt == null
+              ? [userId]
+              : [userId, reply, expectedUnconfirmedCreatedAt]);
+      if (expectedUnconfirmedCreatedAt != null && deleted != 1) return false;
       if (batchEnd != null && batchEnd.isNotEmpty) {
         await txn.rawInsert('''INSERT INTO answered_cursors(user_id,message_id)
           VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
@@ -1665,8 +1755,9 @@ class CaptureDatabase {
           whereArgs: [userId, batchEnd],
         );
       }
+      return true;
     });
-    return true;
+    return recorded;
   }
 
   Future<void> seedDemoData() async {

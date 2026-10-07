@@ -6797,6 +6797,76 @@
       "platforms": [
         "JD"
       ]
+    },
+    {
+      "query": "td630, what includes in the full package?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "td630g, what includes in the full package?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630 how many complimentary papers come with the product?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630G how many complementary papers are with the product?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630 does it come with papers?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630G does it comes with papers?",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630赠送多少张纸",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630G包装里有多少张测试纸",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630免费送几张纸",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "TD630G随机纸有几张",
+      "card_id": "td630_td630g_standard_package_two_free_test_sheets",
+      "platforms": [
+        "JD"
+      ]
     }
   ]
 }

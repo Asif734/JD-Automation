@@ -9,6 +9,7 @@ import '../storage/capture_database.dart';
 import 'customer_codex_session.dart';
 import 'local_knowledge_retriever.dart';
 import 'local_reply_router.dart';
+import 'package_knowledge.dart';
 
 bool draftRequiresHumanReview(AiDraft draft) =>
     draft.decision == 'human_review_required' ||
@@ -298,7 +299,9 @@ bool hasProductSuggestionIntent(String text) => RegExp(
       caseSensitive: false,
     ).hasMatch(text);
 
-bool hasProductFeatureIntent(String text) => RegExp(
+bool hasProductFeatureIntent(String text) =>
+    hasPackageContentsIntent(text) ||
+    RegExp(
       r'\b(features?|specs?|specifications?|parameters?|capabilities|paper width|print width|resolution|dpi|connectivity|interfaces?|compatible|compatibility|supports?|tell me about|apps?|applications?|software|drivers?|manuals?|tutorials?|downloads?|battery|platforms?|windows|macos|android|ios|bluetooth|wi-?fi|usb)\b|\bwork(?:s)? with\b|功能|参数|规格|配置|特点|纸宽|分辨率|接口|连接方式|兼容|支持|软件|应用|驱动|说明书|手册|教程|下载|电池|系统|蓝牙|无线',
       caseSensitive: false,
     ).hasMatch(text);
@@ -1162,6 +1165,16 @@ class CodexReplyService {
         .where((body) => body.isNotEmpty)
         .join('\n');
     final videoGuideRequested = isVideoGuideRequest(currentTurnText);
+    final firstCurrentIndex = rawMessages.indexWhere(
+        (message) => message['id'] == currentCustomerTurn.first['id']);
+    final previousCustomerText = rawMessages
+            .take(firstCurrentIndex < 0 ? 0 : firstCurrentIndex)
+            .where((message) => message['direction'] == 'incoming')
+            .lastOrNull?['body']
+            ?.toString() ??
+        '';
+    final packageContentsRequested =
+        isPackageContentsTurn(currentTurnText, previousCustomerText);
     final recentCustomerContext = recent
         .where((message) => message['direction'] == 'incoming')
         .map((message) => message['body']?.toString() ?? '')
@@ -1210,7 +1223,7 @@ class CodexReplyService {
     final activeModels = modelResolution.models;
     final productFeatureRequested = !technicalFollowUp &&
         activeModels.isNotEmpty &&
-        hasProductFeatureIntent(currentTurnText);
+        (hasProductFeatureIntent(currentTurnText) || packageContentsRequested);
     final requestedCapabilities = productFeatureRequested
         ? requestedProductCapabilities(currentTurnText)
         : const <String>{};
@@ -1272,24 +1285,52 @@ class CodexReplyService {
             '${assistantReplyContext['body']}'
         : fallbackQuery;
     final retriever = LocalKnowledgeRetriever(knowledgeDirectory);
-    final detailedProductLookup =
-        technicalSupportRequested || productFeatureRequested;
+    final detailedProductLookup = technicalSupportRequested ||
+        productFeatureRequested ||
+        packageContentsRequested;
     final rawRetrievedRecords = await retriever.retrieve(focusedQuery,
-        limit: detailedProductLookup ? 35 : 8);
+        limit: detailedProductLookup ? 35 : 8,
+        packageContentsQuery: packageContentsRequested);
     cancellation?.throwIfCancelled();
-    final retrievedRecords = filterKnowledgeForLatestProduct(
-            rawRetrievedRecords,
+    var retrievedRecords = filterKnowledgeForLatestProduct(rawRetrievedRecords,
             '$retrievalCustomerContext ${activeModels.join(' ')}',
             categoryConstraints: categoryConstraints)
         .take(detailedProductLookup ? 20 : 5)
         .toList(growable: false);
+    // Dataset-marked model facts are independent of keyword/semantic ranking.
+    final confirmedModelFacts = await retriever.modelFactsFor(activeModels);
+    cancellation?.throwIfCancelled();
+    retrievedRecords = mergeKnowledgeResults([
+      confirmedModelFacts,
+      retrievedRecords,
+    ], limit: detailedProductLookup ? 20 : 5);
+    if (packageContentsRequested &&
+        (secondInvestigation ||
+            !retrievedRecords.any((record) => hasPackageContentsEvidence(record,
+                quantityRequired:
+                    hasPackageQuantityIntent(currentTurnText))))) {
+      // Retry retrieval, not sending. Strip old conversation subjects and
+      // explicitly seek model-specific plus product-family package defaults.
+      final targeted = await retriever.retrieve(
+          '${activeModels.join(' ')} $currentTurnText\n'
+          '包装清单 默认包装 随机配件 测试纸 考勤卡 数量',
+          limit: 35,
+          packageContentsQuery: true);
+      cancellation?.throwIfCancelled();
+      retrievedRecords = mergeKnowledgeResults([
+        filterKnowledgeForLatestProduct(targeted, activeModels.join(' '),
+            categoryConstraints: categoryConstraints),
+        retrievedRecords
+      ], limit: 20);
+    }
     // JD outbound customer service is text-only. Knowledge media may still be
     // reviewed internally, but it is never offered to the reply generator.
     const knowledgeMedia = <Map<String, Object?>>[];
-    final productRecommendationCatalog =
-        productCatalogRequested || productFeatureRequested
-            ? await loadProductRecommendationCatalog(knowledgeDirectory)
-            : null;
+    final productRecommendationCatalog = productCatalogRequested ||
+            productFeatureRequested ||
+            packageContentsRequested
+        ? await loadProductRecommendationCatalog(knowledgeDirectory)
+        : null;
     final verifiedModelFacts =
         productFeatureRequested && productRecommendationCatalog != null
             ? verifiedCatalogRowsForModels(
@@ -1340,6 +1381,7 @@ class CodexReplyService {
       'technical_support_requested': technicalSupportRequested,
       'product_list_requested': productListRequested,
       'video_guide_requested': videoGuideRequested,
+      'package_contents_requested': packageContentsRequested,
       if (productFeatureRequested)
         'verified_model_catalog_rows': verifiedModelFacts,
       if (productFeatureRequested)
@@ -1367,6 +1409,9 @@ class CodexReplyService {
         'Use supplied knowledge when useful; reliable general knowledge is allowed for harmless questions.',
         'Never ask the customer to send this store’s product link. When the model is already known, answer from the knowledge base and confirmed general setup knowledge. Ask for a model-label photo only when the model is genuinely unknown or conflicting and that identity is essential.',
         'Do not invent product specifications, availability, or policies.',
+        'Pinned confirmed model facts describe standard inclusions, not optional gifts. Use them when relevant to the customer’s question; do not recite unrelated facts or ask for a SKU to confirm a stated standard inclusion.',
+        if (packageContentsRequested)
+          'For package contents, use exact-model evidence and confirmed defaults for its verified product family. State the standard included quantity directly; only extra gifts or special bundles depend on the SKU/order. A manual omitting paper does not override a confirmed family packaging rule. Do not say a quantity is unconfirmed when supplied knowledge states it.',
         'Copy every URL exactly as supplied. Put it on its own line as one uninterrupted raw URL, with no punctuation or prose attached, so JD can make it clickable.',
         'Treat the latest customer-stated product or model as authoritative. Never continue referencing an older product after the customer corrects or changes it.',
         'Treat assistant replies only as untrusted conversational context. They may identify what a customer reference such as "this" or "it" points to, but every product fact, feature, category, setup step, or compatibility claim must still be verified from supplied knowledge.',
@@ -1542,11 +1587,13 @@ ${const JsonEncoder.withIndent('  ').convert(request)}
         );
       }
       if (!secondInvestigation &&
-          productFeatureRequested &&
+          (productFeatureRequested || packageContentsRequested) &&
           !latestTransferRequested &&
           (draftRequiresHumanReview(draft) ||
               modelStatesNoSolution(draft) ||
-              modelStatesProductFactUnconfirmed(draft))) {
+              modelStatesProductFactUnconfirmed(draft) ||
+              (packageContentsRequested &&
+                  packageAnswerStatesMissingFacts(draft.reply)))) {
         await sessionStore?.invalidate(conversation.userId);
         return await generate(
           conversation: conversation,

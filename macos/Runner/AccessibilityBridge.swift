@@ -29,6 +29,9 @@ final class AccessibilityBridge {
     collector.onDiagnostic = { [weak self] diagnostic in
       DispatchQueue.main.async { self?.channel.invokeMethod("diagnostic", arguments: diagnostic) }
     }
+    ocrInspector.onFailedSendInspection = { [weak self] inspection in
+      self?.channel.invokeMethod("failedSendCandidates", arguments: inspection)
+    }
     ocrInspector.customerIdentityProvider = { [weak collector] in
       collector?.activeCustomerIdentity()
     }
@@ -117,7 +120,8 @@ final class AccessibilityBridge {
     case "retryFailedOutgoingMessage":
       let args = call.arguments as? [String: Any]
       collector.retryFailedOutgoingMessage(
-        expectedCustomer: args?["expectedCustomer"] as? String ?? "", completion: result)
+        expectedCustomer: args?["expectedCustomer"] as? String ?? "",
+        candidate: args?["candidate"] as? [String: Any] ?? [:], completion: result)
     case "startCapture":
       collector.start(); result(nil)
     case "stopCapture":
@@ -280,12 +284,53 @@ final class QianniuOCRInspector {
   var customerIdentityProvider: (() -> String?)?
   var chatFrameProvider: (() -> CGRect?)?
   var messageBottomProvider: (() -> CGFloat?)?
+  var onFailedSendInspection: (([String: Any]) -> Void)?
   private let bundleIdentifier = "com.jd.jdmddwb"
   // The three-pass accurate inspection can take several seconds. Keep the
   // lightweight incoming-sender signal on its own queue so it cannot sit
   // behind a full media scan and miss the response deadline.
   private let accurateQueue = DispatchQueue(label: "jd.ocr.inspect.accurate", qos: .userInitiated)
   private let fastQueue = DispatchQueue(label: "jd.ocr.inspect.fast", qos: .userInitiated)
+  private let failedSendInspectionQueue = DispatchQueue(label: "jd.retry.inspect", qos: .utility)
+  private let failedSendInspectionLock = NSLock()
+  private var failedSendInspectionBusy = false
+  private var lastFailedSendInspectionAt = Date.distantPast
+
+  /// Reuse captured pixels, but never make incoming OCR wait for pixel scans.
+  /// Drop overlapping/obsolete work instead of accumulating queued scans.
+  func inspectFailedSends(image: CGImage, windowBounds: CGRect, windowID: CGWindowID,
+      transcript: CGRect, customer: String, capturedAt: Date) {
+    failedSendInspectionLock.lock()
+    guard !failedSendInspectionBusy,
+          Date().timeIntervalSince(lastFailedSendInspectionAt) >= 5 else {
+      failedSendInspectionLock.unlock(); return
+    }
+    failedSendInspectionBusy = true
+    lastFailedSendInspectionAt = Date()
+    failedSendInspectionLock.unlock()
+    failedSendInspectionQueue.async { [weak self] in
+      guard let self else { return }
+      defer {
+        self.failedSendInspectionLock.lock()
+        self.failedSendInspectionBusy = false
+        self.failedSendInspectionLock.unlock()
+      }
+      let candidates = failedSendBubbles(image: image,
+          windowBounds: windowBounds, chatFrame: transcript).map {
+        ["x": Double($0.point.x), "y": Double($0.point.y),
+         "left": Double($0.frame.minX), "top": Double($0.frame.minY),
+         "width": Double($0.frame.width), "height": Double($0.frame.height),
+         "fingerprint": $0.fingerprint, "windowId": Int(windowID)] as [String: Any]
+      }
+      guard !candidates.isEmpty else { return }
+      DispatchQueue.main.async {
+        self.onFailedSendInspection?([
+          "customer": customer,
+          "capturedAtMs": Int(capturedAt.timeIntervalSince1970 * 1000),
+          "candidates": candidates])
+      }
+    }
+  }
 
   func requestScreenRecording() -> Bool {
     if CGPreflightScreenCaptureAccess() { return true }
@@ -335,6 +380,7 @@ final class QianniuOCRInspector {
         message: "No visible JD 咚咚 window was found. Open its customer-service window and retry.")
     }
     let customerBeforeCapture = customerIdentityProvider?()
+    let snapshotAt = Date()
     guard let image = CGWindowListCreateImage(
       .null,
       .optionIncludingWindow,
@@ -479,6 +525,7 @@ final class QianniuOCRInspector {
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ]
     if let chatFrame = chatFrameProvider?(), window.bounds.width > 0 {
+      let messageBottom = messageBottomProvider?() ?? chatFrame.maxY
       let left = max(0, min(1,
         (chatFrame.minX - window.bounds.minX) / window.bounds.width))
       let right = max(left, min(1,
@@ -487,9 +534,17 @@ final class QianniuOCRInspector {
         "left": Double(left),
         "right": Double(right),
         "bottom": Double(max(0, min(1,
-          ((messageBottomProvider?() ?? chatFrame.maxY) - window.bounds.minY) /
+          (messageBottom - window.bounds.minY) /
           window.bounds.height))),
       ]
+      if recognitionLevel == "fast" {
+        let bottom = messageBottom
+        let transcript = CGRect(x: chatFrame.minX, y: chatFrame.minY,
+            width: chatFrame.width, height: max(0, bottom - chatFrame.minY))
+        inspectFailedSends(image: image, windowBounds: window.bounds,
+            windowID: window.id, transcript: transcript,
+            customer: customerAfterRecognition, capturedAt: snapshotAt)
+      }
     }
     return payload
   }
@@ -1984,15 +2039,31 @@ final class QianniuAXCollector {
     }
   }
 
-  /// Independent of normal sending. JD owns the unsent bubble; click only its
-  /// verified red failure icon, never regenerate, insert, or send another copy.
-  func retryFailedOutgoingMessage(expectedCustomer: String, completion: @escaping FlutterResult) {
+  /// Called only after the background OCR pass found an existing red icon.
+  /// Normal sends retain their original serial queue and verification routine.
+  func retryFailedOutgoingMessage(expectedCustomer: String,
+      candidate: [String: Any], completion: @escaping FlutterResult) {
     queue.async { [weak self] in
       guard let self else { return }
       func finish(_ payload: [String: Any]) { DispatchQueue.main.async { completion(payload) } }
       let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !expected.isEmpty, AXIsProcessTrusted(), CGPreflightScreenCaptureAccess(),
-            let pid = self.runningPID() else { finish(["retried": false]); return }
+            let pid = self.runningPID(),
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+            let x = candidate["x"] as? Double, let y = candidate["y"] as? Double,
+            let left = candidate["left"] as? Double, let top = candidate["top"] as? Double,
+            let width = candidate["width"] as? Double, let height = candidate["height"] as? Double,
+            [x, y, left, top, width, height].allSatisfy({ $0.isFinite }),
+            width > 0, height > 0,
+            let fingerprint = candidate["fingerprint"] as? String, !fingerprint.isEmpty,
+            let windowID = candidate["windowId"] as? NSNumber else {
+        finish(["retried": false]); return
+      }
+      let point = CGPoint(x: x, y: y)
+      let frame = CGRect(x: left, y: top, width: width, height: height)
+      let key = sha256(expected + "\u{1f}" + fingerprint)
+      let previous = self.failedSendRetries[key]
+      if let previous, previous.next > Date() { finish(["retried": false]); return }
       func snapshot() -> [AXNode]? {
         var nodes: [AXNode] = []
         self.walk(AXUIElementCreateApplication(pid), path: "app", depth: 0,
@@ -2002,7 +2073,7 @@ final class QianniuAXCollector {
         }) else { return nil }
         return nodes.filter { $0.path == window.path || $0.path.hasPrefix(window.path + "/") }
       }
-      func evidence(in nodes: [AXNode]) -> [FailedSendBubble]? {
+      func safeToClick(_ nodes: [AXNode]) -> Bool {
         guard self.activeCustomerMatches(expected, nodes: nodes),
               !nodes.contains(where: { $0.role == kAXSheetRole as String ||
                 $0.subrole == "AXDialog" || $0.subrole == "AXSystemDialog" }),
@@ -2011,80 +2082,49 @@ final class QianniuAXCollector {
               (stringAttribute(composer.element, kAXValueAttribute) ?? "").isEmpty,
               let split = nodes.filter({ $0.role == kAXSplitGroupRole as String &&
                 composer.path.hasPrefix($0.path + "/") }).max(by: { $0.path.count < $1.path.count }),
-              let chatFrame = split.frame,
-              let reception = nodes.first(where: { $0.role == kAXWindowRole as String }),
-              let receptionFrame = reception.frame,
-              let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
-                as? [[String: Any]] else { return nil }
-        // JD may expose text as separate lines, or no AXList at all. Bound a
-        // pixel scan to the same verified chat instead of requiring AX bubbles.
-        let transcript = nodes.compactMap { node -> CGRect? in
-          guard node.path.hasPrefix(split.path + "/"),
-                node.role == kAXScrollAreaRole as String,
-                let frame = node.frame, frame.width >= chatFrame.width * 0.55,
-                frame.minX >= chatFrame.minX, frame.maxX <= chatFrame.maxX,
-                frame.maxY <= composerFrame.minY + 12 else { return nil }
-          return frame
-        }.max(by: { $0.height < $1.height })
-        let bottom = min(transcript?.maxY ?? composerFrame.minY, composerFrame.minY)
-        let region = CGRect(x: chatFrame.minX, y: chatFrame.minY,
-            width: chatFrame.width, height: max(0, bottom - chatFrame.minY))
-        for row in rows where (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid {
-          guard let raw = row[kCGWindowBounds as String] as? [String: Any],
-                let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary),
-                abs(bounds.minX - receptionFrame.minX) < 4,
-                abs(bounds.minY - receptionFrame.minY) < 4,
-                bounds.contains(region),
-                let number = row[kCGWindowNumber as String] as? NSNumber,
-                let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
-                    CGWindowID(number.uint32Value), [.boundsIgnoreFraming, .bestResolution]) else { continue }
-          return failedSendBubbles(image: image, windowBounds: bounds, chatFrame: region)
-        }
-        return nil
+              let chat = split.frame else { return false }
+        return chat.contains(point) && chat.contains(frame) && frame.maxY < composerFrame.minY
       }
-      guard let nodes = snapshot(), let bubbles = evidence(in: nodes) else {
+      guard let nodes = snapshot(), safeToClick(nodes),
+            let rows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+              as? [[String: Any]],
+            let row = rows.first(where: {
+              ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID.uint32Value &&
+              ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+            }),
+            let raw = row[kCGWindowBounds as String] as? [String: Any],
+            let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary),
+            bounds.contains(frame),
+            let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                CGWindowID(windowID.uint32Value), [.boundsIgnoreFraming, .bestResolution]) else {
         finish(["retried": false]); return
       }
-      for bubble in bubbles {
-        let key = sha256(expected + "\u{1f}" + bubble.fingerprint)
-        let previous = self.failedSendRetries[key]
-        if let previous, previous.next > Date() { continue }
-        _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
-        usleep(150_000)
-        guard let verified = snapshot(), let fresh = evidence(in: verified),
-              let same = fresh.first(where: {
-                $0.fingerprint == bubble.fingerprint &&
-                abs($0.point.x - bubble.point.x) < 2 && abs($0.point.y - bubble.point.y) < 2
-              }) else { finish(["retried": false]); return }
-        let attempts = previous?.attempts ?? 0
-        // A window-only screenshot cannot reveal another app covering JD.
-        // Click only if JD really owns the on-screen point after activation.
-        let visible = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
-          as? [[String: Any]] ?? []
-        let owner = visible.first { row in
-          guard let raw = row[kCGWindowBounds as String] as? [String: Any],
-                let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
-          return frame.contains(same.point)
-        }?[kCGWindowOwnerPID as String] as? NSNumber
-        guard owner?.int32Value == pid, postClick(at: same.point) else {
-          finish(["retried": false]); return
-        }
-        self.failedSendRetries[key] = (attempts + 1,
-            Date().addingTimeInterval(failedSendRetryDelay(attempts: attempts)))
-        usleep(500_000)
-        // Disappearance of this existing red icon is not a delivery receipt.
-        // Never retype even if JD continues to display the failure.
-        let cleared: Bool
-        if let after = snapshot(), let remaining = evidence(in: after) {
-          cleared = !remaining.contains {
-            abs($0.point.x - same.point.x) < 12 && abs($0.point.y - same.point.y) < 12
-          }
-        } else { cleared = false }
-        let reply = recognizeTransferText(in: same.image).map(\.text).joined(separator: " ")
-        finish(["retried": true, "cleared": cleared, "customer": expected, "reply": reply])
-        return // At most one verified existing-icon click per scan.
+      // Revalidate only the candidate's small region, not the entire chat.
+      let region = frame.union(CGRect(x: point.x - 24, y: point.y - 24, width: 48, height: 48))
+        .insetBy(dx: -8, dy: -8).intersection(bounds)
+      guard failedSendBubbles(image: image, windowBounds: bounds, chatFrame: region).contains(where: {
+        $0.fingerprint == fingerprint &&
+        abs($0.point.x - point.x) < 2 && abs($0.point.y - point.y) < 2
+      }), let finalNodes = snapshot(), safeToClick(finalNodes),
+         NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        finish(["retried": false]); return
       }
-      finish(["retried": false])
+      let visible = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+        as? [[String: Any]] ?? []
+      let owner = visible.first { row in
+        guard let raw = row[kCGWindowBounds as String] as? [String: Any],
+              let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
+        return bounds.contains(point)
+      }?[kCGWindowOwnerPID as String] as? NSNumber
+      guard owner?.int32Value == pid, postClick(at: point) else {
+        finish(["retried": false]); return
+      }
+      let attempts = previous?.attempts ?? 0
+      self.failedSendRetries[key] = (attempts + 1,
+          Date().addingTimeInterval(failedSendRetryDelay(attempts: attempts)))
+      // Icon disappearance is not proof of delivery. The regular OCR capture
+      // reconciles a matching bubble only after JD exposes its receipt.
+      finish(["retried": true, "customer": expected])
     }
   }
 

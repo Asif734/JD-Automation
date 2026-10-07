@@ -23,6 +23,8 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   final MethodChannel _channel;
   final _captures = StreamController<CapturedConversation>.broadcast();
   final _diagnostics = StreamController<Map<String, Object?>>.broadcast();
+  final _failedSendInspections =
+      StreamController<FailedSendInspection>.broadcast();
   final Map<String, String> _verifiedCustomerIdentities = {};
 
   String _identityKey(String value) =>
@@ -44,9 +46,13 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   @override
   Stream<Map<String, Object?>> get diagnostics => _diagnostics.stream;
 
+  Stream<FailedSendInspection> get failedSendInspections =>
+      _failedSendInspections.stream;
+
   Future<void> close() async {
     await _captures.close();
     await _diagnostics.close();
+    await _failedSendInspections.close();
   }
 
   Future<void> _onNativeCall(MethodCall call) async {
@@ -55,6 +61,13 @@ class MacOSCaptureAdapter implements CaptureAdapter {
       _captures.add(CapturedConversation.fromMap(arguments));
     } else if (call.method == 'diagnostic') {
       _diagnostics.add(arguments.map((key, value) => MapEntry('$key', value)));
+    } else if (call.method == 'failedSendCandidates') {
+      final inspection = FailedSendInspection.fromMap(arguments);
+      if (!_failedSendInspections.isClosed &&
+          inspection.customer.isNotEmpty &&
+          inspection.candidates.isNotEmpty) {
+        _failedSendInspections.add(inspection);
+      }
     }
   }
 
@@ -140,10 +153,12 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   /// Retry only an existing failed bubble. This never types text or clicks Send.
   Future<Map<String, Object?>> retryFailedOutgoingMessage({
     required String expectedCustomer,
+    required Map<String, Object?> candidate,
   }) async {
     final value =
         await _mapCall('retryFailedOutgoingMessage', <String, Object?>{
       'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+      'candidate': candidate,
     });
     if (value['error'] case final String code) {
       throw PlatformException(code: code, message: value['message'] as String?);
@@ -543,6 +558,7 @@ class OcrInspection {
     this.chatLeft,
     this.chatRight,
     this.chatBottom,
+    this.failedSendCandidates = const [],
   });
 
   factory OcrInspection.fromMap(Map<String, Object?> value) {
@@ -564,6 +580,12 @@ class OcrInspection {
       chatLeft: (chatRegion?['left'] as num?)?.toDouble(),
       chatRight: (chatRegion?['right'] as num?)?.toDouble(),
       chatBottom: (chatRegion?['bottom'] as num?)?.toDouble(),
+      failedSendCandidates:
+          (value['failedSendCandidates'] as List<Object?>? ?? const [])
+              .whereType<Map<Object?, Object?>>()
+              .map((candidate) =>
+                  candidate.map((key, value) => MapEntry('$key', value)))
+              .toList(growable: false),
       observations: rawObservations
           .whereType<Map<Object?, Object?>>()
           .map(OcrObservation.fromMap)
@@ -589,6 +611,7 @@ class OcrInspection {
   final double? chatLeft;
   final double? chatRight;
   final double? chatBottom;
+  final List<Map<String, Object?>> failedSendCandidates;
 }
 
 class OcrVisualRegion {
@@ -682,6 +705,31 @@ class CachedMediaPayload {
   final DateTime cacheModifiedAt;
   final VisibleImagePayload? image;
   final DownloadedVideoPayload? video;
+}
+
+class FailedSendInspection {
+  const FailedSendInspection(
+      {required this.customer,
+      required this.capturedAt,
+      required this.candidates});
+
+  factory FailedSendInspection.fromMap(Map<Object?, Object?> value) =>
+      FailedSendInspection(
+        customer: value['customer']?.toString().trim() ?? '',
+        capturedAt: DateTime.fromMillisecondsSinceEpoch(
+            (value['capturedAtMs'] as num?)?.toInt() ?? 0,
+            isUtc: true),
+        candidates: [
+          for (final candidate
+              in (value['candidates'] as List<Object?>? ?? const []))
+            if (candidate is Map)
+              candidate.map((key, value) => MapEntry('$key', value)),
+        ],
+      );
+
+  final String customer;
+  final DateTime capturedAt;
+  final List<Map<String, Object?>> candidates;
 }
 
 class SpeechTranscription {

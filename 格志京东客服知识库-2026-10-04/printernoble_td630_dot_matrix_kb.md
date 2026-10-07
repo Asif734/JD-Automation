@@ -115,6 +115,8 @@ source_boundary:
 
 ## 4. 包装和部件
 
+TD630 和 TD630G 的标准包装均免费附带 **2 张测试纸（2 complimentary sheets / pieces of paper）**，并含 USB 数据线、机内预装色带和电源线。默认这两张纸无需核对 SKU；正式用纸及其他额外赠品不默认包含。详见 `td630_td630g_standard_package_kb.md`。
+
 官方手册列出的主要包装/部件：
 
 - Printer

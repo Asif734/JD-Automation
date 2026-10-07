@@ -4,6 +4,43 @@ import XCTest
 @testable import JD_Automation
 
 class RunnerTests: XCTestCase {
+  func testRetryPixelInspectionReturnsBeforeDeliveringSeparateEvent() {
+    let inspector = QianniuOCRInspector()
+    let snapshot = image(badges: [badge], bubbles: [bubble], scale: 2)
+    let event = expectation(description: "background retry candidates")
+    event.assertForOverFulfill = true
+    let capturedAt = Date(timeIntervalSince1970: 1791354310)
+    var returned = false
+    inspector.onFailedSendInspection = { payload in
+      XCTAssertTrue(returned, "Incoming OCR must not wait for the retry scan")
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual(payload["customer"] as? String, "jd_customer")
+      XCTAssertEqual(payload["capturedAtMs"] as? Int, 1791354310000)
+      let candidates = payload["candidates"] as? [[String: Any]]
+      XCTAssertEqual(candidates?.count, 1)
+      XCTAssertEqual(candidates?.first?["windowId"] as? Int, 42)
+      event.fulfill()
+    }
+    inspector.inspectFailedSends(image: snapshot, windowBounds: window,
+        windowID: 42, transcript: window, customer: "jd_customer", capturedAt: capturedAt)
+    returned = true
+    // The same snapshot must not create a growing queue or change identity.
+    inspector.inspectFailedSends(image: snapshot, windowBounds: window,
+        windowID: 42, transcript: window, customer: "other_customer", capturedAt: capturedAt)
+    wait(for: [event], timeout: 3)
+  }
+
+  func testNormalChatBackgroundInspectionEmitsNoRetryEvent() {
+    let inspector = QianniuOCRInspector()
+    let noRetry = expectation(description: "no failed message")
+    noRetry.isInverted = true
+    inspector.onFailedSendInspection = { _ in noRetry.fulfill() }
+    inspector.inspectFailedSends(image: image(badges: [], bubbles: [bubble]),
+        windowBounds: window, windowID: 42, transcript: window,
+        customer: "jd_customer", capturedAt: Date())
+    wait(for: [noRetry], timeout: 0.3)
+  }
+
   private let window = CGRect(x: 100, y: 100, width: 400, height: 300)
   private let badge = CGRect(x: 164, y: 120, width: 32, height: 32)
   private let bubble = CGRect(x: 204, y: 100, width: 160, height: 100)
@@ -105,5 +142,20 @@ class RunnerTests: XCTestCase {
     let result = try XCTUnwrap(detect(image(badges: [badge], bubbles: [bubble]), chat: chat).first)
     XCTAssertEqual(result.point.x, 280, accuracy: 1)
     XCTAssertEqual(result.point.y, 236, accuracy: 1)
+  }
+
+  func testNormalSentBubbleProducesNoRetryWork() {
+    XCTAssertTrue(detect(image(badges: [], bubbles: [bubble])).isEmpty)
+  }
+
+  func testCandidateOnlyRevalidationRetainsFingerprint() throws {
+    let screenshot = image(badges: [badge], bubbles: [bubble], scale: 2)
+    let original = try XCTUnwrap(detect(screenshot).first)
+    let region = original.frame.union(CGRect(x: original.point.x - 24,
+        y: original.point.y - 24, width: 48, height: 48))
+      .insetBy(dx: -8, dy: -8).intersection(window)
+    let verified = try XCTUnwrap(detect(screenshot, chat: region).first)
+    XCTAssertEqual(verified.fingerprint, original.fingerprint)
+    XCTAssertEqual(verified.point, original.point)
   }
 }

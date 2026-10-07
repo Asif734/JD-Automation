@@ -14,6 +14,29 @@ class UnreadCaptureRecovery {
   static const resendAfter = Duration(seconds: 50);
   static const detectedTurnClockTolerance = Duration(seconds: 15);
 
+  /// Recently answered incoming messages remain historical even inside the
+  /// OCR clock-tolerance window. They cannot count as capture of a new turn.
+  static Set<String> incomingBaseline(Iterable<Map<String, dynamic>> messages,
+      {required DateTime detectedAt, String? answeredMessageId}) {
+    final rows = messages.toList(growable: false);
+    final answeredIndex = answeredMessageId == null
+        ? -1
+        : rows.indexWhere((message) => message['id'] == answeredMessageId);
+    final known = <String>{};
+    for (var index = 0; index < rows.length; index++) {
+      final message = rows[index];
+      if (message['direction'] != 'incoming') continue;
+      final at = DateTime.tryParse(message['sent_at']?.toString() ?? '') ??
+          DateTime.tryParse(message['captured_at']?.toString() ?? '');
+      if (index <= answeredIndex ||
+          (at?.isBefore(detectedAt.subtract(detectedTurnClockTolerance)) ??
+              false)) {
+        known.add(message['id']?.toString() ?? '');
+      }
+    }
+    return known;
+  }
+
   /// Use JD's elapsed unread badge when available, so a scan delayed by
   /// image/video work still inherits the customer's original deadline.
   static DateTime detectedFromBadge(DateTime observedAt, int? ageSeconds) =>
@@ -70,6 +93,25 @@ class UnreadCaptureRecovery {
   DateTime? lastCaptureAttemptAt;
   String? latestIncomingSenderKey;
   String? _tentativeRelaxedBody;
+
+  /// Only a holding reply belonging to this recovery can discharge its SLA.
+  /// The OCR clock tolerance is for incoming detection, never for replies:
+  /// accepting a previous turn's holding reply silently drops the new turn.
+  DateTime? holdingReplySentAt(Iterable<Map<String, dynamic>> messages) {
+    DateTime? newest;
+    for (final message in messages) {
+      if (message['direction'] != 'outgoing' ||
+          message['source'] != 'sla_fallback' ||
+          message['delivery_status'] == 'delivery_unknown' ||
+          knownOutgoingIds.contains(message['id']?.toString() ?? '')) {
+        continue;
+      }
+      final sentAt = DateTime.tryParse(message['sent_at']?.toString() ?? '');
+      if (sentAt == null || sentAt.isBefore(detectedAt)) continue;
+      if (newest == null || sentAt.isAfter(newest)) newest = sentAt;
+    }
+    return newest;
+  }
 
   /// Visible chat history can be captured after an unread event even though
   /// those messages were sent earlier. Such a late capture must not resolve

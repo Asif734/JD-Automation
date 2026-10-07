@@ -1,8 +1,37 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('background failed-send snapshots preserve identity and screenshot time',
+      () {
+    final time = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final inspection = FailedSendInspection.fromMap({
+      'customer': ' jd_41aeec7741d05 ',
+      'capturedAtMs': time.millisecondsSinceEpoch,
+      'candidates': [
+        {'fingerprint': 'bubble', 'x': 20.0, 'y': 30.0}
+      ],
+    });
+    expect(inspection.customer, 'jd_41aeec7741d05');
+    expect(inspection.capturedAt, time);
+    expect(inspection.candidates.single['fingerprint'], 'bubble');
+    // Missing timestamp is stale, never silently replaced with now.
+    expect(
+        FailedSendInspection.fromMap({'customer': 'customer'})
+            .capturedAt
+            .millisecondsSinceEpoch,
+        0);
+  });
+
+  const candidate = <String, Object?>{
+    'x': 200.0,
+    'y': 300.0,
+    'fingerprint': 'verified-bubble',
+    'windowId': 42,
+  };
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel =
       MethodChannel('com.grozziie.jdAutomation/accessibility.identity-test');
@@ -10,6 +39,48 @@ void main() {
   tearDown(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
+  });
+
+  test('background retry events do not depend on an unfinished OCR request',
+      () async {
+    final ocrResponse = Completer<Map<String, Object?>>();
+    var calls = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls++;
+      expect(call.method, 'inspectOCR');
+      return ocrResponse.future;
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+    final pendingOcr = adapter.inspectOcr(windowId: 42, fast: true);
+    final event = adapter.failedSendInspections.first;
+    final handled = Completer<void>();
+    // Simulate a native-to-Flutter event; no UI action is invoked.
+    // ignore: deprecated_member_use
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+      channel.name,
+      const StandardMethodCodec()
+          .encodeMethodCall(MethodCall('failedSendCandidates', {
+        'customer': 'jd_customer',
+        'capturedAtMs': 1791354310000,
+        'candidates': [candidate],
+      })),
+      (_) => handled.complete(),
+    );
+    final inspection = await event;
+    await handled.future;
+    expect(inspection.customer, 'jd_customer');
+    expect(inspection.candidates.single['fingerprint'], 'verified-bubble');
+    expect(ocrResponse.isCompleted, isFalse);
+    ocrResponse.complete({
+      'activeCustomerId': 'jd_customer',
+      'capturedAtMs': 1791354310000,
+      'observations': <Object?>[]
+    });
+    expect((await pendingOcr).activeCustomerId, 'jd_customer');
+    expect(calls, 1); // No send, retry click, or extra screenshot request.
   });
 
   test('customer identity matching supports independent Unicode names', () {
@@ -27,14 +98,15 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       expect(call.method, 'retryFailedOutgoingMessage');
-      expect(call.arguments, {'expectedCustomer': 'customer'});
+      expect(call.arguments,
+          {'expectedCustomer': 'customer', 'candidate': candidate});
       return {'retried': true};
     });
     final adapter = MacOSCaptureAdapter(channel: channel);
     addTearDown(adapter.close);
     expect(
         (await adapter.retryFailedOutgoingMessage(
-            expectedCustomer: 'customer'))['retried'],
+            expectedCustomer: 'customer', candidate: candidate))['retried'],
         isTrue);
   });
 
@@ -45,7 +117,8 @@ void main() {
         return {'opened': true, 'customer': 'verified-customer'};
       }
       expect(call.method, 'retryFailedOutgoingMessage');
-      expect(call.arguments, {'expectedCustomer': 'verified-customer'});
+      expect(call.arguments,
+          {'expectedCustomer': 'verified-customer', 'candidate': candidate});
       return {'retried': false};
     });
     final adapter = MacOSCaptureAdapter(channel: channel);
@@ -53,7 +126,7 @@ void main() {
     await adapter.openConversation('row-name');
     expect(
         (await adapter.retryFailedOutgoingMessage(
-            expectedCustomer: 'row-name'))['retried'],
+            expectedCustomer: 'row-name', candidate: candidate))['retried'],
         isFalse);
   });
 

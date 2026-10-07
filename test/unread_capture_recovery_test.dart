@@ -2,6 +2,115 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/capture/unread_capture_recovery.dart';
 
 void main() {
+  test('recent answered messages cannot pretend to recover a new unread body',
+      () {
+    final start = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final messages = <Map<String, dynamic>>[
+      {
+        'id': 'previous-question',
+        'direction': 'incoming',
+        'sent_at': start.subtract(const Duration(seconds: 8)).toIso8601String()
+      },
+      {
+        'id': 'previous-answer',
+        'direction': 'outgoing',
+        'sent_at': start.subtract(const Duration(seconds: 5)).toIso8601String()
+      },
+    ];
+    final recovery = UnreadCaptureRecovery(
+        customer: 'customer',
+        unreadEvidence: 0,
+        detectedAt: start,
+        knownOutgoingIds: const {},
+        knownIncomingIds: UnreadCaptureRecovery.incomingBaseline(messages,
+            detectedAt: start, answeredMessageId: 'previous-question'));
+    expect(
+        recovery.acceptsIncoming('previous-question',
+            sentAt: start.subtract(const Duration(seconds: 8)),
+            capturedAt: start.add(const Duration(seconds: 3))),
+        isFalse);
+    expect(recovery.holdingDue(start.add(const Duration(seconds: 20))), isTrue);
+  });
+
+  test('already captured but unanswered current-turn body remains recoverable',
+      () {
+    final start = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final baseline = UnreadCaptureRecovery.incomingBaseline([
+      {
+        'id': 'old',
+        'direction': 'incoming',
+        'sent_at': start.subtract(const Duration(minutes: 1)).toIso8601String()
+      },
+      {
+        'id': 'current',
+        'direction': 'incoming',
+        'sent_at': start.toIso8601String()
+      },
+    ], detectedAt: start, answeredMessageId: 'old');
+    expect(baseline, {'old'});
+  });
+
+  test('previous holding reply cannot cancel the 14:25:10 missed-body turn',
+      () {
+    final start = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final recovery = UnreadCaptureRecovery(
+      customer: 'jd_41aeec7741d05',
+      unreadEvidence: 0,
+      detectedAt: start,
+      knownIncomingIds: const {},
+      knownOutgoingIds: const {'previous-holding'},
+    );
+    final history = <Map<String, dynamic>>[
+      {
+        'id': 'previous-holding',
+        'direction': 'outgoing',
+        'source': 'sla_fallback',
+        'sent_at': '2026-10-07T06:24:59.157774Z'
+      },
+      {
+        'id': 'previous-answer',
+        'direction': 'outgoing',
+        'source': 'generated_reply',
+        'sent_at': '2026-10-07T06:25:00.498378Z'
+      },
+    ];
+    expect(recovery.holdingReplySentAt(history), isNull);
+    expect(recovery.holdingDue(start.add(const Duration(seconds: 20))), isTrue);
+    expect(recovery.detectedAt.add(UnreadCaptureRecovery.holdingAfter),
+        DateTime.utc(2026, 10, 7, 6, 25, 30));
+    // Even a late-added OCR/history entry absent from the baseline is old.
+    history.first['id'] = 'late-copy-of-old-holding';
+    expect(recovery.holdingReplySentAt(history), isNull);
+  });
+
+  test('only a new delivered holding reply resolves this recovery', () {
+    final start = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final recovery = UnreadCaptureRecovery(
+      customer: 'customer',
+      unreadEvidence: 0,
+      detectedAt: start,
+      knownIncomingIds: const {},
+      knownOutgoingIds: const {'baseline'},
+    );
+    final reply = <String, dynamic>{
+      'id': 'holding',
+      'direction': 'outgoing',
+      'source': 'sla_fallback',
+      'sent_at': start.add(const Duration(seconds: 20)).toIso8601String(),
+      'delivery_status': 'sent',
+    };
+    expect(recovery.holdingReplySentAt([reply]),
+        start.add(const Duration(seconds: 20)));
+    reply['delivery_status'] = 'delivery_unknown';
+    expect(recovery.holdingReplySentAt([reply]), isNull);
+    reply['delivery_status'] = 'sent';
+    reply['id'] = 'baseline';
+    expect(recovery.holdingReplySentAt([reply]), isNull);
+    reply['id'] = 'holding';
+    reply['direction'] = 'incoming';
+    expect(recovery.holdingReplySentAt([reply]), isNull);
+  });
+
   test('an unread badge preserves the original 20 and 50 second deadlines', () {
     final observedAt = DateTime.utc(2026, 9, 22, 8, 58, 33);
     final detectedAt = UnreadCaptureRecovery.detectedFromBadge(observedAt, 85);

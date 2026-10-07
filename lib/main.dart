@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:crypto/crypto.dart';
 
 import 'capture/capture_coordinator.dart';
+import 'capture/failed_send_retry_policy.dart';
 import 'capture/ocr_capture_extractor.dart';
 import 'capture/ocr_image_candidate_selector.dart';
 import 'capture/unread_capture_recovery.dart';
@@ -70,6 +71,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   late final CaptureDatabase _database;
   StreamSubscription? _updateSubscription;
   StreamSubscription? _diagnosticSubscription;
+  StreamSubscription? _failedSendInspectionSubscription;
   List<ConversationSummary> _conversations = const [];
   Map<String, Object?> _status = const {};
   String _diagnostics = 'No AX inspection yet.';
@@ -85,6 +87,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   bool _unreadSignalBusy = false;
   bool _activeChatSignalBusy = false;
   bool _failedSendRetryBusy = false;
+  Timer? _failedSendRetryTimer;
   final Map<String, Timer> _draftRetryTimers = {};
   final Map<String, Timer> _batchCollectionTimers = {};
   final Map<String, Timer> _slaFallbackTimers = {};
@@ -98,6 +101,8 @@ class _CaptureHomeState extends State<CaptureHome> {
   final Map<String, CodexGenerationCancellation> _activeDraftCancellations = {};
   final Map<String, String> _activeDraftMessageIds = {};
   Future<void> _jdUiTail = Future<void>.value();
+  int _pendingJdUiOperations = 0;
+  int _priorityUiOperations = 0;
   bool _deliveryWorkerRunning = false;
   bool _deliveryRequested = false;
   final Map<String, int> _processingUnreadEvidence = {};
@@ -131,6 +136,11 @@ class _CaptureHomeState extends State<CaptureHome> {
       _diagnosticSubscription = _adapter.diagnostics.listen(
         (value) => setState(() =>
             _diagnostics = const JsonEncoder.withIndent('  ').convert(value)),
+      );
+      _failedSendInspectionSubscription = _adapter.failedSendInspections.listen(
+        (inspection) => _queueFailedSendRetry(
+            inspection.customer, inspection.candidates,
+            capturedAt: inspection.capturedAt),
       );
       _refreshStatus();
       _refreshTickets();
@@ -396,6 +406,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       _autoCaptureTimer?.cancel();
       _unreadSignalTimer?.cancel();
       _activeChatSignalTimer?.cancel();
+      _failedSendRetryTimer?.cancel();
       for (final timer in _unreadHoldingTimers.values) {
         timer.cancel();
       }
@@ -499,6 +510,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       final messages = (document?['messages'] as List<Object?>? ?? const [])
           .whereType<Map<String, dynamic>>();
       final eventAt = detectedAt ?? DateTime.now();
+      final answeredMessageId = await _database.answeredMessageId(customer);
       DateTime? messageAt(Map<String, dynamic> message) =>
           DateTime.tryParse(message['sent_at']?.toString() ?? '') ??
           DateTime.tryParse(message['captured_at']?.toString() ?? '');
@@ -506,14 +518,8 @@ class _CaptureHomeState extends State<CaptureHome> {
         customer: customer,
         unreadEvidence: evidence,
         detectedAt: eventAt,
-        knownIncomingIds: messages
-            .where((message) =>
-                message['direction'] == 'incoming' &&
-                (messageAt(message)?.isBefore(eventAt.subtract(
-                        UnreadCaptureRecovery.detectedTurnClockTolerance)) ??
-                    false))
-            .map((message) => message['id']?.toString() ?? '')
-            .toSet(),
+        knownIncomingIds: UnreadCaptureRecovery.incomingBaseline(messages,
+            detectedAt: eventAt, answeredMessageId: answeredMessageId),
         knownOutgoingIds: messages
             .where((message) =>
                 message['direction'] == 'outgoing' &&
@@ -592,7 +598,6 @@ class _CaptureHomeState extends State<CaptureHome> {
           await _database.isHumanContacting(customer)) {
         return;
       }
-      _queueFailedSendRetry(customer);
       final extraction = const OcrCaptureExtractor().analyze(inspection);
       final senderKey = extraction.latestIncomingSenderKey;
       final incomingAt = extraction.latestIncomingSentAt;
@@ -620,8 +625,43 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
   }
 
-  void _queueFailedSendRetry(String customer) {
-    if (_failedSendRetryBusy || !_autoCaptureRunning) return;
+  bool get _retryUiIdle => failedSendRetryCanRun(
+        captureBusy: _autoCaptureBusy,
+        activeSignalBusy: _activeChatSignalBusy,
+        unreadSignalBusy: _unreadSignalBusy,
+        deliveryBusy: _deliveryWorkerRunning,
+        priorityUiBusy: _priorityUiOperations != 0,
+        transferBusy: _transferringCustomers.isNotEmpty,
+        incomingRecoveryPending:
+            _unreadRecovery.isNotEmpty || _startingUnreadRecovery.isNotEmpty,
+        fallbackPending: _slaFallbackTimers.isNotEmpty,
+        draftingPending: _activeDraftUsers.isNotEmpty ||
+            _draftQueue.isNotEmpty ||
+            _batchCollectionTimers.isNotEmpty,
+      );
+
+  void _queueFailedSendRetry(
+      String customer, List<Map<String, Object?>> candidates,
+      {required DateTime capturedAt}) {
+    _failedSendRetryTimer?.cancel();
+    _failedSendRetryTimer = null;
+    // Ordinary chats never enqueue retry work. A detected icon is optional
+    // maintenance: skip instead of waiting behind capture, delivery, or SLA.
+    if (candidates.isEmpty ||
+        _failedSendRetryBusy ||
+        !_autoCaptureRunning ||
+        !mounted ||
+        DateTime.now().difference(capturedAt) > const Duration(seconds: 15)) {
+      return;
+    }
+    if (!_retryUiIdle || _pendingJdUiOperations != 0) {
+      // Keep only this recently observed candidate, outside the UI queue.
+      // This avoids starvation if the 2s capture and 3s OCR timers overlap.
+      _failedSendRetryTimer = Timer(const Duration(milliseconds: 400), () {
+        _queueFailedSendRetry(customer, candidates, capturedAt: capturedAt);
+      });
+      return;
+    }
     _failedSendRetryBusy = true;
     // Do not delay the existing incoming-message/SLA poll behind the UI lock.
     unawaited(() async {
@@ -629,20 +669,32 @@ class _CaptureHomeState extends State<CaptureHome> {
         await _withJdUiOperation(() async {
           if (!mounted ||
               !_autoCaptureRunning ||
+              !_retryUiIdle ||
+              _pendingJdUiOperations > 1 ||
               await _database.isHumanContacting(customer)) {
             return;
           }
-          final retry = await _adapter.retryFailedOutgoingMessage(
-              expectedCustomer: customer);
-          if (retry['retried'] == true && mounted) {
-            setState(() => _diagnostics =
-                'Retried the existing failed JD message for $customer; no reply was regenerated or retyped.');
-            if (retry['cleared'] == true && retry['reply'] is String) {
-              final recorded = await _database.confirmRetriedGeneratedDraft(
-                  userId: customer, reply: retry['reply']! as String);
-              if (recorded) {
-                _scheduleDraftGeneration(customer, newEvidence: false);
+          if (!_retryUiIdle ||
+              _pendingJdUiOperations > 1 ||
+              !_autoCaptureRunning ||
+              !mounted) {
+            return;
+          }
+          for (final candidate in candidates) {
+            if (!_retryUiIdle ||
+                _pendingJdUiOperations > 1 ||
+                !_autoCaptureRunning ||
+                !mounted) {
+              break;
+            }
+            final retry = await _adapter.retryFailedOutgoingMessage(
+                expectedCustomer: customer, candidate: candidate);
+            if (retry['retried'] == true) {
+              if (mounted) {
+                setState(() => _diagnostics =
+                    'Retried the existing failed JD message for $customer; no reply was regenerated or retyped.');
               }
+              break; // One existing-icon click per poll, including multiple failures.
             }
           }
         });
@@ -707,6 +759,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     for (final message in messages) {
       if (message['direction'] != 'outgoing' ||
           message['source'] == 'sla_fallback' ||
+          message['delivery_status'] == 'delivery_unknown' ||
           recovery.knownOutgoingIds.contains(message['id']?.toString() ?? '') ||
           message['body'] == _uncapturedHoldingReply ||
           message['body'] == _uncapturedResendReply) {
@@ -725,21 +778,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     final document = await (await _database.history).read(recovery.customer);
     final messages = (document?['messages'] as List<Object?>? ?? const [])
         .whereType<Map<String, dynamic>>();
-    DateTime? newest;
-    for (final message in messages) {
-      if (message['direction'] != 'outgoing' ||
-          message['source'] != 'sla_fallback') {
-        continue;
-      }
-      final sentAt = DateTime.tryParse(message['sent_at']?.toString() ?? '');
-      if (sentAt == null ||
-          sentAt.isBefore(recovery.detectedAt
-              .subtract(UnreadCaptureRecovery.detectedTurnClockTolerance))) {
-        continue;
-      }
-      if (newest == null || sentAt.isAfter(newest)) newest = sentAt;
-    }
-    return newest;
+    return recovery.holdingReplySentAt(messages);
   }
 
   Future<void> _sendUnreadRecoveryNotice(UnreadCaptureRecovery recovery,
@@ -997,6 +1036,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     return messages.any((message) {
       if (message['direction'] != 'outgoing' ||
           message['source'] == 'sla_fallback' ||
+          message['delivery_status'] == 'delivery_unknown' ||
           _isOwnHoldingReply(message['body']?.toString())) {
         return false;
       }
@@ -1820,6 +1860,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<T> _withJdUiOperation<T>(Future<T> Function() operation) async {
+    _pendingJdUiOperations++;
     final previous = _jdUiTail;
     final release = Completer<void>();
     _jdUiTail = release.future;
@@ -1827,16 +1868,22 @@ class _CaptureHomeState extends State<CaptureHome> {
     try {
       return await operation();
     } finally {
+      _pendingJdUiOperations--;
       release.complete();
     }
   }
 
-  Future<T> _withFallbackPriority<T>(Future<T> Function() operation) {
+  Future<T> _withFallbackPriority<T>(Future<T> Function() operation) async {
     // The capture queue may hold a slow OCR or video operation for far longer
     // than JD's response window. A fallback bypasses that Dart queue; the
     // native send independently re-verifies the exact active customer before
     // touching the composer, and aborts if another chat took focus.
-    return operation();
+    _priorityUiOperations++;
+    try {
+      return await operation();
+    } finally {
+      _priorityUiOperations--;
+    }
   }
 
   Future<bool> _sendAutomaticallyUnlocked(String userId, AiDraft draft) async {
@@ -2448,6 +2495,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     _autoCaptureTimer?.cancel();
     _unreadSignalTimer?.cancel();
     _activeChatSignalTimer?.cancel();
+    _failedSendRetryTimer?.cancel();
     _deliveryRetryTimer?.cancel();
     for (final timer in _draftRetryTimers.values) {
       timer.cancel();
@@ -2466,6 +2514,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     }
     _updateSubscription?.cancel();
     _diagnosticSubscription?.cancel();
+    _failedSendInspectionSubscription?.cancel();
     _adapter.close();
     _database.close();
     super.dispose();

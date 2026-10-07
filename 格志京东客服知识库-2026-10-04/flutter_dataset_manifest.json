@@ -18,10 +18,10 @@
     "fallback_index": "rag_index/customer_service_rag_index.json"
   },
   "counts": {
-    "active_cards": 527,
-    "high_frequency_routes": 971,
+    "active_cards": 528,
+    "high_frequency_routes": 981,
     "tutorial_entries": 63,
-    "source_chunks": 824
+    "source_chunks": 831
   },
   "normalization": {
     "query": "lowercase_and_remove_whitespace",

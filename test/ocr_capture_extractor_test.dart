@@ -2,9 +2,174 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/capture/ocr_capture_extractor.dart';
+import 'package:jd_automation/capture/unread_capture_recovery.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('sender clock starts the deadline without OCR reading the new body', () {
+    final sentAt = DateTime.utc(2026, 10, 7, 6, 25, 10);
+    final result = const OcrCaptureExtractor().analyze(OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1000,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      activeCustomerId: 'jd_41aeec7741d05',
+      capturedAt: sentAt.add(const Duration(seconds: 3)),
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 14:25:10',
+            confidence: 1,
+            x: .22,
+            y: .40,
+            width: .21,
+            height: .02),
+        OcrObservation(
+            text: 'how are you?',
+            confidence: .10,
+            x: .24,
+            y: .44,
+            width: .10,
+            height: .02),
+      ],
+    ));
+    expect(result.capture, isNull);
+    expect(result.latestVisibleSenderIsIncoming, isTrue);
+    expect(result.latestIncomingSentAt, sentAt);
+    expect(result.latestIncomingSenderKey, contains('14:25:10'));
+    final recovery = UnreadCaptureRecovery(
+        customer: result.customerId!,
+        unreadEvidence: 0,
+        detectedAt: result.latestIncomingSentAt!,
+        knownIncomingIds: const {},
+        knownOutgoingIds: const {});
+    expect(
+        recovery.holdingDue(sentAt.add(const Duration(seconds: 20))), isTrue);
+  });
+
+  for (final receipt in ['已读', '未读', '']) {
+    test('outgoing receipt "$receipt" is evidence only for that exact bubble',
+        () {
+      final inspection = OcrInspection(
+        image: Uint8List(0),
+        imageWidth: 1500,
+        imageHeight: 1000,
+        windowTitle: '咚咚融合工作台',
+        recognizedText: '',
+        capturedAt: DateTime.now(),
+        activeCustomerId: 'jd_customer',
+        observations: [
+          const OcrObservation(
+              text: '13:01:34 格志打印机小甘',
+              confidence: 1,
+              x: .47,
+              y: .30,
+              width: .15,
+              height: .02),
+          const OcrObservation(
+              text: '1',
+              confidence: 1,
+              x: .50,
+              y: .35,
+              width: .02,
+              height: .02),
+          if (receipt.isNotEmpty)
+            OcrObservation(
+                text: receipt,
+                confidence: 1,
+                x: .45,
+                y: .35,
+                width: .03,
+                height: .02),
+        ],
+      );
+      final messages =
+          const OcrCaptureExtractor().extract(inspection)!.messages;
+      expect(messages.single.body, '1');
+      expect(messages.single.direction, 'outgoing');
+      expect(messages.single.deliveryConfirmed, receipt.isNotEmpty);
+    });
+  }
+
+  test('low-confidence receipt cannot confirm an outgoing message', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1000,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_customer',
+      observations: const [
+        OcrObservation(
+            text: '13:01:34 格志打印机小甘',
+            confidence: 1,
+            x: .47,
+            y: .30,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'An answer',
+            confidence: 1,
+            x: .50,
+            y: .35,
+            width: .10,
+            height: .02),
+        OcrObservation(
+            text: '已读',
+            confidence: .79,
+            x: .45,
+            y: .35,
+            width: .03,
+            height: .02),
+      ],
+    );
+    expect(
+        const OcrCaptureExtractor()
+            .extract(inspection)!
+            .messages
+            .single
+            .deliveryConfirmed,
+        isFalse);
+  });
+
+  test('receipt on a different row cannot confirm an outgoing message', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1000,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.now(),
+      activeCustomerId: 'jd_customer',
+      observations: const [
+        OcrObservation(
+            text: '13:01:34 格志打印机小甘',
+            confidence: 1,
+            x: .47,
+            y: .30,
+            width: .15,
+            height: .02),
+        OcrObservation(
+            text: 'An answer',
+            confidence: 1,
+            x: .50,
+            y: .35,
+            width: .10,
+            height: .02),
+        OcrObservation(
+            text: '已读', confidence: 1, x: .45, y: .45, width: .03, height: .02),
+      ],
+    );
+    expect(
+        const OcrCaptureExtractor()
+            .extract(inspection)!
+            .messages
+            .single
+            .deliveryConfirmed,
+        isFalse);
+  });
+
   test('JD clock uses China time even when the Mac is two hours behind', () {
     final inspection = OcrInspection(
       image: Uint8List(0),

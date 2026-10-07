@@ -620,6 +620,15 @@ void main() {
           '{"reply":"Retained answer","decision":"draft","confidence":1,"risk_level":"low","model":"test","used_record_ids":[],"actions":[],"attachments":[]}',
     );
     await database.saveDraft(pending.id, draft);
+    CapturedMessage observed(String body, {bool confirmed = true}) =>
+        CapturedMessage(
+          stableId: 'observed-reply',
+          direction: 'outgoing',
+          body: body,
+          sentAt: DateTime.now().toUtc(),
+          axPath: 'test',
+          deliveryConfirmed: confirmed,
+        );
     await database.markGeneratedDraftDeliveryFailure(
       userId: userId,
       error: 'pre-click verification failed',
@@ -628,8 +637,10 @@ void main() {
     );
     expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
     expect(
-        await database.confirmRetriedGeneratedDraft(
-            userId: userId, reply: draft.reply),
+        await database.confirmObservedGeneratedDraft(
+            userId: userId,
+            message: observed(draft.reply),
+            capturedAt: DateTime.now().toUtc()),
         isFalse);
     expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
 
@@ -644,13 +655,18 @@ void main() {
     expect(rows, hasLength(1));
     expect(rows.single['delivery_state'], 'delivery_unknown');
     expect(
-        await database.confirmRetriedGeneratedDraft(
-            userId: userId, reply: 'another message'),
+        await database.confirmObservedGeneratedDraft(
+            userId: userId,
+            message: observed('another message'),
+            capturedAt: DateTime.now().toUtc()),
         isFalse);
-    expect(
-        await database.confirmRetriedGeneratedDraft(
-            userId: userId, reply: draft.reply),
-        isTrue);
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: DateTime.now().toUtc(),
+      messages: [observed(draft.reply)],
+    ));
     expect(await database.hasUndeliveredDraft(userId), isFalse);
   });
 

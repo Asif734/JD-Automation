@@ -151,6 +151,24 @@ class OcrCaptureExtractor {
       if (bodies.isEmpty) continue;
       final body = _assembleBubbleText(bodies);
       if (body.isEmpty) continue;
+      // Only a receipt on this seller bubble proves a formerly uncertain send.
+      // It is not required for ordinary reply generation or normal sending.
+      final bodyTop =
+          bodies.map((item) => item.y).reduce((a, b) => a < b ? a : b);
+      final bodyBottom = bodies
+          .map((item) => item.y + item.height)
+          .reduce((a, b) => a > b ? a : b);
+      final bodyLeft =
+          bodies.map((item) => item.x).reduce((a, b) => a < b ? a : b);
+      final deliveryConfirmed = label.direction == 'outgoing' &&
+          observations.any((item) =>
+              item.confidence >= 0.8 &&
+              (item.text.trim() == '已读' || item.text.trim() == '未读') &&
+              item.x + item.width / 2 >= chatLeft &&
+              item.x + item.width / 2 < chatRight &&
+              item.x + item.width <= bodyLeft + 0.015 &&
+              item.y + item.height / 2 >= bodyTop - 0.012 &&
+              item.y + item.height / 2 <= bodyBottom + 0.012);
       // The JD transfer summary can be visually merged into the last customer
       // bubble by OCR. It is interface metadata, not a new customer request.
       // The caller handles the transfer separately by sending one welcome.
@@ -169,6 +187,7 @@ class OcrCaptureExtractor {
         stableId: 'ocr:${sha256.convert(utf8.encode(identity))}',
         direction: label.direction,
         body: body,
+        deliveryConfirmed: deliveryConfirmed,
         sender: label.direction == 'incoming'
             ? customerId
             : currentSender.text.trim(),

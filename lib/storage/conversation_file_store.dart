@@ -173,6 +173,7 @@ class ConversationFileStore {
           'sent_at': message.sentAt?.toUtc().toIso8601String(),
           'captured_at': capture.capturedAt.toUtc().toIso8601String(),
           'source': 'jd_automation',
+          if (message.deliveryConfirmed) 'delivery_status': 'sent',
           'media': [for (final media in message.media) media.toJson()],
         });
         inserted++;
@@ -388,6 +389,25 @@ class ConversationFileStore {
           }
         }
         return removed;
+      });
+
+  Future<bool> confirmObservedOutgoing({
+    required String userId,
+    required String messageId,
+    String deliveryStatus = 'sent',
+  }) =>
+      _serialized(userId, () async {
+        final document = await read(userId);
+        if (document == null) return false;
+        final message = (document['messages'] as List<Object?>)
+            .whereType<Map<String, dynamic>>()
+            .where((item) =>
+                item['id'] == messageId && item['direction'] == 'outgoing')
+            .firstOrNull;
+        if (message == null) return false;
+        message['delivery_status'] = deliveryStatus;
+        await _write(document, userId);
+        return true;
       });
 
   Future<bool> markReplySent({
