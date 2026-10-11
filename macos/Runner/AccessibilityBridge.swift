@@ -1906,23 +1906,16 @@ final class QianniuAXCollector {
       }
 
       func scopedNodes() -> [AXNode]? {
-        let root = AXUIElementCreateApplication(pid)
-        var nodes: [AXNode] = []
-        walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) { node, _ in nodes.append(node) }
-        guard let window = nodes.first(where: {
-          $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
-        }) else { return nil }
-        return nodes.filter { $0.path == window.path || $0.path.hasPrefix(window.path + "/") }
+        receptionNodes(pid: pid)
       }
 
-      guard let initial = scopedNodes(), activeCustomerMatches(expected, nodes: initial) else {
+      guard let opened = scopedNodes(), activeCustomerMatches(expected, nodes: opened) else {
         finish(["error": "expected_conversation_missing",
                 "message": "The exact active JD customer \(expected) was not verified; nothing was inserted or sent."])
         return
       }
 
-      guard let opened = scopedNodes(), activeCustomerMatches(expected, nodes: opened),
-            let composer = opened.first(where: { $0.role == kAXTextAreaRole as String }) else {
+      guard let composer = opened.first(where: { $0.role == kAXTextAreaRole as String }) else {
         finish(["error": "pre_insert_verification_failed",
                 "message": "Could not verify \(expected) and its composer after opening the chat."])
         return
@@ -2025,17 +2018,54 @@ final class QianniuAXCollector {
       }
       down.post(tap: .cghidEventTap)
       up.post(tap: .cghidEventTap)
-      usleep(450_000)
 
-      guard let after = scopedNodes(), activeCustomerMatches(expected, nodes: after),
-            let afterComposer = after.first(where: { $0.role == kAXTextAreaRole as String }),
-            (stringAttribute(afterComposer.element, kAXValueAttribute) ?? "").isEmpty else {
-        finish(["error": "send_unconfirmed",
-                "message": "Send was clicked once, but JingMai did not clear the composer. Do not retry automatically; verify in JingMai."])
-        return
+      // JingMai can take longer than one UI frame to commit a send. Poll for
+      // up to three seconds instead of turning a slow composer clear into a
+      // permanently frozen delivery. If the exact inserted reply is still in
+      // the verified customer's composer after that window, the click did not
+      // commit: clear only that known text and let Dart return the draft to its
+      // serial retry queue. A customer change or unexpected composer value is
+      // reported as ambiguous so Dart can reconcile any observed receipt
+      // before the serial retry fires.
+      let confirmationDeadline = Date().addingTimeInterval(3.0)
+      var lastComposer: AXNode?
+      var lastComposerText: String?
+      repeat {
+        usleep(250_000)
+        guard let after = scopedNodes(), activeCustomerMatches(expected, nodes: after),
+              let afterComposer = after.first(where: { $0.role == kAXTextAreaRole as String }) else {
+          finish(["error": "send_unconfirmed",
+                  "message": "Send was clicked, but the expected JingMai conversation could not be verified. The queued draft will retry unless delivery is reconciled first."])
+          return
+        }
+        let composerText = (stringAttribute(afterComposer.element, kAXValueAttribute) ?? "")
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        if composerText.isEmpty {
+          finish(["sent": true, "customer": expected, "reply": text,
+                  "mediaCount": requestedMedia.count])
+          return
+        }
+        lastComposer = afterComposer
+        lastComposerText = composerText
+      } while Date() < confirmationDeadline
+
+      if requestedMedia.isEmpty, lastComposerText == text,
+         let lastComposer = lastComposer {
+        var settable = DarwinBoolean(false)
+        if AXUIElementIsAttributeSettable(lastComposer.element,
+                                          kAXValueAttribute as CFString,
+                                          &settable) == .success,
+           settable.boolValue,
+           AXUIElementSetAttributeValue(lastComposer.element,
+                                        kAXValueAttribute as CFString,
+                                        "" as CFTypeRef) == .success {
+          finish(["error": "send_not_committed",
+                  "message": "JingMai kept the exact reply in the composer after Send. The unsent text was cleared and the queued draft will retry."])
+          return
+        }
       }
-      finish(["sent": true, "customer": expected, "reply": text,
-              "mediaCount": requestedMedia.count])
+      finish(["error": "send_unconfirmed",
+              "message": "Send was clicked, but JingMai's resulting state was ambiguous. The queued draft will retry unless delivery is reconciled first."])
     }
   }
 
@@ -2242,22 +2272,38 @@ final class QianniuAXCollector {
       .first(where: { !$0.isTerminated })?.processIdentifier
   }
 
-  /// Returns the AX split that owns the active conversation and composer.
-  /// Its horizontal bounds exclude both the customer sidebar and details
-  /// panel, allowing OCR to reject text that belongs to another row.
-  func activeChatFrame() -> CGRect? {
-    guard AXIsProcessTrusted(), let pid = runningPID() else { return nil }
+  /// Traverse only Dingdong's reception window. Walking every JD window at
+  /// each verification multiplies capture and send latency. Resolve the
+  /// window afresh each time; never cache the active customer for sending.
+  private func receptionNodes(pid: pid_t) -> [AXNode]? {
     let root = AXUIElementCreateApplication(pid)
+    if let window = elementArrayAttribute(root, kAXWindowsAttribute).first(where: {
+      stringAttribute($0, kAXTitleAttribute)?.contains("咚咚融合工作台") == true
+    }) {
+      var nodes: [AXNode] = []
+      walk(window, path: "app/reception", depth: 0, maxDepth: 22, maxNodes: 5_000) {
+        node, _ in nodes.append(node)
+      }
+      return nodes
+    }
+    // Preserve support for JD builds that omit AXWindows.
     var nodes: [AXNode] = []
     walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
       node, _ in nodes.append(node)
     }
     guard let window = nodes.first(where: {
-      $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
+      $0.role == kAXWindowRole as String &&
+        ($0.title?.contains("咚咚融合工作台") == true)
     }) else { return nil }
-    let scoped = nodes.filter {
-      $0.path == window.path || $0.path.hasPrefix(window.path + "/")
-    }
+    return nodes.filter { $0.path == window.path || $0.path.hasPrefix(window.path + "/") }
+  }
+
+  /// Returns the AX split that owns the active conversation and composer.
+  /// Its horizontal bounds exclude both the customer sidebar and details
+  /// panel, allowing OCR to reject text that belongs to another row.
+  func activeChatFrame() -> CGRect? {
+    guard AXIsProcessTrusted(), let pid = runningPID(),
+          let scoped = receptionNodes(pid: pid) else { return nil }
     guard let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }) else {
       return nil
     }
@@ -2272,16 +2318,9 @@ final class QianniuAXCollector {
   /// Bound OCR to the transcript, excluding the emoji toolbar and composer.
   /// Prefer the accessibility scroll area; its size follows JD's layout.
   func activeMessageBottom() -> CGFloat? {
-    guard AXIsProcessTrusted(), let pid = runningPID() else { return nil }
-    let root = AXUIElementCreateApplication(pid)
-    var nodes: [AXNode] = []
-    walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
-      node, _ in nodes.append(node)
-    }
-    guard let window = nodes.first(where: {
-      $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
-    }), let composer = nodes.first(where: {
-      $0.path.hasPrefix(window.path + "/") &&
+    guard AXIsProcessTrusted(), let pid = runningPID(),
+          let nodes = receptionNodes(pid: pid),
+          let composer = nodes.first(where: {
       $0.role == kAXTextAreaRole as String && $0.frame != nil
     }), let composerFrame = composer.frame,
       let split = nodes.filter({
@@ -2306,16 +2345,8 @@ final class QianniuAXCollector {
   /// Qianniu truncates the central header, but the corresponding group title
   /// contains the complete account name.
   func activeCustomerIdentity() -> String? {
-    guard AXIsProcessTrusted(), let pid = runningPID() else { return nil }
-    let root = AXUIElementCreateApplication(pid)
-    var nodes: [AXNode] = []
-    walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) { node, _ in nodes.append(node) }
-    guard let window = nodes.first(where: {
-      $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
-    }) else { return nil }
-    let scoped = nodes.filter {
-      $0.path == window.path || $0.path.hasPrefix(window.path + "/")
-    }
+    guard AXIsProcessTrusted(), let pid = runningPID(),
+          let scoped = receptionNodes(pid: pid) else { return nil }
     if let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }),
        let split = scoped
         .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
@@ -2531,10 +2562,8 @@ final class QianniuAXCollector {
   /// The red-pixel detector is only a priority hint; Flutter still performs a
   /// fallback scan of every visible row to avoid losing messages.
   func conversationRows() -> [[String: Any]] {
-    guard AXIsProcessTrusted(), let pid = runningPID() else { return [] }
-    let root = AXUIElementCreateApplication(pid)
-    var nodes: [AXNode] = []
-    walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) { node, _ in nodes.append(node) }
+    guard AXIsProcessTrusted(), let pid = runningPID(),
+          let nodes = receptionNodes(pid: pid) else { return [] }
     guard let window = nodes.first(where: {
       $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
     }) else { return [] }
@@ -2617,9 +2646,11 @@ final class QianniuAXCollector {
         finish(["error": "conversation_unavailable", "message": "JingMai, Accessibility, or customer ID is unavailable."])
         return
       }
-      let root = AXUIElementCreateApplication(pid)
-      var nodes: [AXNode] = []
-      walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) { node, _ in nodes.append(node) }
+      guard let nodes = receptionNodes(pid: pid) else {
+        finish(["error": "conversation_window_missing",
+                "message": "JingMai's reception window is not available."])
+        return
+      }
       guard let window = nodes.first(where: {
         $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
       }) else {
@@ -2672,10 +2703,7 @@ final class QianniuAXCollector {
             return active
           }
         }
-        var current: [AXNode] = []
-        walk(root, path: "app", depth: 0, maxDepth: 22, maxNodes: 5_000) {
-          node, _ in current.append(node)
-        }
+        guard let current = receptionNodes(pid: pid) else { return nil }
         return activeCustomerMatches(expected, nodes: current) ? expected : nil
       }
 

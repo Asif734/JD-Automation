@@ -4,6 +4,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/codex/holding_replies.dart';
 
 void main() {
+  test('removes seller holding text appended to a customer question', () {
+    expect(stripAppendedHoldingReply('打4联可以的吧请稍等，我正在核对您刚发来的消息。'), '打4联可以的吧');
+    expect(
+        stripAppendedHoldingReply('是全新的吗请给我们一点时间核对详情。 您好，请问有什么可以帮您？'), '是全新的吗');
+    expect(stripAppendedHoldingReply('你说“请给我们一点时间核对详情。”是什么意思？'),
+        '你说“请给我们一点时间核对详情。”是什么意思？');
+  });
   test('holding replies vary but always use Chinese', () {
     expect(chineseHoldingReplies.toSet(), hasLength(20));
     final random = Random(7);

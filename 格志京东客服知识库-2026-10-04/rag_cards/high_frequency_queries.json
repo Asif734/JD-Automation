@@ -6867,6 +6867,34 @@
       "platforms": [
         "JD"
       ]
+    },
+    {
+      "query": "所有针式打印机都送纸吗",
+      "card_id": "dot_matrix_all_models_two_free_test_sheets_20261010",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "针式打印机标准送几张测试纸",
+      "card_id": "dot_matrix_all_models_two_free_test_sheets_20261010",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "ak80 tg890 有送纸吗",
+      "card_id": "ak80_confirmed_ak890_package_correction_20261010",
+      "platforms": [
+        "JD"
+      ]
+    },
+    {
+      "query": "AK890和TG890送纸吗",
+      "card_id": "ak80_confirmed_ak890_package_correction_20261010",
+      "platforms": [
+        "JD"
+      ]
     }
   ]
 }

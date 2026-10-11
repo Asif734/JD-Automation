@@ -632,7 +632,6 @@ void main() {
     await database.markGeneratedDraftDeliveryFailure(
       userId: userId,
       error: 'pre-click verification failed',
-      deliveryUnknown: false,
       retryDelay: Duration.zero,
     );
     expect((await database.nextReadyDelivery())?.draft.reply, draft.reply);
@@ -646,14 +645,13 @@ void main() {
 
     await database.markGeneratedDraftDeliveryFailure(
       userId: userId,
-      error: 'send click was not confirmed',
-      deliveryUnknown: true,
+      error: 'send_unconfirmed',
     );
     expect(await database.nextReadyDelivery(), isNull);
     final rows = await (await database.database)
         .query('generated_drafts', where: 'user_id = ?', whereArgs: [userId]);
     expect(rows, hasLength(1));
-    expect(rows.single['delivery_state'], 'delivery_unknown');
+    expect(rows.single['delivery_state'], 'retry');
     expect(
         await database.confirmObservedGeneratedDraft(
             userId: userId,

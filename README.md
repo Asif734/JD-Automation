@@ -11,6 +11,33 @@ flutter pub get
 flutter run -d macos
 ```
 
+## Standalone Apple Silicon release
+
+Run `zsh tools/build_standalone_macos.sh` on the build Mac (Flutter/Xcode and
+Homebrew FFmpeg/FFprobe are needed only for packaging). This produces
+`build/standalone/JD Automation Standalone.zip` and a separate
+`JD Automation Standalone.app`, version 0.1.1+2, with bundle ID
+`com.grozziie.jdAutomation.standalone`. The existing release app is not replaced.
+
+The single app contains the runtime knowledge cards/Markdown, Codex workspace
+and schemas, FFmpeg/FFprobe, and their non-system libraries and third-party
+notices. Customer histories, queued drafts, credentials, and Codex sessions
+are excluded. This package targets Apple Silicon and macOS 15 or newer.
+
+On the receiving Mac, unzip it, move the app to Applications, and grant its own
+Accessibility/Screen Recording permissions (Speech Recognition for video
+transcription). JD Jingmai and an authenticated Codex CLI must already be
+installed. Finder launches automatically detect Codex in the official
+`~/.local/bin` location, Homebrew, npm/NVM, or the matching VS Code extension;
+`CODEX_EXECUTABLE` remains an explicit operator override.
+
+Standalone customer state is created separately under
+`~/Library/Application Support/com.grozziie.jdAutomation.standalone/data`.
+Do not run both app variants against the same JD conversations simultaneously.
+To inspect an installation without starting capture or opening customer data,
+run its executable with `JD_INSTALLATION_CHECK=1`; it reports the resolved
+resource/data paths and checks that the bundled media tools launch.
+
 ## RAG backend
 
 The backend loads curated customer-service cards and supporting source chunks. It provides lexical retrieval immediately, optional FAISS vector retrieval using OpenAI embeddings, and structured Simplified-Chinese reply drafts. Desktop delivery remains guarded by exact JD customer verification.

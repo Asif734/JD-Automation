@@ -122,6 +122,34 @@ void main() {
     expect(await retriever.modelFactsFor({}), isEmpty);
   });
 
+  test('all dot-matrix packaging uses sheets and confirmed AK80 means AK890',
+      () async {
+    final retriever = LocalKnowledgeRetriever(
+        Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'),
+        semanticScorer: _NoSemanticScores());
+    for (final model in ['TD630', 'TG890', 'TH880', 'AK890', 'AK80']) {
+      final records = await retriever.retrieve(
+          '有送纸吗\nExact product model: $model',
+          currentQuestion: '有送纸吗',
+          limit: 8);
+      expect(records.map((record) => record['id']),
+          contains('dot_matrix_all_models_two_free_test_sheets_20261010'),
+          reason: model);
+      expect(records.map((record) => record['reply_template']).join(),
+          contains('2张测试纸'),
+          reason: model);
+    }
+    final pinned = await retriever.modelFactsFor({'AK80'});
+    expect(pinned.map((record) => record['id']),
+        contains('ak80_confirmed_ak890_package_correction_20261010'));
+    expect(pinned.map((record) => record['reply_template']).join(),
+        contains('指AK890'));
+    expect(await retriever.modelFactsFor({'AK81'}), isEmpty);
+    final thermal = await retriever.retrieve('TP874有送纸吗', limit: 8);
+    expect(thermal.map((record) => record['id']),
+        isNot(contains('dot_matrix_all_models_two_free_test_sheets_20261010')));
+  });
+
   test(
       'data mirrors agree and no retrieved packaging card contradicts two sheets',
       () async {

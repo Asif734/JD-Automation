@@ -36,7 +36,7 @@ while [ "\$#" -gt 0 ]; do
 done
 cat >/dev/null
 printf '%s\n' "\$model" >> "${modelLog.path}"
-if [ "\$model" = 'gpt-5.6-sol' ]; then
+if [ "\$model" = 'gpt-6.1-sol' ]; then
   printf '%s\n' '{"type":"error","message":"Selected model is at capacity. Please try a different model."}'
   exit 1
 fi
@@ -75,7 +75,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"fallback-thread"}'
     expect(draft.model, 'gpt-5.6-luna');
     expect(
       (await modelLog.readAsLines()),
-      ['gpt-5.6-sol', 'gpt-5.6-sol', 'gpt-5.6-luna'],
+      ['gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-5.6-luna'],
     );
   });
 

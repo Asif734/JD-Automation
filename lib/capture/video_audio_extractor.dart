@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import '../runtime/app_runtime.dart';
 
 class ExtractedVideoAudio {
   const ExtractedVideoAudio({
@@ -109,6 +110,8 @@ class VideoAudioExtractor {
   }
 
   Future<String> _findExecutable(String name) async {
+    final bundled = await AppRuntime.bundledTool(name);
+    if (bundled != null) return bundled;
     for (final candidate in [
       '/opt/homebrew/bin/$name',
       '/usr/local/bin/$name',

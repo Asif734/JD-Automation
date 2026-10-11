@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
+import '../runtime/app_runtime.dart';
 
 class ExtractedVideoFrames {
   const ExtractedVideoFrames({
@@ -93,6 +94,8 @@ class VideoFrameExtractor {
   }
 
   Future<String> _findFfmpeg() async {
+    final bundled = await AppRuntime.bundledTool('ffmpeg');
+    if (bundled != null) return bundled;
     for (final candidate in const [
       '/opt/homebrew/bin/ffmpeg',
       '/usr/local/bin/ffmpeg',

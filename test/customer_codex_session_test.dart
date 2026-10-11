@@ -4,6 +4,23 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:jd_automation/codex/customer_codex_session.dart';
 
 void main() {
+  test('rolls over long model threads while retaining delivered history', () {
+    final messages = <Map<String, dynamic>>[
+      {'id': 'q', 'direction': 'incoming', 'body': 'TD630?'},
+      {'id': 'a', 'direction': 'outgoing', 'body': 'Use USB.'},
+      {'id': 'q2', 'direction': 'incoming', 'body': 'Which driver?'},
+    ];
+    final session = CustomerCodexSession(
+        threadId: 'long-thread',
+        model: 'gpt-6.1-sol',
+        historyCount: 1,
+        historyFingerprint: CustomerCodexSession.fingerprint(messages.take(1)),
+        lastReply: 'Use USB.',
+        updatedAt: DateTime.now(),
+        turnCount: 4);
+    expect(session.canResume(messages, 'gpt-6.1-sol'), isFalse);
+    expect(messages, hasLength(3));
+  });
   test('resumes only after the prior reply is actually in delivered history',
       () async {
     final directory = await Directory.systemTemp.createTemp('jd_session_test_');

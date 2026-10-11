@@ -63,7 +63,7 @@ void main() {
         (await (await database.database).query('generated_drafts')).single;
     created = DateTime.fromMillisecondsSinceEpoch(row['created_at_ms']! as int);
     await database.markGeneratedDraftDeliveryFailure(
-        userId: 'customer', error: 'send_unconfirmed', deliveryUnknown: true);
+        userId: 'customer', error: 'send_unconfirmed');
     await database.saveCapture(capture([
       CapturedMessage(
           stableId: 'later',

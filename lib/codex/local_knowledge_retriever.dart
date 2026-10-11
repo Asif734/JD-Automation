@@ -19,10 +19,14 @@ class LocalKnowledgeRetriever {
       _cache = {};
 
   Future<List<Map<String, Object?>>> retrieve(String query,
-      {int limit = 5, bool? packageContentsQuery}) async {
+      {int limit = 5,
+      bool? packageContentsQuery,
+      String? currentQuestion}) async {
     final records = await _loadedRecords();
     return _retrieveFromRecords(query, records,
-        limit: limit, packageContentsQuery: packageContentsQuery);
+        limit: limit,
+        packageContentsQuery: packageContentsQuery,
+        currentQuestion: currentQuestion);
   }
 
   /// Opt-in, reviewed JD model facts remain visible regardless of phrasing.
@@ -66,12 +70,18 @@ class LocalKnowledgeRetriever {
 
   Future<List<Map<String, Object?>>> _retrieveFromRecords(
       String query, List<Map<String, dynamic>> records,
-      {required int limit, bool? packageContentsQuery}) async {
+      {required int limit,
+      bool? packageContentsQuery,
+      String? currentQuestion}) async {
     final packageQuery =
         packageContentsQuery ?? hasPackageContentsIntent(query);
+    final modelQuery = RegExp(r'^Exact product model:\s*(.+)$', multiLine: true)
+            .firstMatch(query)
+            ?.group(1) ??
+        query;
     final queryModels =
         RegExp(r'\b[a-z]{1,5}[ -]?\d{2,5}[a-z]{0,3}\b', caseSensitive: false)
-            .allMatches(query)
+            .allMatches(modelQuery)
             .map((match) =>
                 match.group(0)!.toLowerCase().replaceAll(RegExp(r'[ -]'), ''))
             .toSet();
@@ -90,9 +100,25 @@ class LocalKnowledgeRetriever {
       }
     }
     final scored = <({double score, Map<String, dynamic> record})>[];
+    final expandedQuery =
+        _expandEnglishTerms(query, packageQuery: packageQuery);
+    final expandedQuestion = currentQuestion == null
+        ? null
+        : _expandEnglishTerms(currentQuestion, packageQuery: packageQuery);
     for (final record in records) {
       if (!_isJdApplicable(record)) continue;
-      var score = _score(query, record, packageQuery: packageQuery);
+      final recordModels = knowledgeProductModels(record['models']);
+      // Reject a different explicit model before semantic reranking can let
+      // it occupy one of the small number of evidence slots.
+      if (queryModels.isNotEmpty &&
+          recordModels.isNotEmpty &&
+          recordModels.intersection(queryModels).isEmpty) {
+        continue;
+      }
+      var score = _score(expandedQuery, record);
+      if (expandedQuestion != null) {
+        score += 3 * _score(expandedQuestion, record);
+      }
       if (packageQuery && isPackageContentsRecord(record)) {
         final models = knowledgeProductModels(record['models']);
         final families = knowledgeProductFamilies(record);
@@ -129,7 +155,10 @@ class LocalKnowledgeRetriever {
     final candidates =
         scored.take(limit > 35 ? limit : 35).toList(growable: false);
     final semanticScores = await _semanticScorer.score(
-        query, candidates.map((item) => item.record).toList(growable: false));
+        expandedQuestion == null
+            ? query
+            : '$expandedQuestion ${queryModels.join(' ')}',
+        candidates.map((item) => item.record).toList(growable: false));
     final hybrid = [
       for (final item in candidates)
         (
@@ -309,9 +338,7 @@ class LocalKnowledgeRetriever {
     return records;
   }
 
-  double _score(String query, Map<String, dynamic> record,
-      {required bool packageQuery}) {
-    final searchQuery = _expandEnglishTerms(query, packageQuery: packageQuery);
+  double _score(String searchQuery, Map<String, dynamic> record) {
     final normalizedQuery = _normalize(searchQuery);
     if (normalizedQuery.isEmpty) return 0;
     var score = 0.0;
@@ -457,6 +484,10 @@ class LocalKnowledgeRetriever {
       }
     }
     for (final (pattern, translation) in const [
+      (
+        r'复写|联数|[一二三四五六七八九十\d]+\s*联|\b(?:carbon(?:less)?|multipart|multi[ -]?part)\b|\b(?:[1-9]|one|two|three|four|five|six)\s*(?:copies|layers|ply|parts)\b',
+        '复写 联数 六联 1+5P'
+      ),
       (r'\bdate\b', '日期'),
       (r'\byear\b', '年份'),
       (r'\btime\b', '时间'),

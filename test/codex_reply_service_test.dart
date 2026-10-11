@@ -52,7 +52,7 @@ void main() {
   });
 
   test('creates a durable read-only session with structured output', () {
-    expect(service.timeout, isNull);
+    expect(service.timeout, const Duration(seconds: 90));
     final arguments = service.buildArguments(
       outputPath: '${root.path}/reply.json',
       imagePaths: const ['/tmp/customer image.png'],
@@ -62,7 +62,7 @@ void main() {
     expect(arguments, contains('--json'));
     expect(arguments, contains('--ignore-user-config'));
     expect(arguments, contains('--skip-git-repo-check'));
-    expect(arguments, containsAllInOrder(['--model', 'gpt-5.6-sol']));
+    expect(arguments, containsAllInOrder(['--model', 'gpt-6.1-sol']));
     expect(arguments,
         containsAllInOrder(['--config', 'model_reasoning_effort="low"']));
     expect(
@@ -191,7 +191,7 @@ void main() {
     final draft = service.parseResponse(response);
     expect(draft.reply, contains('您好'));
     expect(draft.confidence, 0.98);
-    expect(draft.model, 'gpt-5.6-sol');
+    expect(draft.model, 'gpt-6.1-sol');
   });
 
   test('records the model actually selected for a fallback reply', () {
@@ -389,6 +389,8 @@ void main() {
     expect(hasProductFeatureIntent('TP730说明书在哪里？'), isTrue);
     expect(hasProductFeatureIntent('Tell me about TP730'), isTrue);
     expect(hasProductFeatureIntent('My TP874 is not connecting'), isFalse);
+    expect(hasProductFeatureIntent('打4联可以的吧'), isTrue);
+    expect(hasProductFeatureIntent('Can it print four copies?'), isTrue);
 
     final tp730 = verifiedCatalogRowsForModels(catalog, {'tp730'});
     expect(
@@ -1060,6 +1062,59 @@ void main() {
     expect(activeProductModels(messages), {'tp874'});
   });
 
+  test('a transfer welcome preserves the customer-confirmed product', () {
+    expect(
+        activeProductModels([
+          {'direction': 'incoming', 'body': '我的打印机是TD630'},
+          {
+            'direction': 'outgoing',
+            'sender': 'jd-transfer-welcome-v1',
+            'body': LocalReplyRouter.transferWelcome
+          },
+          {'direction': 'incoming', 'body': '打4联可以的吧'},
+        ]),
+        {'td630'});
+  });
+
+  test('prompt conversation excludes raw responses but retains media evidence',
+      () {
+    final compact = compactConversationMessage({
+      'id': 'reply-one',
+      'direction': 'outgoing',
+      'body': 'Use USB.',
+      'reply_metadata': {
+        'raw_response': {'reply': 'Use USB.', 'reason': 'audit'}
+      },
+      'media': [
+        {
+          'type': 'image',
+          'path': '/tmp/photo.png',
+          'description': 'Paper thickness lever at 6.',
+          'original_name': 'irrelevant'
+        }
+      ],
+    });
+    expect(compact['body'], 'Use USB.');
+    expect(compact, isNot(contains('reply_metadata')));
+    expect((compact['media'] as List).single['description'],
+        'Paper thickness lever at 6.');
+  });
+
+  test('four-copy retrieval outranks old driver topics and other models',
+      () async {
+    final records = await LocalKnowledgeRetriever(
+      Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'),
+    ).retrieve('驱动用哪种\n是全新的吗\n打4联可以的吧\nExact product model: TD630',
+        currentQuestion: '打4联可以的吧', limit: 5);
+    expect(records.map((record) => record['id']),
+        contains('dot_matrix_copy_capacity'));
+    final capacity = records
+        .firstWhere((record) => record['id'] == 'dot_matrix_copy_capacity');
+    expect(capacity['reply_template'], contains('六联'));
+    expect(records.map((record) => record['id']),
+        isNot(contains('thermal_win11_video')));
+  });
+
   test('model-free product change clears inherited product memory', () {
     final messages = <Map<String, dynamic>>[
       {'direction': 'incoming', 'body': 'tell me about TP874'},
@@ -1392,8 +1447,7 @@ void main() {
     expect(answer, isNot(contains('未确认')));
   });
 
-  test('routes USB phone support without requiring the Grozziie app',
-      () async {
+  test('routes USB phone support without requiring the Grozziie app', () async {
     final retriever = LocalKnowledgeRetriever(
         Directory('${Directory.current.path}/格志京东客服知识库-2026-10-04'));
 

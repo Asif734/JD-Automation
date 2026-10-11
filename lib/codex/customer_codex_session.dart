@@ -15,6 +15,7 @@ class CustomerCodexSession {
     required this.historyFingerprint,
     required this.lastReply,
     required this.updatedAt,
+    this.turnCount = 1,
   });
 
   final String threadId;
@@ -23,11 +24,14 @@ class CustomerCodexSession {
   final String historyFingerprint;
   final String lastReply;
   final DateTime updatedAt;
+  final int turnCount;
 
   bool canResume(List<Map<String, dynamic>> messages, String currentModel) {
     if (threadId.isEmpty ||
         model != currentModel ||
+        turnCount >= 4 ||
         historyCount > messages.length ||
+        messages.length - historyCount > 24 ||
         DateTime.now().difference(updatedAt) > const Duration(days: 1)) {
       return false;
     }
@@ -62,6 +66,7 @@ class CustomerCodexSession {
         'history_fingerprint': historyFingerprint,
         'last_reply': lastReply,
         'updated_at': updatedAt.toUtc().toIso8601String(),
+        'turn_count': turnCount,
       };
 
   static CustomerCodexSession? fromJson(Object? value) {
@@ -76,6 +81,7 @@ class CustomerCodexSession {
       historyFingerprint: value['history_fingerprint']?.toString() ?? '',
       lastReply: value['last_reply']?.toString() ?? '',
       updatedAt: updatedAt,
+      turnCount: value['turn_count'] is int ? value['turn_count'] as int : 4,
     );
   }
 }

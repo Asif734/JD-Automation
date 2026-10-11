@@ -27,3 +27,18 @@ String chooseHoldingReply(String latestCustomerText, {Random? random}) {
   return chineseHoldingReplies[
       (random ?? Random()).nextInt(chineseHoldingReplies.length)];
 }
+
+/// Vision may miss the seller label and append our fixed holding bubble to
+/// the buyer's text. Preserve explicit quotations of a holding message.
+String stripAppendedHoldingReply(String body) {
+  if (RegExp('[「」“”"\u0027]').hasMatch(body)) return body;
+  var end = body.length;
+  for (final holding in [
+    ...chineseHoldingReplies,
+    '请稍等，我正在核对您刚发来的消息。',
+  ]) {
+    final index = body.indexOf(holding);
+    if (index >= 0 && index < end) end = index;
+  }
+  return body.substring(0, end).trim();
+}

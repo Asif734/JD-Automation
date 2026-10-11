@@ -17,6 +17,8 @@
 
 2026-10-07 包装修订：`td630_td630g_standard_package_kb.md` 明确 TD630、TD630G 每台标准免费附带 2 张测试纸。卡片 `td630_td630g_standard_package_two_free_test_sheets` 使用 `always_include_for_matching_models=true`：Flutter 将低风险、active、JD、允许自动回答的此类精确型号事实加入生成证据，避免问法变化或语义排序隐藏标准内容。卡片、JSON/JSONL、源分块、高频路由和备用索引应保持同步。
 
+2026-10-10 包装范围补充：商家确认所有针式打印机每台均免费附带 **2张测试纸**（不是2套、2包或2卷），不限于TD630系列。`dot_matrix_standard_test_paper_kb.md` 同时记录本次客户的AK80已确认指AK890；不得将其他未知型号自动模糊匹配。外置数据包更新无需重编译应用，Flutter会检测知识文件修订并重新载入。
+
 ## 运行边界
 
 - 只有 `status=active`、`platforms=["JD"]`、`current_platform="JD"` 的卡片可进入客服检索。

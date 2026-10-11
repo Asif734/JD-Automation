@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../domain/capture_models.dart';
+import '../runtime/app_runtime.dart';
 import 'conversation_file_store.dart';
 
 /// SQLite contains the durable processing, delivery, and SLA state. Messages
@@ -45,15 +46,23 @@ class CaptureDatabase {
       ),
     );
     _database = database;
-    // Repair only transient states introduced by that withdrawn build.
-    // Never retype an uncertain send; its existing JD bubble owns the retry.
+    // Repair every legacy delivery freeze into serial retry work. A generated
+    // reply must never remain outside the delivery queue indefinitely.
     if ((await database.rawQuery(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='generated_drafts'"))
         .isNotEmpty) {
-      await database.rawUpdate(
-          "UPDATE generated_drafts SET delivery_state='retry', retry_at_ms=0 WHERE delivery_state='failed_offline'");
-      await database.rawUpdate(
-          "UPDATE generated_drafts SET delivery_state='delivery_unknown', retry_at_ms=NULL WHERE delivery_state IN ('sending','retry_existing')");
+      await database.rawUpdate('''UPDATE generated_drafts
+        SET delivery_state='retry', retry_at_ms=0
+        WHERE delivery_state IN
+          ('failed_offline','delivery_unknown','sending','retry_existing')''');
+    }
+    if ((await database.rawQuery(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sla_fallbacks'"))
+        .isNotEmpty) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await database.rawUpdate('''UPDATE sla_fallbacks
+        SET state='pending', due_at_ms=?, updated_at_ms=?
+        WHERE state='delivery_unknown' ''', [now, now]);
     }
     if (!_legacyDraftsPurged) {
       await (await history).purgeLegacyUnsentDrafts();
@@ -466,7 +475,9 @@ class CaptureDatabase {
       // Keep its uncertain draft until a positive receipt reconciles it.
       final uncertain = await db.query('generated_drafts',
           columns: ['reply'],
-          where: "user_id=? AND delivery_state='delivery_unknown'",
+          where: '''user_id=? AND (
+            delivery_state='delivery_unknown' OR
+            (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
           whereArgs: [userId],
           limit: 1);
       if (uncertain.isNotEmpty &&
@@ -1025,21 +1036,6 @@ class CaptureDatabase {
     );
   }
 
-  Future<void> markSlaFallbackDeliveryUnknown({
-    required String userId,
-    required String messageId,
-  }) async {
-    await (await database).update(
-      'sla_fallbacks',
-      {
-        'state': 'delivery_unknown',
-        'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
-      },
-      where: 'user_id = ? AND message_id = ?',
-      whereArgs: [userId, messageId],
-    );
-  }
-
   Future<bool> markSlaFallbackSent({
     required String userId,
     required String messageId,
@@ -1216,15 +1212,13 @@ class CaptureDatabase {
   Future<void> markGeneratedDraftDeliveryFailure({
     required String userId,
     required String error,
-    required bool deliveryUnknown,
     Duration retryDelay = const Duration(seconds: 10),
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await (await database).rawUpdate('''UPDATE generated_drafts
-      SET delivery_state=?,delivery_attempts=delivery_attempts+1,
+      SET delivery_state='retry',delivery_attempts=delivery_attempts+1,
           retry_at_ms=?,last_error=? WHERE user_id=?''', [
-      deliveryUnknown ? 'delivery_unknown' : 'retry',
-      deliveryUnknown ? null : now + retryDelay.inMilliseconds,
+      now + retryDelay.inMilliseconds,
       error,
       userId,
     ]);
@@ -1630,7 +1624,9 @@ class CaptureDatabase {
       return false;
     }
     final rows = await (await database).query('generated_drafts',
-        where: "user_id=? AND delivery_state='delivery_unknown'",
+        where: '''user_id=? AND (
+          delivery_state='delivery_unknown' OR
+          (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
         whereArgs: [userId],
         limit: 1);
     if (rows.isEmpty) return false;
@@ -1667,7 +1663,9 @@ class CaptureDatabase {
     final rows = await db.query('generated_drafts',
         where: expectedUnconfirmedCreatedAt == null
             ? 'user_id = ? AND reply = ?'
-            : "user_id = ? AND reply = ? AND delivery_state='delivery_unknown' AND created_at_ms=?",
+            : '''user_id = ? AND reply = ? AND created_at_ms=? AND (
+                delivery_state='delivery_unknown' OR
+                (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
         whereArgs: [
           userId,
           reply,
@@ -1719,7 +1717,9 @@ class CaptureDatabase {
       final deleted = await txn.delete('generated_drafts',
           where: expectedUnconfirmedCreatedAt == null
               ? 'user_id = ?'
-              : "user_id=? AND reply=? AND delivery_state='delivery_unknown' AND created_at_ms=?",
+              : '''user_id=? AND reply=? AND created_at_ms=? AND (
+                  delivery_state='delivery_unknown' OR
+                  (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
           whereArgs: expectedUnconfirmedCreatedAt == null
               ? [userId]
               : [userId, reply, expectedUnconfirmedCreatedAt]);
@@ -1826,8 +1826,10 @@ class CaptureDatabase {
     // Development builds live below <project>/build/macos/...; walk upward to
     // the Flutter project so `open .../jd_automation.app` still writes here.
     for (final startingPoint in <Directory>[
-      Directory.current,
-      File(Platform.resolvedExecutable).parent,
+      if (!AppRuntime.standalone) ...[
+        Directory.current,
+        File(Platform.resolvedExecutable).parent,
+      ],
     ]) {
       var candidate = startingPoint.absolute;
       while (candidate.parent.path != candidate.path) {

@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 import '../domain/capture_models.dart';
+import '../codex/holding_replies.dart';
 import '../platform/macos_capture_adapter.dart';
+import 'ocr_image_candidate_selector.dart';
 
 /// Converts one OCR diagnostic scan of an *open* Qianniu conversation into a
 /// conservative capture candidate. All visible incoming and seller-authored
@@ -26,6 +28,45 @@ class OcrCaptureExtractor {
 
   CapturedConversation? extract(OcrInspection inspection) =>
       analyze(inspection).capture;
+
+  /// Start generation from clear text on the independent signal scan. Any
+  /// customer media or uncertain body still goes through the full capture.
+  CapturedConversation? verifiedFastTextCapture(OcrInspection inspection) {
+    final result = const OcrCaptureExtractor(bodyConfidenceThreshold: .8)
+        .analyze(inspection);
+    final capture = result.capture;
+    if (capture == null ||
+        !result.latestVisibleSenderIsIncoming ||
+        !result.latestIncomingHasText ||
+        result.transferNoticeVisible ||
+        result.latestIncomingSentAt == null ||
+        const OcrImageCandidateSelector()
+            .select(inspection, capture.customerName, includeTextDense: true)
+            .isNotEmpty) {
+      return null;
+    }
+    final latest = capture.messages.lastOrNull;
+    if (latest?.direction != 'incoming' ||
+        latest?.sentAt != result.latestIncomingSentAt) {
+      return null;
+    }
+    // Do not send a partial sentence when only some wrapped lines meet the
+    // fast-path threshold. The accurate scan owns mixed-confidence bodies.
+    final ordinary = analyze(inspection).capture?.messages.lastOrNull;
+    if (ordinary?.stableId != latest?.stableId) return null;
+    final messages = capture.messages.reversed
+        .takeWhile((message) => message.direction == 'incoming')
+        .toList()
+        .reversed
+        .toList(growable: false);
+    return CapturedConversation(
+      stableKey: capture.stableKey,
+      customerName: capture.customerName,
+      customerExternalId: capture.customerExternalId,
+      messages: messages,
+      capturedAt: capture.capturedAt,
+    );
+  }
 
   OcrExtractionAttempt analyze(OcrInspection inspection,
       {List<OcrVisualRegion> excludedMediaRegions = const []}) {
@@ -149,7 +190,10 @@ class OcrCaptureExtractor {
           return byY != 0 ? byY : left.x.compareTo(right.x);
         });
       if (bodies.isEmpty) continue;
-      final body = _assembleBubbleText(bodies);
+      final assembled = _assembleBubbleText(bodies);
+      final body = label.direction == 'incoming'
+          ? stripAppendedHoldingReply(assembled)
+          : assembled;
       if (body.isEmpty) continue;
       // Only a receipt on this seller bubble proves a formerly uncertain send.
       // It is not required for ordinary reply generation or normal sending.

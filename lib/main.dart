@@ -18,13 +18,19 @@ import 'codex/holding_replies.dart';
 import 'codex/local_reply_router.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
+import 'runtime/app_runtime.dart';
+import 'runtime/installation_check.dart';
 import 'storage/capture_database.dart';
 
 typedef _RunVideoProcessingUnlocked = Future<CapturedMessage?> Function(
     Future<CapturedMessage?> Function() work);
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (Platform.environment['JD_INSTALLATION_CHECK'] == '1') {
+    await checkInstallation();
+    return;
+  }
   runApp(const JdAutomationApp());
 }
 
@@ -33,7 +39,7 @@ class JdAutomationApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'JD Automation',
+        title: AppRuntime.appName,
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           colorSchemeSeed: const Color(0xfff26b21),
@@ -63,7 +69,7 @@ class _CaptureHomeState extends State<CaptureHome> {
   // A holding message must not sit behind a full 90-second OCR/media pass.
   static const _fallbackInspectionTimeout = Duration(seconds: 4);
   static const _scanInterval = Duration(seconds: 2);
-  static const _batchCollectionWindow = Duration(milliseconds: 2500);
+  static const _batchCollectionWindow = Duration(milliseconds: 1000);
   static const _draftFailureRetryDelay = Duration(seconds: 10);
   static const _deliveryFailureRetryDelay = Duration(seconds: 10);
   late final MacOSCaptureAdapter _adapter;
@@ -611,13 +617,31 @@ class _CaptureHomeState extends State<CaptureHome> {
           _handledIncomingSenderKeys[customer] == senderKey) {
         return;
       }
-      final recovery = _unreadRecovery[customer];
-      if (recovery != null) {
-        recovery.latestIncomingSenderKey = senderKey;
-        return;
+      if (_unreadRecovery[customer] == null) {
+        await _beginUnreadRecovery(customer, 0, detectedAt: incomingAt);
       }
-      await _beginUnreadRecovery(customer, 0, detectedAt: incomingAt);
-      _unreadRecovery[customer]?.latestIncomingSenderKey = senderKey;
+      final recovery = _unreadRecovery[customer];
+      recovery?.latestIncomingSenderKey = senderKey;
+      final capture =
+          const OcrCaptureExtractor().verifiedFastTextCapture(inspection);
+      if (capture != null) {
+        final inserted = await _database.saveCapture(capture);
+        if (inserted > 0) {
+          if (recovery != null) {
+            await _database.capSlaFallbackDue(
+                userId: customer,
+                dueAt: recovery.detectedAt
+                    .add(UnreadCaptureRecovery.holdingAfter));
+            if (recovery.holdingSentAt case final sentAt?) {
+              await _database.acknowledgeUncapturedHolding(
+                  userId: customer, sentAt: sentAt);
+            }
+            _finishUnreadRecovery(customer);
+          }
+          _scheduleDraftGeneration(customer, newEvidence: true);
+          await _coordinator.refresh();
+        }
+      }
     } catch (_) {
       // The full capture and sidebar signal paths remain available.
     } finally {
@@ -938,13 +962,9 @@ class _CaptureHomeState extends State<CaptureHome> {
         }
       });
     } on PlatformException catch (error) {
-      // The send may have succeeded even if JD did not confirm it. Never
-      // retry an uncertain send and risk a duplicate customer message.
-      if (error.code == 'send_unconfirmed') {
-        _finishUnreadRecovery(recovery.customer);
-      } else {
-        _retryUnreadRecoveryNotice(recovery, resend: resend);
-      }
+      // A notice that was not confirmed returns to its retry timer instead of
+      // permanently resolving this recovery without a customer-visible send.
+      _retryUnreadRecoveryNotice(recovery, resend: resend);
       if (mounted) setState(() => _error = error);
     } catch (error) {
       _retryUnreadRecoveryNotice(recovery, resend: resend);
@@ -1099,19 +1119,12 @@ class _CaptureHomeState extends State<CaptureHome> {
             setState(() => _diagnostics =
                 'Sent a holding message to ${job.userId}; the final answer remains queued.');
           }
-        } on PlatformException catch (error) {
-          if (error.code == 'send_unconfirmed') {
-            await _database.markSlaFallbackDeliveryUnknown(
-              userId: job.userId,
-              messageId: job.messageId,
-            );
-          } else {
-            await _database.releaseSlaFallback(
-              userId: job.userId,
-              messageId: job.messageId,
-            );
-            unawaited(_scheduleSlaFallback(job.userId));
-          }
+        } on PlatformException catch (_) {
+          await _database.releaseSlaFallback(
+            userId: job.userId,
+            messageId: job.messageId,
+          );
+          unawaited(_scheduleSlaFallback(job.userId));
           rethrow;
         } catch (_) {
           await _database.releaseSlaFallback(
@@ -1129,7 +1142,9 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<void> _runAutoCaptureCycle() async {
-    if (!_autoCaptureRunning || _autoCaptureBusy) return;
+    if (!_autoCaptureRunning || _autoCaptureBusy || _deliveryWorkerRunning) {
+      return;
+    }
     _autoCaptureBusy = true;
     final previousUiOperation = _jdUiTail;
     var releaseUiOperation = Completer<void>();
@@ -1526,18 +1541,15 @@ class _CaptureHomeState extends State<CaptureHome> {
         reply: welcome,
         mediaPaths: const [],
       );
-    } on PlatformException catch (error) {
-      // Every native error except send_unconfirmed occurs before the physical
-      // Send click. Release those reservations so a still-visible transfer is
-      // retried on the next scan. An unconfirmed click remains reserved to
-      // avoid greeting the customer twice.
-      if (error.code != 'send_unconfirmed') {
-        await _database.releaseTransferWelcomeReservation(
-          userId: userId,
-          eventKey: eventKey,
-        );
-        _visibleTransferWelcomes.remove(userId);
-      }
+    } on PlatformException catch (_) {
+      // A failed or ambiguous welcome must not leave this conversation
+      // permanently reserved. Release it so the visible transfer can retry on
+      // a later scan; the operator has chosen progress over a permanent freeze.
+      await _database.releaseTransferWelcomeReservation(
+        userId: userId,
+        eventKey: eventKey,
+      );
+      _visibleTransferWelcomes.remove(userId);
       rethrow;
     }
     await _database.appendAutomatedNoticeSent(userId: userId, reply: welcome);
@@ -1581,13 +1593,12 @@ class _CaptureHomeState extends State<CaptureHome> {
     } on CodexGenerationCancelled {
       // A later saved customer message owns the queued replacement turn.
     } on CodexGenerationTimedOut {
-      final messageId = _activeDraftMessageIds[userId];
-      final job = await _database.slaFallbackJob(userId);
-      if (job != null && job.messageId == messageId) {
-        _slaFallbackTimers.remove(userId)?.cancel();
-        await _sendSlaFallback(job);
-      }
       _scheduleDraftRetry(userId);
+      // The holding-message sender must not retain this generation worker.
+      // Its original 20-second deadline stays independent of the watchdog.
+      unawaited(_scheduleSlaFallback(userId).catchError((Object error) {
+        if (mounted) setState(() => _error = error);
+      }));
     } on CodexReplyException catch (error) {
       if (isCodexModelCapacityError(error.message)) {
         if (mounted) {
@@ -1827,27 +1838,18 @@ class _CaptureHomeState extends State<CaptureHome> {
             await _withJdUiOperation(() =>
                 _sendAutomaticallyUnlocked(delivery.userId, delivery.draft));
           } catch (error) {
-            final deliveryUnknown =
-                error is PlatformException && error.code == 'send_unconfirmed';
+            // Every retained generated reply returns to the serial delivery
+            // queue. A matching observed receipt can reconcile an ambiguous
+            // click before the retry fires, but no delivery state may freeze
+            // this customer's later work indefinitely.
             await _database.markGeneratedDraftDeliveryFailure(
               userId: delivery.userId,
               error: error.toString(),
-              deliveryUnknown: deliveryUnknown,
               retryDelay: _deliveryFailureRetryDelay,
             );
-            if (deliveryUnknown) {
-              await _database.createHumanReviewTicket(
-                userId: delivery.userId,
-                customerRequest: delivery.draft.reply,
-                reason:
-                    'JD clicked Send but did not confirm delivery. Verify the conversation before any retry.',
-              );
-              await _refreshTickets();
-            } else {
-              _deliveryRetryTimer?.cancel();
-              _deliveryRetryTimer =
-                  Timer(_deliveryFailureRetryDelay, _requestDelivery);
-            }
+            _deliveryRetryTimer?.cancel();
+            _deliveryRetryTimer =
+                Timer(_deliveryFailureRetryDelay, _requestDelivery);
             if (mounted) setState(() => _error = error);
           }
           await _coordinator.refresh();
@@ -1942,7 +1944,7 @@ class _CaptureHomeState extends State<CaptureHome> {
     } catch (_) {
       if (mounted) {
         setState(() => _diagnostics =
-            'Automatic send to $userId failed. It was not retried to avoid duplicate delivery.');
+            'Automatic send to $userId failed; the reply remains queued for retry.');
       }
       rethrow;
     }
@@ -2018,7 +2020,9 @@ class _CaptureHomeState extends State<CaptureHome> {
     var failures = 0;
     final inspectedMediaSources = <String>[];
     final confirmedMediaRegions = <OcrVisualRegion>[];
-    if (_unreadRecovery[customer] case final recovery?) {
+    if ((!extraction.latestIncomingHasText || imageCandidates.isNotEmpty) &&
+        _unreadRecovery[customer] != null) {
+      final recovery = _unreadRecovery[customer]!;
       try {
         final cached = await _captureDirectCachedMedia(
           customer,
@@ -2543,7 +2547,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('JD Automation',
+                Text(AppRuntime.appName,
                     style:
                         TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
                 Text('Customer communication console',
