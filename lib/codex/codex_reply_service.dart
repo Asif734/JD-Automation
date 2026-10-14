@@ -44,25 +44,51 @@ Set<String> codexHumanTransferRequestIds(AiDraft draft) {
   return ids.whereType<String>().where((id) => id.isNotEmpty).toSet();
 }
 
-/// Only the completed two-request transfer flow may move a JD conversation.
-/// Other human-review reasons (refunds, technical review, delivery uncertainty,
-/// and similar cases) must remain in the existing review queue.
+/// Only an approved transfer flow may move a JD conversation. This includes
+/// the completed two-request colleague flow and the refund exception after
+/// troubleshooting is refused or exhausted. Other review reasons stay queued.
 bool isExplicitHumanTransfer(AiDraft draft) {
   if (!draftRequiresHumanReview(draft)) return false;
   try {
     final raw = jsonDecode(draft.rawJson) as Map<String, dynamic>;
     final triggers = (raw['risk_triggers'] as List<Object?>? ?? const [])
         .map((value) => value.toString());
-    return triggers.contains('explicit_human_request');
+    return triggers.contains('explicit_human_request') ||
+        triggers.contains('refund_transfer_required');
   } on FormatException {
     return false;
   }
 }
 
 bool isRefundRequest(String text) => RegExp(
-      r'\brefund(?:ed|ing|s)?\b|退款|退钱|仅退款',
+      r'\brefund(?:ed|ing|s)?\b|\breturn(?:ed|ing|s)?\b|\bsend (?:it|this|the (?:item|product)) back\b|退款|退钱|仅退款|退货|退换货',
       caseSensitive: false,
     ).hasMatch(text);
+
+bool isRefundProblemClarification(String text) => RegExp(
+      r'what problem are you having with the product|what(?:\x27s| is) wrong with (?:the|your) product|产品遇到了什么问题|商品遇到了什么问题|具体是什么问题',
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool customerRefusesRefundTroubleshooting(String text) => RegExp(
+      r"\b(?:don['’]?t|do not|no need to|won['’]?t|will not|refuse to) (?:troubleshoot|check|diagnose|try|repair)\b|\b(?:just|only) (?:give me a )?(?:refund|return)\b|\b(?:refund|return) (?:only|now)\b|不想(?:排查|处理|解决|维修)|不要(?:排查|处理|解决|维修)|拒绝(?:排查|处理|维修)|不用(?:排查|处理|维修)|只要(?:退款|退货)|直接(?:退款|退货)|坚持(?:退款|退货)",
+      caseSensitive: false,
+    ).hasMatch(text);
+
+bool refundProblemIsExplained(String text) {
+  final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (normalized.isEmpty) return false;
+  return RegExp(
+    r"\b(?:broken|damaged|defective|faulty|jam(?:med)?|stuck|offline|error|issue|problem|fail(?:ed|ing|s)?|not working|doesn['’]?t work|won['’]?t work|cannot|can['’]?t|unable|missing|wrong|poor|bad|disconnect(?:ed|ing|s)?|not print(?:ing)?|won['’]?t print|can['’]?t print)\b|坏了|损坏|破损|故障|报错|卡纸|卡住|离线|有问题|不能|无法|没反应|不工作|不打印|打印不了|连不上|连接不上|断开|缺少|少了|错误|不清楚|偏移|歪|模糊|太淡|漏打|异响|进纸",
+    caseSensitive: false,
+  ).hasMatch(normalized);
+}
+
+bool _customerPrefersEnglish(String text) {
+  final latin = RegExp(r'[A-Za-z]').allMatches(text).length;
+  final cjk = RegExp(r'[\u3400-\u9fff]').allMatches(text).length;
+  return latin > cjk && latin >= 2;
+}
 
 bool isCustomerDissatisfiedWithSupport(String text) {
   final normalized = text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -272,7 +298,7 @@ String selectReplyRoute({
   required bool productCatalogRequested,
   required bool productFeatureRequested,
 }) {
-  if (isRefundRequest(currentTurnText)) return 'refund_review';
+  if (isRefundRequest(currentTurnText)) return 'refund_support';
   if (technicalSupportRequested) return 'technical_support';
   if (productListRequested) return 'product_list';
   if (productCatalogRequested) return 'product_recommendation';
@@ -1243,6 +1269,23 @@ class CodexReplyService {
             .lastOrNull?['body']
             ?.toString() ??
         '';
+    final messagesBeforeCurrentTurn = firstCurrentIndex < 0
+        ? const <Map<String, dynamic>>[]
+        : rawMessages.take(firstCurrentIndex).toList(growable: false);
+    final previousOutgoingText = messagesBeforeCurrentTurn
+            .where((message) => message['direction'] == 'outgoing')
+            .lastOrNull?['body']
+            ?.toString() ??
+        '';
+    final refundRequested = isRefundRequest(currentTurnText);
+    final refundClarificationAlreadyAsked =
+        isRefundProblemClarification(previousOutgoingText);
+    final refundFlowActive = refundRequested || refundClarificationAlreadyAsked;
+    final refundProblemKnownFromText =
+        latestRelevantCustomerTurns(rawMessages, limit: 4).any((message) =>
+            refundProblemIsExplained(message['body']?.toString() ?? ''));
+    final refundTroubleshootingRefused =
+        customerRefusesRefundTroubleshooting(currentTurnText);
     final packageContentsRequested =
         isPackageContentsTurn(currentTurnText, previousCustomerText);
     final recentCustomerContext = recent
@@ -1295,7 +1338,8 @@ class CodexReplyService {
     final requestedCapabilities = productFeatureRequested
         ? requestedProductCapabilities(currentTurnText)
         : const <String>{};
-    final technicalSupportRequested = technicalFollowUp;
+    final technicalSupportRequested =
+        technicalFollowUp || (refundFlowActive && refundProblemKnownFromText);
     final replyRoute = selectReplyRoute(
       currentTurnText: currentTurnText,
       technicalSupportRequested: technicalSupportRequested,
@@ -1327,6 +1371,14 @@ class CodexReplyService {
     }
     final mediaDescriptionRequested =
         images.isNotEmpty && asksForMediaDescription(currentTurnText);
+    final refundProblemKnown = refundProblemKnownFromText || images.isNotEmpty;
+    if (refundFlowActive && !refundProblemKnown) {
+      if (refundTroubleshootingRefused ||
+          (refundClarificationAlreadyAsked && refundRequested)) {
+        return _refundTransferDraft(currentTurnText);
+      }
+      return _refundProblemClarificationDraft(currentTurnText);
+    }
     // Text-only greetings may use the deterministic local router. Any buyer
     // image must reach Codex so the visual content is actually inspected.
     if (images.isEmpty) {
@@ -1451,6 +1503,8 @@ class CodexReplyService {
       'image_analysis_required': images.isNotEmpty,
       'customer_requested_media_description': mediaDescriptionRequested,
       'reply_route': replyRoute,
+      'refund_flow_active': refundFlowActive,
+      'refund_problem_known': refundProblemKnown,
       'product_catalog_requested': productCatalogRequested,
       'product_feature_requested': productFeatureRequested,
       'technical_support_requested': technicalSupportRequested,
@@ -1526,6 +1580,8 @@ class CodexReplyService {
           'The customer asked for a model list. Give the complete current JD catalog model list for the requested product category from product_model_feature_catalog before asking about preferences. Current is a catalog status, not a stock promise. If the customer also specified hard requirements, clearly separate the full category list from models verified to meet every requirement; never imply unverified models are compatible.',
         if (technicalSupportRequested)
           'This is technical support. Infer the most likely cause from the exact symptoms and evidence, then give the best supported solution in a sensible order. Work through all matching records before concluding that no solution exists. Ask one decisive question only when it changes the next step. Request review only after safe solutions are exhausted or repair, account/order authority, or an unavailable official file is required.',
+        if (refundFlowActive && refundProblemKnown)
+          'The customer is in the refund/return support flow and has already explained a product problem. First offer the matching database-supported solution. Do not claim that a refund was recorded or submitted. Request review only if supported troubleshooting is refused or no supported solution remains.',
         if (technicalSupportRequested && secondInvestigation)
           'This is the required second investigation. Re-check every retrieved record and example against the exact symptoms, reconsider safe alternative causes and steps, and produce a concrete solution if any reliable path remains. Request review only after this second pass still cannot produce a safe next step.',
         if (images.isNotEmpty)
@@ -1711,6 +1767,11 @@ ${jsonEncode(request)}
             secondInvestigation && technicalSupportRequested,
         productFeatureRequested: productFeatureRequested,
         videoGuideRequested: videoGuideRequested,
+        refundRequested: refundRequested,
+        refundFlowActive: refundFlowActive,
+        refundProblemKnown: refundProblemKnown,
+        refundClarificationAlreadyAsked: refundClarificationAlreadyAsked,
+        refundTroubleshootingRefused: refundTroubleshootingRefused,
       );
       final photoGuardedDraft = enforceProductPhotoReviewPolicy &&
               productPhotoRequested
@@ -1950,6 +2011,11 @@ ${jsonEncode({
     bool technicalSecondInvestigationCompleted = false,
     bool productFeatureRequested = false,
     bool videoGuideRequested = false,
+    bool? refundRequested,
+    bool? refundFlowActive,
+    bool? refundProblemKnown,
+    bool refundClarificationAlreadyAsked = false,
+    bool refundTroubleshootingRefused = false,
   }) {
     if (humanTransferRequested) {
       if (!repeatedHumanTransferRequest) {
@@ -1976,14 +2042,24 @@ ${jsonEncode({
         reason: 'Customer explicitly requested human assistance.',
       );
     }
-    if (isRefundRequest(latestCustomerText)) {
-      return _forceHumanReview(
-        draft,
-        latestCustomerText,
-        chineseReply: '我已记录您的退款申请，请准备好订单信息，我们会尽快核对处理。',
-        trigger: 'refund_request',
-        reason: 'Customer requested a refund.',
-      );
+    final hasRefundRequest =
+        refundRequested ?? isRefundRequest(latestCustomerText);
+    final activeRefundFlow = refundFlowActive ?? hasRefundRequest;
+    final hasRefundProblem =
+        refundProblemKnown ?? refundProblemIsExplained(latestCustomerText);
+    if (activeRefundFlow) {
+      if (!hasRefundProblem) {
+        if (refundTroubleshootingRefused ||
+            (refundClarificationAlreadyAsked && hasRefundRequest)) {
+          return _refundTransferDraft(latestCustomerText, source: draft);
+        }
+        return _refundProblemClarificationDraft(latestCustomerText,
+            source: draft);
+      }
+      if (draftRequiresHumanReview(draft) || modelStatesNoSolution(draft)) {
+        return _refundTransferDraft(latestCustomerText, source: draft);
+      }
+      return draft;
     }
     if (isCustomerDissatisfiedWithSupport(latestCustomerText)) {
       return _forceHumanReview(
@@ -2039,6 +2115,47 @@ ${jsonEncode({
       ..['model'] = draft.model;
     return AiDraft.fromJson(raw.cast<String, Object?>(),
         mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+  }
+
+  AiDraft _refundProblemClarificationDraft(String customerText,
+      {AiDraft? source}) {
+    final raw = source == null
+        ? <String, dynamic>{
+            'confidence': 1.0,
+            'used_record_ids': <String>[],
+            'image_descriptions': <Object?>[],
+          }
+        : jsonDecode(source.rawJson) as Map<String, dynamic>;
+    raw
+      ..['reply'] = _customerPrefersEnglish(customerText)
+          ? 'What problem are you having with the product? I’ll first check whether we can solve it for you.'
+          : '请问产品遇到了什么问题？我先帮您排查是否可以解决。'
+      ..['decision'] = 'ask_clarification'
+      ..['required_slots'] = <String>['product_problem']
+      ..['risk_level'] = 'low'
+      ..['risk_triggers'] = <String>['refund_problem_clarification']
+      ..['human_review_required'] = false
+      ..['reason'] = null
+      ..['actions'] = <Object?>[]
+      ..['attachments'] = <Object?>[]
+      ..['auto_send_allowed'] = false
+      ..['model'] = source?.model ?? model;
+    return AiDraft.fromJson(raw.cast<String, Object?>(),
+        mediaBaseUrl: Uri.parse('http://127.0.0.1'));
+  }
+
+  AiDraft _refundTransferDraft(String customerText, {AiDraft? source}) {
+    final seed = source ?? _refundProblemClarificationDraft(customerText);
+    return _forceHumanReview(
+      seed,
+      customerText,
+      chineseReply: _customerPrefersEnglish(customerText)
+          ? 'I understand. I’ll transfer this conversation to a customer service colleague for refund or return assistance.'
+          : '明白了，我现在为您转接客服同事处理退款或退货事宜。',
+      trigger: 'refund_transfer_required',
+      reason:
+          'Refund or return handling requires a customer service colleague after troubleshooting was refused or exhausted.',
+    );
   }
 
   AiDraft _normalizeReviewWording(AiDraft draft, String customerText) {

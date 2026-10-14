@@ -19,8 +19,13 @@ import 'codex/local_reply_router.dart';
 import 'domain/capture_models.dart';
 import 'platform/macos_capture_adapter.dart';
 import 'runtime/app_runtime.dart';
+import 'runtime/accessibility_permission_monitor.dart';
+import 'runtime/app_error_state.dart';
+import 'runtime/automation_lease.dart';
 import 'runtime/installation_check.dart';
+import 'runtime/serial_delivery_worker.dart';
 import 'storage/capture_database.dart';
+import 'storage/diagnostic_log.dart';
 
 typedef _RunVideoProcessingUnlocked = Future<CapturedMessage?> Function(
     Future<CapturedMessage?> Function() work);
@@ -72,16 +77,24 @@ class _CaptureHomeState extends State<CaptureHome> {
   static const _batchCollectionWindow = Duration(milliseconds: 1000);
   static const _draftFailureRetryDelay = Duration(seconds: 10);
   static const _deliveryFailureRetryDelay = Duration(seconds: 10);
+  static const _identityEvidenceRefresh = Duration(seconds: 30);
+  static const _identityFailureQuarantine = Duration(minutes: 2);
+  static const _unreadClearConfirmation = Duration(seconds: 12);
   late final MacOSCaptureAdapter _adapter;
   late final CaptureCoordinator _coordinator;
   late final CaptureDatabase _database;
+  late final DiagnosticLog _diagnosticLog;
+  AutomationLease? _automationLease;
+  AccessibilityPermissionMonitor? _permissionMonitor;
   StreamSubscription? _updateSubscription;
   StreamSubscription? _diagnosticSubscription;
   StreamSubscription? _failedSendInspectionSubscription;
   List<ConversationSummary> _conversations = const [];
   Map<String, Object?> _status = const {};
   String _diagnostics = 'No AX inspection yet.';
-  Object? _error;
+  AppErrorState _errorState = AppErrorState();
+  Object? get _error => _errorState.value;
+  set _error(Object? value) => _errorState.value = value;
   List<ChatTransferLog> _transferLogs = const [];
   OcrInspection? _ocrInspection;
   bool _autoCaptureRunning = false;
@@ -98,6 +111,8 @@ class _CaptureHomeState extends State<CaptureHome> {
   final Map<String, Timer> _batchCollectionTimers = {};
   final Map<String, Timer> _slaFallbackTimers = {};
   Timer? _deliveryRetryTimer;
+  Timer? _deliveryRecoveryTimer;
+  bool _deliveryRecoveryBusy = false;
   final Set<String> _draftQueue = {};
   // Each active customer owns a separate Codex CLI turn. Twenty
   // workers let the normal multi-chat workload generate concurrently without
@@ -109,11 +124,12 @@ class _CaptureHomeState extends State<CaptureHome> {
   Future<void> _jdUiTail = Future<void>.value();
   int _pendingJdUiOperations = 0;
   int _priorityUiOperations = 0;
-  bool _deliveryWorkerRunning = false;
-  bool _deliveryRequested = false;
+  SerialDeliveryWorker<QueuedDelivery>? _deliveryWorker;
+  bool get _deliveryWorkerRunning => _deliveryWorker?.isRunning ?? false;
   final Map<String, int> _processingUnreadEvidence = {};
   final Map<String, int> _handledUnreadEvidence = {};
   final Map<String, DateTime> _handledUnreadAt = {};
+  final Map<String, DateTime> _unreadClearObservedAt = {};
   final Map<String, String> _handledIncomingSenderKeys = {};
   final Map<String, DateTime> _lastUnreadProbeAt = {};
   final Map<String, UnreadCaptureRecovery> _unreadRecovery = {};
@@ -121,6 +137,10 @@ class _CaptureHomeState extends State<CaptureHome> {
   final Set<String> _startingUnreadRecovery = {};
   final Map<String, Timer> _unreadHoldingTimers = {};
   final Map<String, Timer> _unreadResendTimers = {};
+  final Map<String, DateTime> _identityQuarantineUntil = {};
+  final Set<String> _reportedIdentityRepairs = {};
+  Set<String> _trustedCustomerIds = const {};
+  DateTime? _trustedCustomerIdsLoadedAt;
   final Set<String> _visibleTransferWelcomes = {};
   final Set<String> _transferringCustomers = {};
   String _visibleMediaTrace = 'visible image candidates=0, saved=0';
@@ -129,9 +149,24 @@ class _CaptureHomeState extends State<CaptureHome> {
   void initState() {
     super.initState();
     if (Platform.isMacOS) {
-      _adapter = MacOSCaptureAdapter();
       _database = CaptureDatabase();
+      _diagnosticLog = DiagnosticLog(
+          () async => Directory('${(await _database.storageRoot).path}/logs'));
+      _errorState = AppErrorState(log: _diagnosticLog);
+      _adapter = MacOSCaptureAdapter(diagnosticLog: _diagnosticLog);
+      _diagnosticLog.record('app.started');
       _coordinator = CaptureCoordinator(_adapter, _database);
+      _deliveryWorker = SerialDeliveryWorker<QueuedDelivery>(
+        enabled: () => mounted && _autoCaptureRunning,
+        next: _database.nextReadyDelivery,
+        deliver: (delivery) =>
+            _withJdUiOperation(() => _sendAutomaticallyUnlocked(delivery)),
+        failed: _handleDeliveryFailure,
+        afterAttempt: _coordinator.refresh,
+        onError: (error, stack) {
+          if (mounted) setState(() => _error = error);
+        },
+      );
       _updateSubscription = _coordinator.updates.listen(
         (value) {
           setState(() => _conversations = value);
@@ -148,19 +183,21 @@ class _CaptureHomeState extends State<CaptureHome> {
             inspection.customer, inspection.candidates,
             capturedAt: inspection.capturedAt),
       );
-      _refreshStatus();
+      _permissionMonitor = AccessibilityPermissionMonitor(
+        readStatus: _adapter.status,
+        onStatus: (status) {
+          if (mounted) setState(() => _status = status);
+        },
+        onError: (error, stack) {
+          if (mounted) setState(() => _error = error);
+        },
+      )..start();
       _refreshTickets();
     }
   }
 
-  Future<void> _refreshStatus() async {
-    try {
-      final status = await _adapter.status();
-      if (mounted) setState(() => _status = status);
-    } catch (error) {
-      if (mounted) setState(() => _error = error);
-    }
-  }
+  Future<void> _refreshStatus() =>
+      _permissionMonitor?.refresh() ?? Future<void>.value();
 
   Future<void> _refreshTickets() async {
     try {
@@ -413,6 +450,7 @@ class _CaptureHomeState extends State<CaptureHome> {
       _unreadSignalTimer?.cancel();
       _activeChatSignalTimer?.cancel();
       _failedSendRetryTimer?.cancel();
+      _deliveryRecoveryTimer?.cancel();
       for (final timer in _unreadHoldingTimers.values) {
         timer.cancel();
       }
@@ -428,6 +466,26 @@ class _CaptureHomeState extends State<CaptureHome> {
       _diagnostics = 'Opening the JD reception window…';
     });
     try {
+      final status = await _adapter.status();
+      if ((status['competingApps'] as List? ?? const []).isNotEmpty) {
+        throw PlatformException(
+            code: 'another_automation_app_running',
+            message:
+                'Close the other JD Automation app before starting automation.');
+      }
+      final home = Platform.environment['HOME'];
+      if (home == null || home.isEmpty) {
+        throw StateError(
+            'The shared automation lock directory could not be resolved.');
+      }
+      _automationLease ??= AutomationLease(
+          Directory('$home/Library/Application Support/JD Automation Shared'));
+      if (!await _automationLease!.acquire()) {
+        throw PlatformException(
+            code: 'automation_lock_busy',
+            message:
+                'Another app instance owns JD automation. Close it before starting this instance.');
+      }
       await _adapter
           .ensureReceptionWindow(allowActivation: true)
           .timeout(_captureOperationTimeout);
@@ -453,6 +511,9 @@ class _CaptureHomeState extends State<CaptureHome> {
         Timer.periodic(_scanInterval, (_) => unawaited(_pollUnreadSignals()));
     _activeChatSignalTimer = Timer.periodic(
         const Duration(seconds: 3), (_) => unawaited(_pollActiveChatSignal()));
+    _deliveryRecoveryTimer?.cancel();
+    _deliveryRecoveryTimer = Timer.periodic(
+        const Duration(seconds: 5), (_) => unawaited(_recoverDeliveryWork()));
     unawaited(_pollUnreadSignals());
     unawaited(_pollActiveChatSignal());
     for (final recovery in _unreadRecovery.values) {
@@ -471,6 +532,27 @@ class _CaptureHomeState extends State<CaptureHome> {
       _armSlaFallback(job);
     }
     _requestDelivery();
+  }
+
+  Future<void> _recoverDeliveryWork() async {
+    if (!_autoCaptureRunning || _deliveryRecoveryBusy) return;
+    _deliveryRecoveryBusy = true;
+    try {
+      _requestDelivery();
+      final pending = await _database.conversations();
+      for (final conversation in pending) {
+        if (!_autoCaptureRunning) return;
+        _scheduleDraftGeneration(conversation.userId, newEvidence: false);
+      }
+      for (final job in await _database.pendingSlaFallbackJobs()) {
+        if (!_autoCaptureRunning) return;
+        _armSlaFallback(job);
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error);
+    } finally {
+      _deliveryRecoveryBusy = false;
+    }
   }
 
   static const _uncapturedHoldingReply = '请稍等，我正在核对您刚发来的消息。';
@@ -546,27 +628,144 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   void _refreshHandledUnread(QianniuConversationRow row) {
-    if (!row.unread ||
-        UnreadCaptureRecovery.badgeStartedAfterHandled(DateTime.now(),
-            row.unreadAgeSeconds, _handledUnreadAt[row.customer])) {
+    final handledAt = _handledUnreadAt[row.customer];
+    if (handledAt == null) {
+      _unreadClearObservedAt.remove(row.customer);
+      return;
+    }
+    final now = DateTime.now();
+    if (!row.unread) {
+      final clearSince =
+          _unreadClearObservedAt.putIfAbsent(row.customer, () => now);
+      // Screenshot evidence can flicker for a poll while JD is repainting the
+      // sidebar. Require a continuous clear interval before allowing the same
+      // stale row to create another recovery cycle.
+      if (now.difference(clearSince) < _unreadClearConfirmation) return;
+      _handledUnreadEvidence.remove(row.customer);
+      _handledUnreadAt.remove(row.customer);
+      _unreadClearObservedAt.remove(row.customer);
+      return;
+    }
+    _unreadClearObservedAt.remove(row.customer);
+    if (UnreadCaptureRecovery.badgeStartedAfterHandled(
+        now, row.unreadAgeSeconds, handledAt)) {
       _handledUnreadEvidence.remove(row.customer);
       _handledUnreadAt.remove(row.customer);
     }
+  }
+
+  Future<Set<String>> _currentTrustedCustomerIds() async {
+    final now = DateTime.now();
+    if (_trustedCustomerIdsLoadedAt == null ||
+        now.difference(_trustedCustomerIdsLoadedAt!) >=
+            _identityEvidenceRefresh) {
+      _trustedCustomerIds =
+          await (await _database.history).trustedCustomerIds();
+      _trustedCustomerIdsLoadedAt = now;
+    }
+    final result = <String>{..._trustedCustomerIds};
+    final inspected = _ocrInspection;
+    if (inspected != null &&
+        now.difference(inspected.capturedAt).abs() <
+            const Duration(minutes: 1)) {
+      final active = inspected.activeCustomerId?.trim();
+      if (active != null && active.isNotEmpty) result.add(active);
+    }
+    return result;
+  }
+
+  bool _identityIsQuarantined(String observedCustomer) {
+    final until = _identityQuarantineUntil[observedCustomer];
+    if (until == null) return false;
+    if (DateTime.now().isBefore(until)) return true;
+    _identityQuarantineUntil.remove(observedCustomer);
+    return false;
+  }
+
+  void _quarantineIdentity(String observedCustomer, String reason) {
+    _identityQuarantineUntil[observedCustomer] =
+        DateTime.now().add(_identityFailureQuarantine);
+    _diagnosticLog.record('conversation.identity_quarantined', fields: {
+      'observed_customer': observedCustomer,
+      'reason': reason,
+      'retry_after_seconds': _identityFailureQuarantine.inSeconds,
+    });
+  }
+
+  bool _isIdentityOpenFailure(String code) => const {
+        'conversation_identity_ambiguous',
+        'conversation_not_found',
+        'customer_switch_not_verified',
+        'conversation_verification_failed',
+      }.contains(code);
+
+  Future<List<QianniuConversationRow>> _reconciledConversationRows() async {
+    final rows = await _adapter.listConversationRows();
+    final trusted = await _currentTrustedCustomerIds();
+    final merged = <String, QianniuConversationRow>{};
+    for (final row in rows) {
+      final observed = row.observedCustomer ?? row.customer;
+      if (_identityIsQuarantined(observed)) continue;
+      final resolution = resolveObservedCustomerIdentity(row.customer, trusted);
+      if (resolution.kind == CustomerIdentityResolutionKind.invalid ||
+          resolution.kind == CustomerIdentityResolutionKind.ambiguous) {
+        _quarantineIdentity(observed, resolution.kind.name);
+        continue;
+      }
+      final customer = resolution.customer ?? row.customer.trim();
+      final needsAxVerification =
+          resolution.kind == CustomerIdentityResolutionKind.unmatched;
+      if (resolution.kind ==
+              CustomerIdentityResolutionKind.uniqueTrustedNearMatch &&
+          _reportedIdentityRepairs.add('$observed->$customer')) {
+        _diagnosticLog.record('conversation.identity_reconciled', fields: {
+          'observed_customer': observed,
+          'verified_customer': customer,
+          'basis': 'unique_saved_or_ax_identity_edit_distance_1',
+        });
+      }
+      final resolved = row.withCustomer(customer,
+          identityNeedsAxVerification: needsAxVerification);
+      final existing = merged[customer];
+      if (existing == null) {
+        merged[customer] = resolved;
+        continue;
+      }
+      final ages = [existing.unreadAgeSeconds, resolved.unreadAgeSeconds]
+          .whereType<int>()
+          .toList(growable: false);
+      merged[customer] = QianniuConversationRow(
+        customer: customer,
+        observedCustomer: existing.observedCustomer,
+        unread: existing.unread || resolved.unread,
+        unreadEvidence: existing.unreadEvidence > resolved.unreadEvidence
+            ? existing.unreadEvidence
+            : resolved.unreadEvidence,
+        evidenceAvailable:
+            existing.evidenceAvailable || resolved.evidenceAvailable,
+        identityNeedsAxVerification: existing.identityNeedsAxVerification ||
+            resolved.identityNeedsAxVerification,
+        unreadAgeSeconds: ages.isEmpty
+            ? null
+            : ages.reduce((left, right) => left < right ? left : right),
+      );
+    }
+    return merged.values.toList(growable: false);
   }
 
   Future<void> _pollUnreadSignals() async {
     if (!_autoCaptureRunning || _unreadSignalBusy) return;
     _unreadSignalBusy = true;
     try {
-      final rows = await _adapter
-          .listConversationRows()
-          .timeout(_unreadOperationTimeout);
+      final rows =
+          await _reconciledConversationRows().timeout(_unreadOperationTimeout);
       for (final row in rows) {
         _refreshHandledUnread(row);
         if (!row.unread) {
           continue;
         }
-        if (_unreadRecovery.containsKey(row.customer) ||
+        if (row.identityNeedsAxVerification ||
+            _unreadRecovery.containsKey(row.customer) ||
             _handledUnreadEvidence.containsKey(row.customer) ||
             await _database.isHumanContacting(row.customer)) {
           continue;
@@ -586,7 +785,18 @@ class _CaptureHomeState extends State<CaptureHome> {
   /// sender clock independently of the slow full capture/media cycle so the
   /// 20-second deadline starts even when content extraction fails.
   Future<void> _pollActiveChatSignal() async {
-    if (!_autoCaptureRunning || _activeChatSignalBusy) return;
+    // Full-window Vision OCR is read-only, but it still competes for AX and
+    // CPU with the exact-customer switch/send path. A generated reply already
+    // waiting for JD gets priority; the lightweight sidebar poll continues to
+    // detect other customers while delivery drains.
+    if (!_autoCaptureRunning ||
+        _activeChatSignalBusy ||
+        _deliveryWorkerRunning ||
+        _pendingJdUiOperations != 0 ||
+        _priorityUiOperations != 0 ||
+        _autoCaptureBusy) {
+      return;
+    }
     _activeChatSignalBusy = true;
     try {
       final windows =
@@ -621,7 +831,11 @@ class _CaptureHomeState extends State<CaptureHome> {
         await _beginUnreadRecovery(customer, 0, detectedAt: incomingAt);
       }
       final recovery = _unreadRecovery[customer];
-      recovery?.latestIncomingSenderKey = senderKey;
+      recovery?.verifyIncomingSignal(
+        senderKey: senderKey,
+        sentAt: incomingAt,
+        capturedAt: inspection.capturedAt,
+      );
       final capture =
           const OcrCaptureExtractor().verifiedFastTextCapture(inspection);
       if (capture != null) {
@@ -751,11 +965,19 @@ class _CaptureHomeState extends State<CaptureHome> {
     if (recovery != null) {
       _handledUnreadEvidence[customer] = recovery.unreadEvidence;
       _handledUnreadAt[customer] = handledAt ?? DateTime.now();
+      _unreadClearObservedAt.remove(customer);
       _processingUnreadEvidence[customer] = recovery.unreadEvidence;
       if (recovery.latestIncomingSenderKey case final senderKey?) {
         _handledIncomingSenderKeys[customer] = senderKey;
       }
     }
+  }
+
+  void _discardUnreadRecovery(String customer) {
+    _unreadRecovery.remove(customer);
+    _unreadHoldingTimers.remove(customer)?.cancel();
+    _unreadResendTimers.remove(customer)?.cancel();
+    _processingUnreadEvidence.remove(customer);
   }
 
   Future<bool> _hasRecoveredIncoming(UnreadCaptureRecovery recovery) async {
@@ -857,6 +1079,20 @@ class _CaptureHomeState extends State<CaptureHome> {
           // operation persist the message and cancel recovery; send a holding
           // message only if media processing actually exits without evidence.
           _retryUnreadRecoveryNotice(recovery, resend: resend);
+          return;
+        }
+        if (!recovery.hasVerifiedIncomingSignal) {
+          _diagnosticLog.record('unread_recovery.notice_suppressed', fields: {
+            'customer': recovery.customer,
+            'reason': 'sidebar_badge_without_fresh_incoming_sender_clock',
+            'action': 'capture_requeued',
+          });
+          // The customer may simply be waiting in an unselected row. Do not
+          // mark that unread badge as handled: doing so suppresses every later
+          // row switch until JD happens to clear/reset the badge. Keep the
+          // recovery and explicitly queue a full, exact-customer capture.
+          recovery.requestImmediateCaptureRetry();
+          unawaited(_runAutoCaptureCycle());
           return;
         }
         await _adapter
@@ -962,9 +1198,14 @@ class _CaptureHomeState extends State<CaptureHome> {
         }
       });
     } on PlatformException catch (error) {
-      // A notice that was not confirmed returns to its retry timer instead of
-      // permanently resolving this recovery without a customer-visible send.
-      _retryUnreadRecoveryNotice(recovery, resend: resend);
+      if (_isIdentityOpenFailure(error.code)) {
+        _quarantineIdentity(recovery.customer, error.code);
+        _discardUnreadRecovery(recovery.customer);
+      } else {
+        // A notice that was not confirmed returns to its retry timer instead
+        // of resolving this recovery without a customer-visible send.
+        _retryUnreadRecoveryNotice(recovery, resend: resend);
+      }
       if (mounted) setState(() => _error = error);
     } catch (error) {
       _retryUnreadRecoveryNotice(recovery, resend: resend);
@@ -1088,6 +1329,16 @@ class _CaptureHomeState extends State<CaptureHome> {
           return;
         }
         try {
+          // Do this before touching JingMai. A transfer welcome, manual reply,
+          // or generated reply may already have answered the turn while the
+          // timer was waiting. Such a row is terminal, not retryable.
+          if (await _hasReplySinceSlaMessage(job)) {
+            await _database.completeSlaFallbackAfterReply(
+              userId: job.userId,
+              messageId: job.messageId,
+            );
+            return;
+          }
           await _adapter
               .openConversation(job.userId, allowActivation: true)
               .timeout(const Duration(seconds: 8));
@@ -1099,7 +1350,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             return;
           }
           if (await _hasReplySinceSlaMessage(job)) {
-            await _database.releaseSlaFallback(
+            await _database.completeSlaFallbackAfterReply(
               userId: job.userId,
               messageId: job.messageId,
             );
@@ -1142,7 +1393,10 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<void> _runAutoCaptureCycle() async {
-    if (!_autoCaptureRunning || _autoCaptureBusy || _deliveryWorkerRunning) {
+    // Capture and delivery share the same serialized JingMai UI queue. Queue
+    // the capture instead of dropping it while a delivery is active: sidebar
+    // detection alone cannot verify or save a message in an unselected row.
+    if (!_autoCaptureRunning || _autoCaptureBusy) {
       return;
     }
     _autoCaptureBusy = true;
@@ -1151,6 +1405,11 @@ class _CaptureHomeState extends State<CaptureHome> {
     var captureCycleExited = false;
     _jdUiTail = releaseUiOperation.future;
     await previousUiOperation;
+    if (!_autoCaptureRunning || !mounted) {
+      releaseUiOperation.complete();
+      _autoCaptureBusy = false;
+      return;
+    }
     final scanStartedAt = DateTime.now();
     if (mounted) {
       setState(() {
@@ -1166,11 +1425,14 @@ class _CaptureHomeState extends State<CaptureHome> {
       await _adapter
           .ensureReceptionWindow(allowActivation: false)
           .timeout(_captureOperationTimeout);
-      final rows = await _adapter
-          .listConversationRows()
-          .timeout(_captureOperationTimeout);
+      final rows =
+          await _reconciledConversationRows().timeout(_captureOperationTimeout);
       if (rows.isEmpty) {
-        throw StateError('No JD conversation rows are available.');
+        if (mounted) {
+          setState(() => _diagnostics =
+              'No safely identified JD conversation rows are available; no chat was opened.');
+        }
+        return;
       }
       for (final row in rows) {
         _refreshHandledUnread(row);
@@ -1181,7 +1443,8 @@ class _CaptureHomeState extends State<CaptureHome> {
         _lastUnreadProbeAt.remove(row.customer);
       }
       for (final row in rows.where((row) => row.unread)) {
-        if (!_unreadRecovery.containsKey(row.customer) &&
+        if (!row.identityNeedsAxVerification &&
+            !_unreadRecovery.containsKey(row.customer) &&
             !_handledUnreadEvidence.containsKey(row.customer) &&
             !await _database.isHumanContacting(row.customer)) {
           await _beginUnreadRecovery(row.customer, row.unreadEvidence,
@@ -1198,6 +1461,7 @@ class _CaptureHomeState extends State<CaptureHome> {
                   !_handledUnreadEvidence.containsKey(row.customer)) ||
               (row.unread &&
                   _unreadRecovery[row.customer] == null &&
+                  !_handledUnreadEvidence.containsKey(row.customer) &&
                   (_lastUnreadProbeAt[row.customer] == null ||
                       DateTime.now()
                               .difference(_lastUnreadProbeAt[row.customer]!) >=
@@ -1245,8 +1509,12 @@ class _CaptureHomeState extends State<CaptureHome> {
                       : incomingTime);
               recovery = _unreadRecovery[activeCustomer];
             }
-            if (recovery != null && senderKey != null) {
-              recovery.latestIncomingSenderKey = senderKey;
+            if (recovery != null) {
+              recovery.verifyIncomingSignal(
+                senderKey: senderKey,
+                sentAt: incomingTime,
+                capturedAt: inspection.capturedAt,
+              );
             }
             if (!extraction.transferNoticeVisible) {
               _visibleTransferWelcomes.remove(activeCustomer);
@@ -1340,12 +1608,31 @@ class _CaptureHomeState extends State<CaptureHome> {
       var insertedTotal = 0;
       for (final row in orderedRows) {
         if (!_autoCaptureRunning) break;
-        final customer = row.customer;
-        if (row.unread) _lastUnreadProbeAt[customer] = DateTime.now();
-        // Human takeover is scoped to one customer. Keep monitoring every
-        // other row while leaving this customer's Qianniu chat untouched.
-        if (await _database.isHumanContacting(customer)) continue;
+        var customer = row.customer;
         try {
+          if (row.identityNeedsAxVerification) {
+            final observed = row.observedCustomer ?? customer;
+            customer = await _adapter
+                .resolveConversationIdentityFromAx(observed,
+                    allowActivation: false)
+                .timeout(_unreadOperationTimeout);
+            _trustedCustomerIds = {..._trustedCustomerIds, customer};
+            _diagnosticLog.record('conversation.identity_reconciled', fields: {
+              'observed_customer': observed,
+              'verified_customer': customer,
+              'basis': 'active_ax_header',
+            });
+          }
+          if (row.unread) _lastUnreadProbeAt[customer] = DateTime.now();
+          // Human takeover is scoped to one customer. Keep monitoring every
+          // other row while leaving this customer's Qianniu chat untouched.
+          if (await _database.isHumanContacting(customer)) continue;
+          if (row.unread &&
+              !_unreadRecovery.containsKey(customer) &&
+              !_handledUnreadEvidence.containsKey(customer)) {
+            await _beginUnreadRecovery(customer, row.unreadEvidence,
+                detectedAt: _unreadDetectedAt(row));
+          }
           await _adapter
               .openConversation(customer, allowActivation: false)
               .timeout(_unreadOperationTimeout);
@@ -1359,6 +1646,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           var recovery = _unreadRecovery[customer];
           final extraction = _analyzeUnreadInspection(inspection, recovery);
           final senderKey = extraction.latestIncomingSenderKey;
+          final incomingAt = extraction.latestIncomingSentAt;
           if (recovery == null &&
               row.unread &&
               extraction.latestVisibleSenderIsIncoming &&
@@ -1368,8 +1656,12 @@ class _CaptureHomeState extends State<CaptureHome> {
                 detectedAt: _unreadDetectedAt(row));
             recovery = _unreadRecovery[customer];
           }
-          if (recovery != null && senderKey != null) {
-            recovery.latestIncomingSenderKey = senderKey;
+          if (recovery != null) {
+            recovery.verifyIncomingSignal(
+              senderKey: senderKey,
+              sentAt: incomingAt,
+              capturedAt: inspection.capturedAt,
+            );
           }
           if (recovery != null) {
             recovery.lastCaptureAttemptAt = DateTime.now();
@@ -1454,7 +1746,21 @@ class _CaptureHomeState extends State<CaptureHome> {
           // reply followed by another reply for the actual latest item.
           if (mounted) setState(() => _ocrInspection = inspection);
         } on PlatformException catch (error) {
+          _diagnosticLog.record('capture.customer_failed', fields: {
+            'expected_customer': customer,
+            'code': error.code,
+            'error': error.toString(),
+          });
           if (error.code == 'composer_not_empty') break;
+          if (_isIdentityOpenFailure(error.code)) {
+            final observed = row.observedCustomer ?? customer;
+            // Quarantine only the uncertain OCR spelling. A transient native
+            // row-read failure for the already trusted exact ID must not hide
+            // a real unread customer for two minutes.
+            if (observed != customer) {
+              _quarantineIdentity(observed, error.code);
+            }
+          }
           if (error.code == 'qianniu_not_frontmost') {
             if (mounted) {
               setState(() => _diagnostics =
@@ -1462,7 +1768,14 @@ class _CaptureHomeState extends State<CaptureHome> {
             }
             break;
           }
-          rethrow;
+          if (mounted) setState(() => _error = error);
+          // One unverified customer must not starve the remaining rows.
+        } on TimeoutException catch (error) {
+          _diagnosticLog.record('capture.customer_timeout', fields: {
+            'expected_customer': customer,
+            'error': error.toString(),
+          });
+          if (mounted) setState(() => _error = error);
         }
         // Give an already-due holding message or delivery a turn before
         // switching to another customer. A busy multi-chat scan must not
@@ -1486,10 +1799,12 @@ class _CaptureHomeState extends State<CaptureHome> {
                 '$insertedTotal unseen message(s) across ${rows.length} customers. '
                 'Draft generation is queued separately.');
       }
-    } on TimeoutException {
+    } on TimeoutException catch (error) {
       if (mounted) {
-        setState(() => _diagnostics =
-            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next 2-second sidebar check will retry.');
+        final text =
+            'Scan ${_formatClock(scanStartedAt)} timed out during a JD operation. It was released; the next 2-second sidebar check will retry.';
+        _errorState.record(error, displayedText: text, surface: 'diagnostics');
+        setState(() => _diagnostics = text);
       }
     } catch (error) {
       if (mounted) setState(() => _error = error);
@@ -1602,10 +1917,13 @@ class _CaptureHomeState extends State<CaptureHome> {
     } on CodexReplyException catch (error) {
       if (isCodexModelCapacityError(error.message)) {
         if (mounted) {
+          const text =
+              'Reply generation is retrying because the Codex models are busy.';
+          _errorState.record(error,
+              displayedText: text, surface: 'diagnostics');
           setState(() {
             _error = null;
-            _diagnostics =
-                'Reply generation is retrying because the Codex models are busy.';
+            _diagnostics = text;
           });
         }
       } else if (mounted) {
@@ -1786,6 +2104,7 @@ class _CaptureHomeState extends State<CaptureHome> {
             stableKey: conversation.stableKey,
             customerName: conversation.customerName,
             customerExternalId: conversation.userId,
+            verifiedCustomerId: inspection.activeCustomerId,
             messages: [video],
             capturedAt: inspection.capturedAt,
           ));
@@ -1799,8 +2118,10 @@ class _CaptureHomeState extends State<CaptureHome> {
       });
     } catch (error) {
       if (mounted) {
-        setState(() => _diagnostics =
-            'Codex recognized a video thumbnail, but JD video download failed: $error');
+        final text =
+            'Codex recognized a video thumbnail, but JD video download failed: $error';
+        _errorState.record(error, displayedText: text, surface: 'diagnostics');
+        setState(() => _diagnostics = text);
       }
       return false;
     }
@@ -1821,44 +2142,25 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   void _requestDelivery() {
-    _deliveryRequested = true;
-    if (_deliveryWorkerRunning) return;
-    _deliveryWorkerRunning = true;
-    unawaited(_runDeliveryWorker());
+    if (!_autoCaptureRunning) return;
+    unawaited(_deliveryWorker?.request());
   }
 
-  Future<void> _runDeliveryWorker() async {
-    try {
-      do {
-        _deliveryRequested = false;
-        while (true) {
-          final delivery = await _database.nextReadyDelivery();
-          if (delivery == null) break;
-          try {
-            await _withJdUiOperation(() =>
-                _sendAutomaticallyUnlocked(delivery.userId, delivery.draft));
-          } catch (error) {
-            // Every retained generated reply returns to the serial delivery
-            // queue. A matching observed receipt can reconcile an ambiguous
-            // click before the retry fires, but no delivery state may freeze
-            // this customer's later work indefinitely.
-            await _database.markGeneratedDraftDeliveryFailure(
-              userId: delivery.userId,
-              error: error.toString(),
-              retryDelay: _deliveryFailureRetryDelay,
-            );
-            _deliveryRetryTimer?.cancel();
-            _deliveryRetryTimer =
-                Timer(_deliveryFailureRetryDelay, _requestDelivery);
-            if (mounted) setState(() => _error = error);
-          }
-          await _coordinator.refresh();
-        }
-      } while (_deliveryRequested);
-    } finally {
-      _deliveryWorkerRunning = false;
-      if (_deliveryRequested) _requestDelivery();
-    }
+  Future<void> _handleDeliveryFailure(
+      QueuedDelivery delivery, Object error, StackTrace stack) async {
+    _diagnosticLog.record('delivery.failed', fields: {
+      'expected_customer': delivery.userId,
+      'error': error.toString(),
+    });
+    await _database.markGeneratedDraftDeliveryFailure(
+      userId: delivery.userId,
+      error: error.toString(),
+      retryDelay: _deliveryFailureRetryDelay,
+      expectedDelivery: delivery,
+    );
+    _deliveryRetryTimer?.cancel();
+    _deliveryRetryTimer = Timer(_deliveryFailureRetryDelay, _requestDelivery);
+    if (mounted) setState(() => _error = error);
   }
 
   Future<T> _withJdUiOperation<T>(Future<T> Function() operation) async {
@@ -1876,26 +2178,35 @@ class _CaptureHomeState extends State<CaptureHome> {
   }
 
   Future<T> _withFallbackPriority<T>(Future<T> Function() operation) async {
-    // The capture queue may hold a slow OCR or video operation for far longer
-    // than JD's response window. A fallback bypasses that Dart queue; the
-    // native send independently re-verifies the exact active customer before
-    // touching the composer, and aborts if another chat took focus.
+    // All customer-changing work shares one queue. Priority remains visible to
+    // optional maintenance tasks, but a fallback may never switch the active
+    // chat while another customer's image capture is still validating it.
     _priorityUiOperations++;
     try {
-      return await operation();
+      return await _withJdUiOperation(operation);
     } finally {
       _priorityUiOperations--;
     }
   }
 
-  Future<bool> _sendAutomaticallyUnlocked(String userId, AiDraft draft) async {
-    if (!await _database.isGeneratedDraftReadyForSend(
+  Future<bool> _sendAutomaticallyUnlocked(QueuedDelivery delivery) async {
+    final userId = delivery.userId;
+    final draft = delivery.draft;
+    if (!_autoCaptureRunning ||
+        !await _database.isGeneratedDraftReadyForSend(
           userId: userId,
           reply: draft.reply,
+          expectedDelivery: delivery,
         ) ||
         await _database.isHumanContacting(userId)) {
       return false;
     }
+    final uiAcquiredAt = DateTime.now();
+    _diagnosticLog.record('delivery.ui_acquired', fields: {
+      'expected_customer': userId,
+      'draft_queue_wait_ms':
+          uiAcquiredAt.millisecondsSinceEpoch - delivery.createdAtMs,
+    });
     try {
       // Draft generation is independent from sidebar scanning. Another unread
       // customer may have become visible while Codex was working, so reopen
@@ -1913,9 +2224,11 @@ class _CaptureHomeState extends State<CaptureHome> {
       }
       // Re-check after opening the conversation. A transfer may have removed
       // a delivery that was claimed before it acquired the JD UI lock.
-      if (!await _database.isGeneratedDraftReadyForSend(
+      if (!_autoCaptureRunning ||
+          !await _database.isGeneratedDraftReadyForSend(
             userId: userId,
             reply: draft.reply,
+            expectedDelivery: delivery,
           ) ||
           await _database.isHumanContacting(userId)) {
         return false;
@@ -1925,7 +2238,9 @@ class _CaptureHomeState extends State<CaptureHome> {
         reply: draft.reply,
         mediaPaths: mediaPaths,
       );
-      await _database.markReplySent(userId: userId, reply: draft.reply);
+      final recorded = await _database.markReplySent(
+          userId: userId, reply: draft.reply, expectedDelivery: delivery);
+      if (!recorded) return true; // A newer batch owns the current queue now.
       _finishUnreadRecovery(userId);
       _slaFallbackTimers.remove(userId)?.cancel();
       _scheduleDraftGeneration(userId, newEvidence: false);
@@ -1940,6 +2255,13 @@ class _CaptureHomeState extends State<CaptureHome> {
               'Verified and automatically sent ${draft.model} reply to $userId.';
         });
       }
+      _diagnosticLog.record('delivery.sent', fields: {
+        'expected_customer': userId,
+        'draft_queue_wait_ms':
+            uiAcquiredAt.millisecondsSinceEpoch - delivery.createdAtMs,
+        'ui_delivery_ms':
+            DateTime.now().difference(uiAcquiredAt).inMilliseconds,
+      });
       return true;
     } catch (_) {
       if (mounted) {
@@ -1959,6 +2281,13 @@ class _CaptureHomeState extends State<CaptureHome> {
     _RunVideoProcessingUnlocked? runVideoProcessingUnlocked,
   }) async {
     final customer = extraction.customerId ?? extraction.capture?.customerName;
+    if (customer != null &&
+        !customerIdentitiesMatch(inspection.activeCustomerId, customer)) {
+      throw PlatformException(
+          code: 'capture_identity_unverified',
+          message:
+              'Media/text owner $customer differs from the verified active chat ${inspection.activeCustomerId}.');
+    }
     if (customer == null || inspection.windowId == 0) {
       return extraction.capture;
     }
@@ -2158,6 +2487,7 @@ class _CaptureHomeState extends State<CaptureHome> {
           'customer:${sha256.convert(utf8.encode(customer))}',
       customerName: customer,
       customerExternalId: customer,
+      verifiedCustomerId: inspection.activeCustomerId,
       capturedAt: inspection.capturedAt,
       messages: [...?textCapture?.messages, ...uniqueMedia],
     );
@@ -2496,11 +2826,16 @@ class _CaptureHomeState extends State<CaptureHome> {
 
   @override
   void dispose() {
+    _permissionMonitor?.dispose();
+    // The lease is held until this controller closes, including while paused,
+    // so an in-flight native operation cannot race another app's controller.
+    unawaited(_automationLease?.release());
     _autoCaptureTimer?.cancel();
     _unreadSignalTimer?.cancel();
     _activeChatSignalTimer?.cancel();
     _failedSendRetryTimer?.cancel();
     _deliveryRetryTimer?.cancel();
+    _deliveryRecoveryTimer?.cancel();
     for (final timer in _draftRetryTimers.values) {
       timer.cancel();
     }
@@ -2630,14 +2965,16 @@ class _CaptureHomeState extends State<CaptureHome> {
                           Text(
                             _status['trusted'] == true
                                 ? 'JD connection ready'
-                                : 'Access required',
+                                : _status.containsKey('trusted')
+                                    ? 'Access required'
+                                    : 'Checking Accessibility…',
                             style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                           const SizedBox(height: 2),
                           Text(
                             _status['trusted'] == true
                                 ? 'Automation can monitor conversations'
-                                : 'Allow Accessibility to begin monitoring',
+                                : 'Allow Accessibility for ${AppRuntime.appName}',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ],
@@ -2647,7 +2984,7 @@ class _CaptureHomeState extends State<CaptureHome> {
                 ),
               ),
             ),
-            if (_status['trusted'] != true)
+            if (_status['trusted'] == false)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: OutlinedButton(
@@ -2658,10 +2995,19 @@ class _CaptureHomeState extends State<CaptureHome> {
                   child: const Text('Request Accessibility access'),
                 ),
               ),
+            if (_status['trusted'] == false)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                child: SelectableText(
+                    'Authorize this exact app copy:\n'
+                    '${_status['appBundlePath'] ?? Platform.resolvedExecutable}\n'
+                    'Permission refreshes automatically when you return.',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ),
             if (_error != null)
               Padding(
                   padding: const EdgeInsets.all(12),
-                  child: Text('Error: $_error',
+                  child: Text(_errorState.displayedText!,
                       style: const TextStyle(color: Colors.red))),
             const Divider(),
             Padding(

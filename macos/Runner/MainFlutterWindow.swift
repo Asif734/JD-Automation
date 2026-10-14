@@ -14,5 +14,6 @@ class MainFlutterWindow: NSWindow {
     accessibilityBridge = AccessibilityBridge(messenger: controller.engine.binaryMessenger)
     semanticRetrievalBridge = SemanticRetrievalBridge(messenger: controller.engine.binaryMessenger)
     super.awakeFromNib()
+    title = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? title
   }
 }

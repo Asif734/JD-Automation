@@ -516,6 +516,54 @@ void main() {
         isEmpty);
   });
 
+  test('answered reserved SLA fallback completes instead of retrying',
+      () async {
+    final root = await Directory.systemTemp.createTemp('sla_answered_test_');
+    final database = CaptureDatabase(storageRoot: root);
+    addTearDown(() async {
+      await database.close();
+      await root.delete(recursive: true);
+    });
+    final capturedAt = DateTime(2026, 10, 14, 3);
+    const userId = 'answered-customer';
+    const messageId = 'incoming-1';
+    await database.saveCapture(CapturedConversation(
+      stableKey: 'customer:$userId',
+      customerName: userId,
+      customerExternalId: userId,
+      capturedAt: capturedAt,
+      messages: const [
+        CapturedMessage(
+          stableId: messageId,
+          direction: 'incoming',
+          body: 'Question',
+          axPath: 'test',
+        ),
+      ],
+    ));
+    final job = (await database.slaFallbackJob(userId))!;
+    expect(
+      await database.reserveSlaFallback(
+        userId: userId,
+        messageId: messageId,
+        dueAt: job.dueAt,
+      ),
+      isTrue,
+    );
+
+    await database.completeSlaFallbackAfterReply(
+      userId: userId,
+      messageId: messageId,
+    );
+
+    expect(await database.slaFallbackJob(userId), isNull);
+    expect(
+      (await database.pendingSlaFallbackJobs())
+          .where((item) => item.userId == userId),
+      isEmpty,
+    );
+  });
+
   test('a stale fallback callback cannot reserve a window reset by a reply',
       () async {
     final root = await Directory.systemTemp.createTemp('sla_stale_timer_test_');

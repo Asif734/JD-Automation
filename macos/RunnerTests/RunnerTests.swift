@@ -4,6 +4,13 @@ import XCTest
 @testable import JD_Automation
 
 class RunnerTests: XCTestCase {
+  func testSidebarOCRLookalikeCanOnlyBeUsedForVerifiedReconciliation() {
+    XCTAssertTrue(CustomerSafety.canReconcileSidebarOCR(
+      "jd_4laeec7741d05", verifiedAX: "jd_41aeec7741d05"))
+    XCTAssertFalse(CustomerSafety.canReconcileSidebarOCR(
+      "jd_other_customer", verifiedAX: "jd_41aeec7741d05"))
+  }
+
   func testRetryPixelInspectionReturnsBeforeDeliveringSeparateEvent() {
     let inspector = QianniuOCRInspector()
     let snapshot = image(badges: [badge], bubbles: [bubble], scale: 2)

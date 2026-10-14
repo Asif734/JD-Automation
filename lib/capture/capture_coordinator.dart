@@ -24,6 +24,10 @@ class CaptureCoordinator {
       }).catchError((Object error, StackTrace stack) {
         _updates.addError(error, stack);
       });
+    }, onError: (Object error, StackTrace stack) {
+      // Rejected native ownership evidence is a diagnostic, not an unhandled
+      // stream error that can terminate monitoring for every customer.
+      _updates.addError(error, stack);
     });
     _updates.add(await database.conversations());
     await adapter.start();

@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../domain/capture_models.dart';
+import '../domain/customer_identity.dart';
 
 class ConversationFileStore {
   ConversationFileStore(this.rootDirectory);
@@ -19,6 +20,39 @@ class ConversationFileStore {
 
   Future<CaptureAppendResult> appendCapture(CapturedConversation capture) {
     final userId = capture.customerExternalId ?? capture.customerName;
+    if (capture.verifiedCustomerId case final verified?) {
+      if (verified != userId || capture.customerName != userId) {
+        throw StateError(
+            'Capture customer ID differs from its verified owner.');
+      }
+      final ownerRoot =
+          p.normalize(p.join(mediaDirectory.path, safeUserId(userId)));
+      for (final message in capture.messages) {
+        if (message.direction == 'incoming' &&
+            message.sender != null &&
+            !customerSenderLabelMatches(message.sender!, userId)) {
+          throw StateError(
+              'Incoming sender differs from verified customer $userId.');
+        }
+        for (final media in message.media) {
+          final path = p.normalize(p.absolute(media.path));
+          if (!p.isWithin(p.absolute(ownerRoot), path)) {
+            throw StateError(
+                'Captured media is outside customer $userId storage.');
+          }
+          final file = File(path);
+          final owner = Directory(ownerRoot);
+          _verifyMediaDirectoryOwner(userId, owner);
+          if (file.existsSync() &&
+              owner.existsSync() &&
+              !p.isWithin(owner.resolveSymbolicLinksSync(),
+                  file.resolveSymbolicLinksSync())) {
+            throw StateError(
+                'Captured media resolves outside customer $userId storage.');
+          }
+        }
+      }
+    }
     return _serialized(userId, () async {
       final document = await _readOrCreate(
         userId: userId,
@@ -457,11 +491,45 @@ class ConversationFileStore {
     }).toList(growable: false);
   }
 
+  /// Returns identities backed by real captured conversation evidence.
+  /// Fallback-only files are intentionally excluded: older OCR mistakes could
+  /// create such files, and using them as aliases would make the mistake
+  /// self-perpetuating.
+  Future<Set<String>> trustedCustomerIds() async {
+    if (!await conversationsDirectory.exists()) return const {};
+    final customers = <String>{};
+    await for (final entity in conversationsDirectory.list()) {
+      if (entity is! File || p.extension(entity.path) != '.json') continue;
+      try {
+        final document =
+            jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+        final userId = document['user_id']?.toString().trim() ?? '';
+        if (!_isCompleteStoredIdentity(userId)) continue;
+        final messages = (document['messages'] as List<Object?>? ?? const [])
+            .whereType<Map<String, dynamic>>();
+        final hasCapturedEvidence = messages.any((message) {
+          final source = message['source']?.toString();
+          return source == 'jd_automation' ||
+              source == 'qianniu_capture' ||
+              source == 'generated_reply';
+        });
+        if (hasCapturedEvidence) customers.add(userId);
+      } catch (_) {
+        // A malformed or unrelated JSON file cannot become identity evidence.
+      }
+    }
+    return customers;
+  }
+
   Future<Map<String, Object?>?> read(String userId) async {
+    _requireIdentity(userId);
     var file = _conversationFile(userId);
     if (!await file.exists()) {
       final legacy = _legacyConversationFile(userId);
       if (!await legacy.exists()) return null;
+      _verifyDocumentOwner(
+          (jsonDecode(await legacy.readAsString()) as Map<String, dynamic>),
+          userId);
       await conversationsDirectory.create(recursive: true);
       try {
         file = await legacy.rename(file.path);
@@ -471,8 +539,49 @@ class ConversationFileStore {
         if (!await file.exists()) file = legacy;
       }
     }
-    return (jsonDecode(await file.readAsString()) as Map<String, dynamic>)
-        .cast<String, Object?>();
+    final document =
+        (jsonDecode(await file.readAsString()) as Map<String, dynamic>)
+            .cast<String, Object?>();
+    _verifyDocumentOwner(document, userId);
+    return document;
+  }
+
+  void _requireIdentity(String userId) {
+    if (userId.isEmpty ||
+        userId == '.' ||
+        userId == '..' ||
+        userId != userId.trim() ||
+        userId.contains('…') ||
+        userId.contains('...') ||
+        userId == 'Unknown customer') {
+      throw StateError('A complete, unchanged customer ID is required.');
+    }
+  }
+
+  bool _isCompleteStoredIdentity(String userId) =>
+      userId.isNotEmpty &&
+      userId != '.' &&
+      userId != '..' &&
+      userId == userId.trim() &&
+      !userId.contains('…') &&
+      !userId.contains('...') &&
+      userId != 'Unknown customer';
+
+  void _verifyDocumentOwner(Map<String, Object?> document, String userId) {
+    if (document['user_id'] != userId) {
+      throw StateError('Customer history owner mismatch: requested $userId, '
+          'stored ${document['user_id']}. No history was merged or overwritten.');
+    }
+  }
+
+  void _verifyMediaDirectoryOwner(String userId, Directory directory) {
+    if (mediaDirectory.existsSync() &&
+        directory.existsSync() &&
+        directory.resolveSymbolicLinksSync() !=
+            p.join(mediaDirectory.resolveSymbolicLinksSync(),
+                safeUserId(userId))) {
+      throw StateError('Customer media directory points to a different owner.');
+    }
   }
 
   Future<String> saveMedia({
@@ -484,6 +593,7 @@ class ConversationFileStore {
         final directory =
             Directory(p.join(mediaDirectory.path, safeUserId(userId)));
         await directory.create(recursive: true);
+        _verifyMediaDirectoryOwner(userId, directory);
         final extension = p.extension(filename).toLowerCase();
         final safeExtension = RegExp(r'^\.[a-z0-9]{1,8}$').hasMatch(extension)
             ? extension
@@ -693,6 +803,11 @@ class ConversationFileStore {
   }
 
   Future<void> _write(Map<String, Object?> document, String userId) async {
+    _requireIdentity(userId);
+    _verifyDocumentOwner(document, userId);
+    // Check any existing file before replacement, including case/Unicode
+    // collisions on the normal case-insensitive macOS filesystem.
+    await read(userId);
     await conversationsDirectory.create(recursive: true);
     document['updated_at'] = DateTime.now().toUtc().toIso8601String();
     final destination = _conversationFile(userId);
@@ -711,9 +826,11 @@ class ConversationFileStore {
       p.join(conversationsDirectory.path, '${_legacySafeUserId(userId)}.json'));
 
   Future<T> _serialized<T>(String userId, Future<T> Function() action) {
+    _requireIdentity(userId);
+    final pathKey = safeUserId(userId).toLowerCase();
     final completer = Completer<T>();
-    final previous = _writeTails[userId] ?? Future<void>.value();
-    _writeTails[userId] = previous.then((_) async {
+    final previous = _writeTails[pathKey] ?? Future<void>.value();
+    _writeTails[pathKey] = previous.then((_) async {
       try {
         completer.complete(await action());
       } catch (error, stack) {

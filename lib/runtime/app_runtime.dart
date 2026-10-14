@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-/// Read-only resources travel with the app; customer state never does.
+/// Read-only resources travel with the app. A standalone bundle may also carry
+/// an operator-requested initial customer-data snapshot which is imported once
+/// into Application Support and is never read or mutated in place.
 class AppRuntime {
   static const standalone = bool.fromEnvironment('JD_STANDALONE');
   static const appName =
@@ -43,6 +45,53 @@ class AppRuntime {
           override('JD_KNOWLEDGE_DIR', 'QIANNIU_KNOWLEDGE_DIR') ??
               p.join(defaultRoot.path, knowledgeName)),
     );
+  }
+
+  /// Imports bundled initial customer state only when [target] is absent or
+  /// empty. Existing standalone state always wins and is never overwritten.
+  ///
+  /// The copy is assembled in a sibling directory and renamed into place so a
+  /// failed first launch cannot expose a partially imported database.
+  static Future<bool> installBundledInitialData(Directory target,
+      {String? executablePath}) async {
+    if (await _directoryHasEntries(target)) return false;
+    final bundle = bundleResources(executablePath: executablePath);
+    if (bundle == null) return false;
+    final source = Directory(p.join(bundle.path, 'initial_data'));
+    if (!await source.exists()) return false;
+
+    await target.parent.create(recursive: true);
+    final staging = Directory(
+        '${target.path}.import-$pid-${DateTime.now().microsecondsSinceEpoch}');
+    await staging.create(recursive: true);
+    try {
+      await for (final entity
+          in source.list(recursive: true, followLinks: false)) {
+        final relative = p.relative(entity.path, from: source.path);
+        final destination = p.join(staging.path, relative);
+        if (entity is Directory) {
+          await Directory(destination).create(recursive: true);
+        } else if (entity is File) {
+          await File(destination).parent.create(recursive: true);
+          await entity.copy(destination);
+        } else {
+          throw FileSystemException(
+              'Bundled initial data contains an unsupported link.',
+              entity.path);
+        }
+      }
+      if (await _directoryHasEntries(target)) return false;
+      if (await target.exists()) await target.delete(recursive: true);
+      await staging.rename(target.path);
+      return true;
+    } finally {
+      if (await staging.exists()) await staging.delete(recursive: true);
+    }
+  }
+
+  static Future<bool> _directoryHasEntries(Directory directory) async {
+    if (!await directory.exists()) return false;
+    return !(await directory.list(followLinks: false).isEmpty);
   }
 
   static Future<String?> bundledTool(String name,

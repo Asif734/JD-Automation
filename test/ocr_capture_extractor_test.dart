@@ -6,6 +6,59 @@ import 'package:jd_automation/capture/unread_capture_recovery.dart';
 import 'package:jd_automation/platform/macos_capture_adapter.dart';
 
 void main() {
+  test('JD risk and withdrawal notices are not customer message text', () {
+    final inspection = OcrInspection(
+      image: Uint8List(0),
+      imageWidth: 1500,
+      imageHeight: 1200,
+      windowTitle: '咚咚融合工作台',
+      recognizedText: '',
+      capturedAt: DateTime.utc(2026, 10, 14, 5, 30, 20),
+      activeCustomerId: 'jd_41aeec7741d05',
+      observations: const [
+        OcrObservation(
+            text: 'jd_41aeec7741d05 13:30:05',
+            confidence: 1,
+            x: .22,
+            y: .35,
+            width: .24,
+            height: .02),
+        OcrObservation(
+            text: 'please refund',
+            confidence: 1,
+            x: .23,
+            y: .40,
+            width: .10,
+            height: .02),
+        OcrObservation(
+            text: '你撤回了一条消息',
+            confidence: 1,
+            x: .31,
+            y: .45,
+            width: .12,
+            height: .02),
+        OcrObservation(
+            text: '风险图片 当前会话您存在消极服务行为，请积极与消费者协商解决问题，',
+            confidence: 1,
+            x: .23,
+            y: .50,
+            width: .40,
+            height: .02),
+        OcrObservation(
+            text: '平台已记录信息，核实后将根据违规程度进行处置，异常反馈',
+            confidence: 1,
+            x: .23,
+            y: .55,
+            width: .35,
+            height: .02),
+      ],
+    );
+
+    final messages = const OcrCaptureExtractor().extract(inspection)!.messages;
+    expect(messages.single.direction, 'incoming');
+    expect(messages.single.body, 'please refund');
+  });
+
   test('sender clock starts the deadline without OCR reading the new body', () {
     final sentAt = DateTime.utc(2026, 10, 7, 6, 25, 10);
     final result = const OcrCaptureExtractor().analyze(OcrInspection(
@@ -779,7 +832,7 @@ void main() {
     expect(const OcrCaptureExtractor().extract(inspection), isNull);
   });
 
-  test('accepts a truncated OCR sender after AX supplies exact identity', () {
+  test('rejects a truncated OCR sender even when AX supplies an identity', () {
     final inspection = OcrInspection(
       image: Uint8List(0),
       imageWidth: 2620,
@@ -807,9 +860,7 @@ void main() {
     );
 
     final capture = const OcrCaptureExtractor().extract(inspection);
-    expect(capture, isNotNull);
-    expect(capture!.customerExternalId, 'yangxingkaishininger');
-    expect(capture.messages.single.body, 'Do you have this printer?');
+    expect(capture, isNull);
   });
 
   test('rejects a Qianniu sidebar recency label as message content', () {

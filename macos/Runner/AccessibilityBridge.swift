@@ -4,8 +4,9 @@ import CryptoKit
 import FlutterMacOS
 import Speech
 import Vision
+import AVFoundation
 
-/// MethodChannel boundary for the macOS-only adapter. No send/insert/confirm action is exposed.
+/// MethodChannel boundary for guarded macOS capture and delivery.
 final class AccessibilityBridge {
   private let channel: FlutterMethodChannel
   private let collector = QianniuAXCollector()
@@ -17,6 +18,10 @@ final class AccessibilityBridge {
   private var unreadSignalWaiters: [FlutterResult] = []
 
   init(messenger: FlutterBinaryMessenger) {
+    // Setting an application root affects only that object. The system-wide
+    // object sets the default for every AX element in this process, including
+    // children created during traversal. Never use the OS's long default wait.
+    _ = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.75)
     channel = FlutterMethodChannel(
       name: "com.grozziie.jdAutomation/accessibility",
       binaryMessenger: messenger)
@@ -116,6 +121,8 @@ final class AccessibilityBridge {
         expectedCustomer: args?["expectedCustomer"] as? String ?? "",
         reply: args?["reply"] as? String ?? "",
         mediaPaths: args?["mediaPaths"] as? [String] ?? [],
+        deadline: (args?["operationDeadlineMs"] as? NSNumber)
+          .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) } ?? Date().addingTimeInterval(12),
         completion: result)
     case "retryFailedOutgoingMessage":
       let args = call.arguments as? [String: Any]
@@ -170,6 +177,10 @@ final class AccessibilityBridge {
       collector.openConversation(
         expectedCustomer: args?["expectedCustomer"] as? String ?? "",
         allowActivation: args?["allowActivation"] as? Bool ?? true,
+        allowObservedIdentityResolution:
+          args?["allowObservedIdentityResolution"] as? Bool ?? false,
+        deadline: (args?["operationDeadlineMs"] as? NSNumber)
+          .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) } ?? Date().addingTimeInterval(8),
         completion: result)
     case "listActiveTransferAccounts":
       let args = call.arguments as? [String: Any]
@@ -379,7 +390,14 @@ final class QianniuOCRInspector {
         code: "jd_window_missing",
         message: "No visible JD 咚咚 window was found. Open its customer-service window and retry.")
     }
-    let customerBeforeCapture = customerIdentityProvider?()
+    guard let customerBeforeCapture = customerIdentityProvider?() else {
+      throw OCRInspectorError(code: "customer_identity_unverified",
+                              message: "The active customer's complete header ID could not be verified; no screenshot was assigned to a customer.")
+    }
+    guard let chatFrame = chatFrameProvider?(), window.bounds.contains(chatFrame) else {
+      throw OCRInspectorError(code: "capture_window_identity_unverified",
+          message: "The selected window does not contain the verified active chat viewport.")
+    }
     let snapshotAt = Date()
     guard let image = CGWindowListCreateImage(
       .null,
@@ -501,8 +519,11 @@ final class QianniuOCRInspector {
       throw OCRInspectorError(code: "png_encoding_failed", message: "Could not encode the captured window image.")
     }
     let customerAfterRecognition = customerIdentityProvider?()
-    guard let customerBeforeCapture, let customerAfterRecognition,
-          exactCustomerIdentityMatches(customerBeforeCapture, customerAfterRecognition) else {
+    guard let customerAfterRecognition else {
+      throw OCRInspectorError(code: "customer_identity_unverified",
+                              message: "The active customer's complete header ID became unavailable after OCR; this screenshot was discarded.")
+    }
+    guard exactCustomerIdentityMatches(customerBeforeCapture, customerAfterRecognition) else {
       throw OCRInspectorError(code: "customer_changed_during_capture",
                               message: "The JD conversation changed during OCR; this screenshot was discarded.")
     }
@@ -647,92 +668,6 @@ private struct JDCachedImageCandidate {
   let score: Double
 }
 
-private struct JDTimedCachedMediaCandidate {
-  let url: URL
-  let modified: Date
-  let size: Int
-  let kind: String
-
-  var cacheKey: String {
-    let identity = "\(url.path)|\(modified.timeIntervalSince1970)|\(size)"
-    return SHA256.hash(data: Data(identity.utf8))
-      .map { String(format: "%02x", $0) }.joined()
-  }
-}
-
-/// Resolves cache media from the unread-message clock only when there is one
-/// clear recent candidate. The caller separately verifies the active customer
-/// and rejects candidates that are equally close to another customer's unread
-/// recovery clock.
-private func uniquelyTimedRecentJDCachedMedia(
-  expectedAt: Date,
-  now: Date = Date()
-) -> JDTimedCachedMediaCandidate? {
-  let root = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Application Support/JingDong/咚咚工作台",
-                           isDirectory: true)
-  let keys: Set<URLResourceKey> = [
-    .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
-  ]
-  guard let enumerator = FileManager.default.enumerator(
-    at: root, includingPropertiesForKeys: Array(keys),
-    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
-  let imageExtensions = Set(["jpg", "jpeg", "png", "webp"])
-  let videoExtensions = Set(["mp4", "mov", "m4v", "webm"])
-  var candidates: [JDTimedCachedMediaCandidate] = []
-
-  for case let url as URL in enumerator {
-    let parent = url.deletingLastPathComponent()
-    let chatDirectory = parent.deletingLastPathComponent().lastPathComponent
-    let folder = parent.lastPathComponent
-    let ext = url.pathExtension.lowercased()
-    let kind: String
-    if folder == "images" && imageExtensions.contains(ext) {
-      kind = "image"
-    } else if folder == "videos" && videoExtensions.contains(ext) {
-      kind = "video"
-    } else {
-      continue
-    }
-    guard chatDirectory.hasPrefix("chat_"),
-          let values = try? url.resourceValues(forKeys: keys),
-          values.isRegularFile == true,
-          let modified = values.contentModificationDate,
-          let size = values.fileSize,
-          size > 0, size <= 250 * 1024 * 1024 else { continue }
-    // A JD download normally lands within a second or two of the unread turn.
-    // Allow small clock/poll jitter and bounded network delay, but never mine
-    // older cache history merely because a text-only message arrived later.
-    let offset = modified.timeIntervalSince(expectedAt)
-    let age = now.timeIntervalSince(modified)
-    guard offset >= -5, offset <= 60, age >= -5, age <= 5 * 60 else { continue }
-    candidates.append(JDTimedCachedMediaCandidate(
-      url: url, modified: modified, size: size, kind: kind))
-  }
-
-  // JD also stores a thumbnail image for many videos. Treat the video as the
-  // logical media item when both cache entries share the same stem.
-  let videoStems = Set(candidates.filter { $0.kind == "video" }
-    .map { $0.url.deletingPathExtension().lastPathComponent.lowercased() })
-  let logical = candidates.filter {
-    $0.kind == "video" ||
-      !videoStems.contains($0.url.deletingPathExtension().lastPathComponent.lowercased())
-  }.sorted {
-    let left = abs($0.modified.timeIntervalSince(expectedAt))
-    let right = abs($1.modified.timeIntervalSince(expectedAt))
-    if left != right { return left < right }
-    return $0.modified > $1.modified
-  }
-  guard let best = logical.first else { return nil }
-  if logical.count > 1 {
-    let bestDelta = abs(best.modified.timeIntervalSince(expectedAt))
-    let nextDelta = abs(logical[1].modified.timeIntervalSince(expectedAt))
-    // Two different cache items with nearly identical clocks cannot safely be
-    // assigned to one customer without reading JD's encrypted message DB.
-    if nextDelta - bestDelta < 4 { return nil }
-  }
-  return best
-}
 
 private func downloadableImages(in directory: URL) -> [String: DownloadedImageCandidate] {
   let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
@@ -802,9 +737,9 @@ private func matchingRecentJDCachedImage(
     let fingerprint = averageImageHash(cgImage)
     guard let candidateBits = UInt64(fingerprint, radix: 16) else { continue }
     let hashDistance = (visibleBits ^ candidateBits).nonzeroBitCount
-    // The visible crop can include JD's rounded border, but a distance beyond
-    // 20/64 is too ambiguous to replace the safe screenshot with cache data.
-    guard hashDistance <= 20 else { continue }
+    // Weak resemblance cannot bind a shared-cache image to this bubble.
+    // Keep the verified screenshot whenever the original is uncertain.
+    guard hashDistance <= 4, CustomerSafety.videoMatches(visibleImage, cgImage) else { continue }
     let score = Double(hashDistance) * 4 + timeDelta / 5 + ratioDelta * 30
     candidates.append(JDCachedImageCandidate(
       url: url, modified: modified, size: size,
@@ -830,9 +765,18 @@ private func matchingRecentJDCachedImage(
 /// JD 10.4 downloads an incoming video into its own per-chat media cache before
 /// rendering the thumbnail. Restrict discovery to that cache shape and a short
 /// freshness window so automatic analysis never needs to click inside JD.
-private func newestRecentJDCachedVideo(
-  now: Date = Date(), maximumAge: TimeInterval = 5 * 60
-) -> DownloadedVideoCandidate? {
+private enum JDVideoCacheCheck {
+  case matched(DownloadedVideoCandidate)
+  case notFound
+  case unresolved(String)
+}
+
+private func matchingJDCachedVideo(
+  visibleImage: CGImage,
+  now: Date = Date(), maximumAge: TimeInterval = 5 * 60,
+  timeout: TimeInterval = 8
+) -> JDVideoCacheCheck {
+  let deadline = ProcessInfo.processInfo.systemUptime + timeout
   let root = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/JingDong/咚咚工作台",
                            isDirectory: true)
@@ -841,10 +785,11 @@ private func newestRecentJDCachedVideo(
   ]
   guard let enumerator = FileManager.default.enumerator(
     at: root, includingPropertiesForKeys: Array(keys),
-    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
+    options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return .unresolved("video_cache_unavailable") }
   let extensions = Set(["mp4", "mov", "m4v", "webm"])
   var candidates: [DownloadedVideoCandidate] = []
   for case let url as URL in enumerator {
+    guard ProcessInfo.processInfo.systemUptime < deadline else { return .unresolved("video_cache_check_timeout") }
     let parent = url.deletingLastPathComponent()
     let chatDirectory = parent.deletingLastPathComponent().lastPathComponent
     guard parent.lastPathComponent == "videos",
@@ -860,7 +805,49 @@ private func newestRecentJDCachedVideo(
     candidates.append(DownloadedVideoCandidate(
       url: url, modified: modified, size: size))
   }
-  return candidates.max(by: { $0.modified < $1.modified })
+  // A recent file in another chat is not proof of ownership. Match decoded
+  // frames to the verified visible bubble and reject different matching clips.
+  guard CustomerSafety.videoSignature(visibleImage) != nil else { return .notFound }
+  var matched: DownloadedVideoCandidate?
+  var matchedDigest: String?
+  let ordered = candidates.sorted { $0.modified > $1.modified }
+  guard ordered.count <= 40 else { return .unresolved("video_cache_candidates_exceeded") }
+  for candidate in ordered {
+    guard ProcessInfo.processInfo.systemUptime < deadline else { return .unresolved("video_cache_check_timeout") }
+    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: candidate.url))
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 360, height: 360)
+    var visuallyMatches = false
+    var decodedFrames = 0
+    for seconds in [0.0, 0.5, 1.0] {
+      guard ProcessInfo.processInfo.systemUptime < deadline else { return .unresolved("video_cache_check_timeout") }
+      if let frame = try? generator.copyCGImage(
+          at: CMTime(seconds: seconds, preferredTimescale: 600), actualTime: nil) {
+        decodedFrames += 1
+        if CustomerSafety.cachedVideoPreviewMatches(visibleImage, frame) {
+          visuallyMatches = true
+          break
+        }
+      }
+    }
+    guard decodedFrames > 0 else { return .unresolved("video_cache_decode_failed") }
+    guard visuallyMatches else { continue }
+    guard let bytes = try? Data(contentsOf: candidate.url),
+          let values = try? candidate.url.resourceValues(forKeys: keys),
+          bytes.count == candidate.size, values.fileSize == candidate.size,
+          values.contentModificationDate == candidate.modified else {
+      return .unresolved("video_cache_changed_during_check")
+    }
+    let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    if let previous = matchedDigest,
+       CustomerSafety.uniqueVideoDigest([previous, digest]) == nil {
+      return .unresolved("video_cache_match_ambiguous")
+    }
+    matched = matched ?? candidate
+    matchedDigest = digest
+  }
+  guard ProcessInfo.processInfo.systemUptime < deadline else { return .unresolved("video_cache_check_timeout") }
+  return matched.map { .matched($0) } ?? .notFound
 }
 
 private func windowBounds(_ id: CGWindowID) -> CGRect? {
@@ -869,6 +856,13 @@ private func windowBounds(_ id: CGWindowID) -> CGRect? {
         let dictionary = info[kCGWindowBounds as String] as? [String: Any]
   else { return nil }
   return CGRect(dictionaryRepresentation: dictionary as CFDictionary)
+}
+
+private func windowIsOwnedBy(_ id: CGWindowID, pid: pid_t) -> Bool {
+  guard let rows = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+        let row = rows.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id })
+  else { return false }
+  return (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
 }
 
 private func namedWindowBounds(pid: pid_t, containing title: String) -> CGRect? {
@@ -1109,7 +1103,7 @@ private func unreadScreenshot(pid: pid_t, matching target: CGRect) -> UnreadScre
 }
 
 private func unreadRedPixels(frame: CGRect, windowBounds: CGRect,
-                             image: CGImage) -> Int {
+                             image: CGImage, flipped: Bool) -> Int {
   guard windowBounds.width > 0, windowBounds.height > 0 else { return 0 }
   let scaleX = CGFloat(image.width) / windowBounds.width
   let scaleY = CGFloat(image.height) / windowBounds.height
@@ -1140,17 +1134,18 @@ private func unreadRedPixels(frame: CGRect, windowBounds: CGRect,
     }
     return result
   }
-  let topOrigin = CGRect(x: localX, y: localY, width: width, height: height)
-  let flipped = CGRect(x: localX, y: CGFloat(image.height) - localY - height,
-                       width: width, height: height)
-  return max(count(in: topOrigin), count(in: flipped))
+  let rect = flipped
+    ? CGRect(x: localX, y: CGFloat(image.height) - localY - height,
+             width: width, height: height)
+    : CGRect(x: localX, y: localY, width: width, height: height)
+  return count(in: rect)
 }
 
 /// The red JD badge shows elapsed time as mm:ss. Read it only inside a row
 /// already proven unread by its red pixels; a grey wall-clock label must not
 /// backdate a new-message deadline.
 private func unreadElapsedSeconds(frame: CGRect, windowBounds: CGRect,
-                                  image: CGImage) -> Int? {
+                                  image: CGImage, flipped: Bool) -> Int? {
   guard windowBounds.width > 0, windowBounds.height > 0 else { return nil }
   let scaleX = CGFloat(image.width) / windowBounds.width
   let scaleY = CGFloat(image.height) / windowBounds.height
@@ -1159,11 +1154,10 @@ private func unreadElapsedSeconds(frame: CGRect, windowBounds: CGRect,
   let width = frame.width * 0.35 * scaleX
   let height = frame.height * scaleY
   let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-  let candidates = [
-    CGRect(x: x, y: y, width: width, height: height),
-    CGRect(x: x, y: CGFloat(image.height) - y - height,
-           width: width, height: height),
-  ]
+  let candidates = [flipped
+    ? CGRect(x: x, y: CGFloat(image.height) - y - height,
+             width: width, height: height)
+    : CGRect(x: x, y: y, width: width, height: height)]
   for candidate in candidates {
     let cropBounds = candidate.integral.intersection(imageBounds)
     guard cropBounds.width >= 30, cropBounds.height >= 18,
@@ -1212,38 +1206,9 @@ private func normalizedCustomerIdentity(_ value: String) -> String {
 }
 
 private func exactCustomerIdentityMatches(_ left: String, _ right: String) -> Bool {
-  normalizedCustomerIdentity(left) == normalizedCustomerIdentity(right)
+  CustomerSafety.matches(left, right)
 }
 
-/// Vision can read a narrow digit 1 in a JD account ID as a lowercase l.
-/// This is only a candidate for locating one unique row. The OCR value is
-/// never rewritten; the exact AX chat-header identity is returned separately.
-private func oneVsEllOCRConfusion(_ observed: String, _ expected: String) -> Bool {
-  let left = Array(normalizedCustomerIdentity(observed))
-  let right = Array(normalizedCustomerIdentity(expected))
-  guard left.count == right.count,
-        String(left).hasPrefix("jd_"), String(right).hasPrefix("jd_") else { return false }
-  let differences = zip(left, right).filter { $0.0 != $0.1 }
-  guard differences.count == 1, let difference = differences.first else { return false }
-  return (difference.0 == "l" && difference.1 == "1") ||
-    (difference.0 == "1" && difference.1 == "l")
-}
-
-private func visibleCustomerIdentityMatches(_ visible: String, expected: String) -> Bool {
-  if exactCustomerIdentityMatches(visible, expected) { return true }
-  let trimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
-  let isTruncated = trimmed.contains("...") || trimmed.contains("…")
-  guard isTruncated else { return false }
-  let prefix = normalizedCustomerIdentity(
-    trimmed.replacingOccurrences(of: "...", with: "")
-      .replacingOccurrences(of: "…", with: ""))
-  // Truncated headers are useful only when they expose a meaningful prefix.
-  // Three Unicode characters covers short CJK names; six is retained for
-  // Latin/digit-only identities where a tiny prefix is too collision-prone.
-  let latinOnly = prefix.unicodeScalars.allSatisfy { $0.isASCII }
-  guard prefix.count >= (latinOnly ? 6 : 3) else { return false }
-  return normalizedCustomerIdentity(expected).hasPrefix(prefix)
-}
 
 private func cleanedRowCustomerIdentity(_ raw: String) -> String? {
   var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1267,8 +1232,13 @@ private func cleanedRowCustomerIdentity(_ raw: String) -> String? {
 /// JD exposes each conversation as an untitled pressable AXGroup. Read the
 /// first-line display identity from that group's screenshot crop; the active
 /// header is still used independently after a click to verify the selection.
-private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
-                             image: CGImage) -> String? {
+private struct SidebarRowIdentity {
+  let customer: String
+  let flipped: Bool
+}
+
+private func customerIdentityInRow(frame: CGRect, windowBounds: CGRect,
+                                   image: CGImage) -> SidebarRowIdentity? {
   guard windowBounds.width > 0, windowBounds.height > 0 else { return nil }
   let scaleX = CGFloat(image.width) / windowBounds.width
   let scaleY = CGFloat(image.height) / windowBounds.height
@@ -1277,12 +1247,15 @@ private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
   let width = frame.width * scaleX
   let height = frame.height * scaleY
   let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-  let candidates = [
-    CGRect(x: x, y: y, width: width, height: height).integral.intersection(bounds),
-    CGRect(x: x, y: CGFloat(image.height) - y - height,
-           width: width, height: height).integral.intersection(bounds),
+  let candidates: [(rect: CGRect, flipped: Bool)] = [
+    (CGRect(x: x, y: y, width: width, height: height)
+      .integral.intersection(bounds), false),
+    (CGRect(x: x, y: CGFloat(image.height) - y - height,
+            width: width, height: height).integral.intersection(bounds), true),
   ]
-  for rect in candidates where rect.width >= 40 && rect.height >= 20 {
+  for candidate in candidates
+    where candidate.rect.width >= 40 && candidate.rect.height >= 20 {
+    let rect = candidate.rect
     guard let crop = image.cropping(to: rect) else { continue }
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
@@ -1302,7 +1275,7 @@ private func customerIDInRow(frame: CGRect, windowBounds: CGRect,
       return (identity, score)
     }.sorted { $0.1 > $1.1 }
     if let identity = ranked.first?.0 {
-      return identity
+      return SidebarRowIdentity(customer: identity, flipped: candidate.flipped)
     }
   }
   return nil
@@ -1351,15 +1324,34 @@ final class QianniuAXCollector {
   private var seenFingerprints = Set<String>()
   private var lastActiveConversation: String?
   private var pendingTransferCustomer: String?
+  private struct OwnedComposer {
+    let element: AXUIElement
+    let text: String
+  }
+  // Queue-confined insertion ownership allows safe cleanup after a timed-out
+  // read. Never erase unrelated operator text or another customer's composer.
+  private var ownedComposers: [String: OwnedComposer] = [:]
 
   func status() -> [String: Any] {
     let pid = runningPID()
+    let competing = NSWorkspace.shared.runningApplications.filter {
+      $0.processIdentifier != ProcessInfo.processInfo.processIdentifier &&
+        !$0.isTerminated &&
+        ["com.grozziie.jdAutomation", "com.grozziie.jdAutomation.standalone",
+         "com.grozziie.jdAutomation.review"]
+          .contains($0.bundleIdentifier ?? "")
+    }.map { ["pid": Int($0.processIdentifier), "bundle": $0.bundleIdentifier ?? ""] as [String: Any] }
     return [
       "trusted": AXIsProcessTrusted(),
+      "screenRecording": CGPreflightScreenCaptureAccess(),
+      "appBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
+      "appBundlePath": Bundle.main.bundlePath,
+      "appProcessId": Int(ProcessInfo.processInfo.processIdentifier),
       "running": pid != nil,
       "pid": pid.map(Int.init) as Any,
       "bundleIdentifier": bundleIdentifier,
       "captureRunning": timer != nil,
+      "competingApps": competing,
     ]
   }
 
@@ -1387,7 +1379,8 @@ final class QianniuAXCollector {
             normalizedWidth > 0, normalizedHeight > 0,
             normalizedX + normalizedWidth <= 1,
             normalizedY + normalizedHeight <= 1,
-            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
+            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
+            let ownerPID = runningPID(), windowIsOwnedBy(windowID, pid: ownerPID) else {
         finish(["error": "image_crop_precondition_failed",
                 "message": "The expected customer or image region could not be verified."])
         return
@@ -1449,131 +1442,73 @@ final class QianniuAXCollector {
           videoDetected = looksLikeVideoThumbnail(composite)
         }
       }
-      if !videoDetected,
-         let cached = matchingRecentJDCachedImage(
-           visibleImage: image, expectedAt: expectedMediaAt),
-         activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
-         let data = try? Data(contentsOf: cached.url),
-         data.count == cached.size,
-         let verifiedValues = try? cached.url.resourceValues(
-           forKeys: [.contentModificationDateKey, .fileSizeKey]),
-         verifiedValues.fileSize == cached.size,
-         verifiedValues.contentModificationDate == cached.modified,
-         let cachedImage = NSImage(data: data),
-         let cachedCGImage = cachedImage.cgImage(
-           forProposedRect: nil, context: nil, hints: nil) {
-        let ext = cached.url.pathExtension.lowercased()
-        let mime = ext == "png" ? "image/png" :
-          (ext == "webp" ? "image/webp" : "image/jpeg")
-        finish([
-          "kind": "image",
-          "mimeType": mime,
-          "extension": ext,
-          "originalName": cached.url.lastPathComponent,
-          "dataBase64": data.base64EncodedString(),
-          "visualFingerprint": averageImageHash(cachedCGImage),
-          "captureSource": "jd-image-cache",
+      let detectedOnScreen = videoDetected
+      // An absent play overlay is not proof of an image. Independently check
+      // video-cache bytes before accepting the image path. Keep disk/decoder
+      // work off the serial AX queue so reply delivery can continue.
+      self.videoCacheQueue.async {
+        let check: JDVideoCacheCheck = detectedOnScreen ? .notFound :
+          matchingJDCachedVideo(visibleImage: image, timeout: 4)
+        func verifiedFinish(_ payload: [String: Any]) {
+          self.queue.async {
+            guard self.activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
+                  windowIsOwnedBy(windowID, pid: ownerPID) else {
+              finish(["error": "media_customer_changed_during_cache_check",
+                      "message": "The verified customer changed during cache cross-check; nothing was assigned."])
+              return
+            }
+            finish(payload)
+          }
+        }
+        let verifiedVideo: Bool
+        let cacheCheck: String
+        switch check {
+        case .matched:
+          verifiedVideo = true
+          cacheCheck = "matched_video"
+        case .notFound:
+          verifiedVideo = detectedOnScreen
+          cacheCheck = detectedOnScreen ? "play_control_detected" : "no_matching_video"
+        case .unresolved(let reason):
+          verifiedFinish(["error": reason, "cacheCrossCheck": "unresolved",
+                          "message": "Video-cache cross-check was incomplete or ambiguous; this media was not downgraded to an image."])
+          return
+        }
+        if !verifiedVideo,
+           let cached = matchingRecentJDCachedImage(
+             visibleImage: image, expectedAt: expectedMediaAt),
+           let data = try? Data(contentsOf: cached.url), data.count == cached.size,
+           let values = try? cached.url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+           values.fileSize == cached.size, values.contentModificationDate == cached.modified,
+           let cachedImage = NSImage(data: data),
+           let cachedCGImage = cachedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+          let ext = cached.url.pathExtension.lowercased()
+          let mime = ext == "png" ? "image/png" : (ext == "webp" ? "image/webp" : "image/jpeg")
+          verifiedFinish([
+            "kind": "image", "mimeType": mime, "extension": ext,
+            "originalName": cached.url.lastPathComponent,
+            "dataBase64": data.base64EncodedString(),
+            "visualFingerprint": averageImageHash(cachedCGImage),
+            "captureSource": "jd-image-cache", "cacheCrossCheck": cacheCheck,
+          ])
+          return
+        }
+        verifiedFinish([
+          "kind": verifiedVideo ? "video" : "image", "mimeType": "image/png", "extension": "png",
+          "dataBase64": png.base64EncodedString(), "visualFingerprint": averageImageHash(image),
+          "captureSource": "verified-window-crop", "cacheCrossCheck": cacheCheck,
+          "mediaWidth": image.width, "mediaHeight": image.height,
         ])
-        return
       }
-      finish([
-        "kind": videoDetected ? "video" : "image",
-        "mimeType": "image/png",
-        "extension": "png",
-        "dataBase64": png.base64EncodedString(),
-        "visualFingerprint": averageImageHash(image),
-        "captureSource": "verified-window-crop",
-      ])
     }
   }
 
-  /// Checks JD's local media cache for a newly detected customer turn even
-  /// when a pale/low-contrast thumbnail produced no Vision rectangle. This is
-  /// intentionally clock-bounded and ambiguity-rejecting; it never returns a
-  /// merely "newest" file from the shared multi-customer cache.
+  /// The shared cache requires visible evidence, not an unread timestamp.
   func captureRecentCachedMedia(expectedCustomer: String,
                                 expectedMediaAt: Date?,
                                 destinationDirectory: String,
                                 completion: @escaping FlutterResult) {
-    videoCacheQueue.async { [weak self] in
-      guard let self else { return }
-      func finish(_ payload: [String: Any]) {
-        DispatchQueue.main.async { completion(payload) }
-      }
-      let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard AXIsProcessTrusted(), !expected.isEmpty,
-            let expectedMediaAt,
-            activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
-        finish(["kind": "none", "reason": "customer_or_clock_unverified"])
-        return
-      }
-      guard let cached = uniquelyTimedRecentJDCachedMedia(expectedAt: expectedMediaAt) else {
-        finish(["kind": "none", "reason": "no_unique_recent_cache_media"])
-        return
-      }
-      let common: [String: Any] = [
-        "cacheKey": cached.cacheKey,
-        "cacheModifiedAtMs": Int(cached.modified.timeIntervalSince1970 * 1000),
-        "captureSource": cached.kind == "video" ? "jd-video-cache" : "jd-image-cache",
-      ]
-      if cached.kind == "image" {
-        guard let data = try? Data(contentsOf: cached.url),
-              data.count == cached.size,
-              let image = NSImage(data: data),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true else {
-          finish(["kind": "none", "reason": "cache_image_changed"])
-          return
-        }
-        let ext = cached.url.pathExtension.lowercased()
-        let mime = ext == "png" ? "image/png" :
-          (ext == "webp" ? "image/webp" : "image/jpeg")
-        finish(common.merging([
-          "kind": "image",
-          "mimeType": mime,
-          "extension": ext,
-          "originalName": cached.url.lastPathComponent,
-          "dataBase64": data.base64EncodedString(),
-          "visualFingerprint": averageImageHash(cgImage),
-        ]) { _, new in new })
-        return
-      }
-
-      let destination = URL(fileURLWithPath: destinationDirectory, isDirectory: true)
-        .standardizedFileURL
-      guard FileManager.default.fileExists(atPath: destination.path) else {
-        finish(["kind": "none", "reason": "video_destination_missing"])
-        return
-      }
-      var file = destination.appendingPathComponent(cached.url.lastPathComponent)
-      if FileManager.default.fileExists(atPath: file.path) {
-        file = destination.appendingPathComponent(
-          "\(UUID().uuidString).\(cached.url.pathExtension)")
-      }
-      do {
-        try FileManager.default.copyItem(at: cached.url, to: file)
-      } catch {
-        finish(["kind": "none", "reason": "cache_video_copy_failed"])
-        return
-      }
-      guard activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
-            let values = try? file.resourceValues(forKeys: [.fileSizeKey]),
-            values.fileSize == cached.size else {
-        try? FileManager.default.removeItem(at: file)
-        finish(["kind": "none", "reason": "cache_video_changed"])
-        return
-      }
-      let ext = file.pathExtension.lowercased()
-      let mime = ext == "mov" || ext == "m4v" ? "video/quicktime" :
-        (ext == "webm" ? "video/webm" : "video/mp4")
-      finish(common.merging([
-        "kind": "video",
-        "path": file.path,
-        "originalName": cached.url.lastPathComponent,
-        "mimeType": mime,
-        "size": cached.size,
-      ]) { _, new in new })
-    }
+    completion(["kind": "none", "reason": "visible_media_verification_required"])
   }
 
   /// Copies a freshly received video from JD's local per-chat media cache.
@@ -1598,15 +1533,22 @@ final class QianniuAXCollector {
             normalizedX + normalizedWidth <= 1,
             normalizedY + normalizedHeight <= 1,
             activeCustomerIdentity().map({ exactCustomerIdentityMatches($0, expected) }) == true,
-            runningPID() != nil, windowBounds(windowID) != nil,
+            let ownerPID = runningPID(), windowIsOwnedBy(windowID, pid: ownerPID), windowBounds(windowID) != nil,
             FileManager.default.fileExists(atPath: destination.path) else {
         finish(["error": "video_download_precondition_failed",
                 "message": "Keep the verified customer video visible while its local cache is inspected."])
         return
       }
-      guard let cached = newestRecentJDCachedVideo() else {
+      guard let fullImage = CGWindowListCreateImage(
+          .null, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
+          let visibleImage = fullImage.cropping(to: CGRect(
+            x: CGFloat(normalizedX) * CGFloat(fullImage.width),
+            y: CGFloat(normalizedY) * CGFloat(fullImage.height),
+            width: CGFloat(normalizedWidth) * CGFloat(fullImage.width),
+            height: CGFloat(normalizedHeight) * CGFloat(fullImage.height)).integral),
+          case let .matched(cached) = matchingJDCachedVideo(visibleImage: visibleImage) else {
         finish(["error": "video_download_not_found",
-                "message": "No fresh video was found in JD's local media cache; the conversation was left untouched."])
+                "message": "No unique video matched the verified visible thumbnail. Unrelated cache files were rejected."])
         return
       }
       var file = destination.appendingPathComponent(cached.url.lastPathComponent)
@@ -1870,14 +1812,22 @@ final class QianniuAXCollector {
   /// physical Send control is clicked. No caller can omit the expected ID.
   func sendDraftOnce(expectedCustomer: String, reply: String,
                      mediaPaths: [String] = [],
+                     deadline: Date,
                      completion: @escaping FlutterResult) {
+    let expiresAt = ProcessInfo.processInfo.systemUptime + min(12, max(0, deadline.timeIntervalSinceNow))
     queue.async { [weak self] in
       guard let self else { return }
+      let budget = AccessibilityBudget(deadline: deadline, uptimeDeadline: expiresAt)
+      defer { budget.close() }
       func finish(_ payload: [String: Any]) {
         DispatchQueue.main.async { completion(payload) }
       }
       let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
       let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard budget.isCurrent, CustomerSafety.operationCurrent(deadline) else {
+        finish(["error": "operation_expired", "message": "Queued send expired before native execution; nothing was inserted or sent."])
+        return
+      }
       guard !expected.isEmpty, !text.isEmpty else {
         finish(["error": "invalid_send_request", "message": "Expected customer and reply are required."])
         return
@@ -1909,9 +1859,15 @@ final class QianniuAXCollector {
         receptionNodes(pid: pid)
       }
 
-      guard let opened = scopedNodes(), activeCustomerMatches(expected, nodes: opened) else {
+      guard let opened = scopedNodes(), activeCustomerMatches(expected, nodes: opened),
+            self.clearOwnedComposer(in: opened) else {
         finish(["error": "expected_conversation_missing",
                 "message": "The exact active JD customer \(expected) was not verified; nothing was inserted or sent."])
+        return
+      }
+
+      guard CustomerSafety.operationCurrent(deadline) else {
+        finish(["error": "operation_expired", "message": "Send verification exceeded its deadline; nothing was inserted or sent."])
         return
       }
 
@@ -1920,7 +1876,12 @@ final class QianniuAXCollector {
                 "message": "Could not verify \(expected) and its composer after opening the chat."])
         return
       }
-      let existing = stringAttribute(composer.element, kAXValueAttribute)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      guard let composerValue = stringAttribute(composer.element, kAXValueAttribute),
+            budget.isCurrent else {
+        finish(["error": "composer_read_failed", "message": "The verified customer's composer could not be read; no text was inserted."])
+        return
+      }
+      let existing = composerValue.trimmingCharacters(in: .whitespacesAndNewlines)
       guard existing.isEmpty else {
         finish(["error": "composer_not_empty",
                 "message": "JD's composer already contains text. It was left unchanged."])
@@ -1930,11 +1891,13 @@ final class QianniuAXCollector {
         var settable = DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(composer.element, kAXValueAttribute as CFString, &settable) == .success,
               settable.boolValue,
+              budget.isCurrent,
               AXUIElementSetAttributeValue(composer.element, kAXValueAttribute as CFString, text as CFTypeRef) == .success else {
           finish(["error": "composer_not_settable",
                   "message": "JingMai did not allow safe AX insertion; nothing was sent."])
           return
         }
+        self.ownedComposers[expected] = OwnedComposer(element: composer.element, text: text)
       } else {
         // Qianniu's rich composer does not expose image insertion through AX.
         // Paste only caller-verified local files, then append the reply text.
@@ -1992,10 +1955,18 @@ final class QianniuAXCollector {
             let send = verified.first(where: {
               ($0.role == kAXButtonRole as String || $0.role == kAXMenuButtonRole as String) &&
                 $0.title == "发送"
-            }), let frame = send.frame else {
-        _ = AXUIElementSetAttributeValue(composer.element, kAXValueAttribute as CFString, "" as CFTypeRef)
+            }), send.frame != nil else {
+        // A stale AX composer can refer to a newly selected customer's input.
+        // Only clear our exact text while the exact owner is still verified.
+        if let current = scopedNodes(), activeCustomerMatches(expected, nodes: current),
+           let currentComposer = current.first(where: { $0.role == kAXTextAreaRole as String }),
+           stringAttribute(currentComposer.element, kAXValueAttribute) == text {
+          if AXUIElementSetAttributeValue(currentComposer.element, kAXValueAttribute as CFString, "" as CFTypeRef) == .success {
+            self.ownedComposers.removeValue(forKey: expected)
+          }
+        }
         finish(["error": "pre_send_verification_failed",
-                "message": "Customer, inserted text, or Send control verification failed. The inserted text was cleared."])
+                "message": "Customer, inserted text, or Send control verification failed. Only verified text owned by this customer may be cleared."])
         return
       }
 
@@ -2003,12 +1974,30 @@ final class QianniuAXCollector {
       // re-verifying the exact customer and composer state.
       _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
       usleep(150_000)
-      guard let finalNodes = scopedNodes(), activeCustomerMatches(expected, nodes: finalNodes) else {
+      guard let finalNodes = scopedNodes(), activeCustomerMatches(expected, nodes: finalNodes),
+            let finalComposer = finalNodes.first(where: { $0.role == kAXTextAreaRole as String }),
+            stringAttribute(finalComposer.element, kAXValueAttribute) == text,
+            let finalSend = finalNodes.first(where: {
+              ($0.role == kAXButtonRole as String || $0.role == kAXMenuButtonRole as String) &&
+                $0.title == "发送"
+            }), let finalFrame = finalSend.frame,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+            budget.isCurrent else {
         finish(["error": "final_customer_verification_failed",
                 "message": "The expected customer was no longer active; nothing was sent."])
         return
       }
-      let point = CGPoint(x: frame.midX, y: frame.midY)
+      guard CustomerSafety.operationCurrent(deadline) else {
+        if let currentComposer = finalNodes.first(where: { $0.role == kAXTextAreaRole as String }),
+           stringAttribute(currentComposer.element, kAXValueAttribute) == text {
+          if AXUIElementSetAttributeValue(currentComposer.element, kAXValueAttribute as CFString, "" as CFTypeRef) == .success {
+            self.ownedComposers.removeValue(forKey: expected)
+          }
+        }
+        finish(["error": "operation_expired", "message": "Send deadline expired before clicking Send; the verified unsent text was cleared."])
+        return
+      }
+      let point = CGPoint(x: finalFrame.midX, y: finalFrame.midY)
       guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
                                mouseCursorPosition: point, mouseButton: .left),
             let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
@@ -2032,6 +2021,10 @@ final class QianniuAXCollector {
       var lastComposerText: String?
       repeat {
         usleep(250_000)
+        guard budget.isCurrent else {
+          finish(["error": "send_unconfirmed", "message": "Native confirmation exceeded its deadline after clicking Send; the reply remains pending for reconciliation."])
+          return
+        }
         guard let after = scopedNodes(), activeCustomerMatches(expected, nodes: after),
               let afterComposer = after.first(where: { $0.role == kAXTextAreaRole as String }) else {
           finish(["error": "send_unconfirmed",
@@ -2041,6 +2034,7 @@ final class QianniuAXCollector {
         let composerText = (stringAttribute(afterComposer.element, kAXValueAttribute) ?? "")
           .trimmingCharacters(in: .whitespacesAndNewlines)
         if composerText.isEmpty {
+          self.ownedComposers.removeValue(forKey: expected)
           finish(["sent": true, "customer": expected, "reply": text,
                   "mediaCount": requestedMedia.count])
           return
@@ -2059,6 +2053,7 @@ final class QianniuAXCollector {
            AXUIElementSetAttributeValue(lastComposer.element,
                                         kAXValueAttribute as CFString,
                                         "" as CFTypeRef) == .success {
+          self.ownedComposers.removeValue(forKey: expected)
           finish(["error": "send_not_committed",
                   "message": "JingMai kept the exact reply in the composer after Send. The unsent text was cleared and the queued draft will retry."])
           return
@@ -2190,42 +2185,10 @@ final class QianniuAXCollector {
   }
 
   private func activeCustomerMatches(_ expected: String, nodes: [AXNode]) -> Bool {
-    guard let composer = nodes.first(where: { $0.role == kAXTextAreaRole as String }),
-          let split = nodes
-            .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
-            .max(by: { $0.path.count < $1.path.count }),
-          let frame = split.frame else { return false }
-    // JD places other labels before the customer name in some header layouts.
-    // Do not treat the leftmost text as the identity; require a positive match
-    // inside the active chat's header region instead.
-    let headerMatches = nodes.contains { node in
-      guard node.role == kAXStaticTextRole as String,
-            let text = node.text, let candidate = node.frame else { return false }
-      return candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
-        candidate.maxY <= frame.minY && candidate.minY >= frame.minY - 100 &&
-        visibleCustomerIdentityMatches(text, expected: expected)
-    }
-    if headerMatches { return true }
-
-    let jdHeaderMatches = nodes.contains { node in
-      guard node.role == kAXStaticTextRole as String,
-            let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-            let candidate = node.frame else { return false }
-      return exactCustomerIdentityMatches(text, expected) &&
-        candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
-        candidate.minY >= frame.minY && candidate.maxY <= frame.minY + 70
-    }
-    if jdHeaderMatches { return true }
-
-    // JD sometimes exposes the complete active account only in its details
-    // panel. The sidebar is to the left and cannot satisfy this region.
-    return nodes.contains { node in
-      guard node.role == kAXStaticTextRole as String,
-            let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-            let candidate = node.frame else { return false }
-      return candidate.minX >= frame.maxX && exactCustomerIdentityMatches(text, expected)
-    }
+    guard let actual = activeCustomerIdentity(in: nodes) else { return false }
+    return CustomerSafety.matches(actual, expected)
   }
+
 
   /// Reads the signed-in service account from the reception window's account
   /// header. This label is exposed by AX even though transfer rows are not.
@@ -2259,12 +2222,23 @@ final class QianniuAXCollector {
     let app = AXUIElementCreateApplication(pid)
     var lines: [String] = ["bundle=\(bundleIdentifier) pid=\(pid)"]
     var count = 0
+    var snapshot: [AXNode] = []
     walk(app, path: "app", depth: 0, maxDepth: min(maxDepth, 30), maxNodes: 4_000) { node, depth in
       count += 1
+      snapshot.append(node)
       lines.append(String(repeating: "  ", count: depth) + describe(node))
     }
+    let reception = snapshot.first(where: {
+      $0.role == kAXWindowRole as String && ($0.title?.contains("咚咚融合工作台") == true)
+    })
+    let scoped = reception.map { window in
+      snapshot.filter { $0.path == window.path || $0.path.hasPrefix(window.path + "/") }
+    } ?? []
+    let identity = activeCustomerIdentity(in: scoped)
+    lines.insert("activeCustomerId=\(identity ?? "unverified")", at: 1)
     let output = lines.joined(separator: "\n")
-    return ["pid": Int(pid), "nodeCount": count, "tree": output]
+    return ["pid": Int(pid), "nodeCount": count, "tree": output,
+            "activeCustomerId": identity.map { $0 as Any } ?? NSNull()]
   }
 
   private func runningPID() -> pid_t? {
@@ -2272,10 +2246,37 @@ final class QianniuAXCollector {
       .first(where: { !$0.isTerminated })?.processIdentifier
   }
 
+  private func clearOwnedComposer(in nodes: [AXNode]) -> Bool {
+    guard let owner = activeCustomerIdentity(in: nodes),
+          let owned = ownedComposers[owner] else { return true }
+    guard accessibilityReadAllowed(),
+          let composer = nodes.first(where: { $0.role == kAXTextAreaRole as String }),
+          let current = stringAttribute(composer.element, kAXValueAttribute) else { return false }
+    if current.isEmpty {
+      ownedComposers.removeValue(forKey: owner)
+      return true
+    }
+    guard CustomerSafety.canRecoverOwnedComposer(owner: owner, active: activeCustomerIdentity(in: nodes),
+                                                 insertedText: owned.text, currentText: current,
+                                                 sameElement: CFEqual(composer.element, owned.element)) else {
+      // Operator edits are not ours to erase, even in the same customer chat.
+      ownedComposers.removeValue(forKey: owner)
+      return true
+    }
+    guard accessibilityReadAllowed(), activeCustomerMatches(owner, nodes: nodes),
+          AXUIElementSetAttributeValue(composer.element, kAXValueAttribute as CFString,
+                                       "" as CFTypeRef) == .success,
+          stringAttribute(composer.element, kAXValueAttribute) == "" else { return false }
+    ownedComposers.removeValue(forKey: owner)
+    return true
+  }
+
   /// Traverse only Dingdong's reception window. Walking every JD window at
   /// each verification multiplies capture and send latency. Resolve the
   /// window afresh each time; never cache the active customer for sending.
   private func receptionNodes(pid: pid_t) -> [AXNode]? {
+    let budget = AccessibilityBudget(deadline: Date().addingTimeInterval(4))
+    defer { budget.close() }
     let root = AXUIElementCreateApplication(pid)
     if let window = elementArrayAttribute(root, kAXWindowsAttribute).first(where: {
       stringAttribute($0, kAXTitleAttribute)?.contains("咚咚融合工作台") == true
@@ -2341,54 +2342,34 @@ final class QianniuAXCollector {
     return transcripts.max(by: { $0.height < $1.height })?.maxY ?? composerFrame.minY
   }
 
-  /// Resolves the exact active account from the clickable conversation group.
-  /// Qianniu truncates the central header, but the corresponding group title
-  /// contains the complete account name.
+  /// Resolves one complete ID in the active chat header. Sidebar candidates
+  /// and truncated prefixes are never used to prove the active customer.
   func activeCustomerIdentity() -> String? {
     guard AXIsProcessTrusted(), let pid = runningPID(),
           let scoped = receptionNodes(pid: pid) else { return nil }
-    if let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }),
-       let split = scoped
-        .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
-        .max(by: { $0.path.count < $1.path.count }),
-       let frame = split.frame {
-      let exactHeaderIdentity = scoped.compactMap { node -> (String, CGRect)? in
-         guard node.role == kAXStaticTextRole as String,
-               let text = node.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let identity = cleanedRowCustomerIdentity(text),
-               let candidate = node.frame,
-               candidate.minX >= frame.minX && candidate.maxX <= frame.maxX,
-               candidate.minY >= frame.minY && candidate.maxY <= frame.minY + 70
-         else { return nil }
-         return (identity, candidate)
-       }.min { left, right in
-         if abs(left.1.minX - right.1.minX) > 2 { return left.1.minX < right.1.minX }
-         return left.1.minY < right.1.minY
-       }?.0
-      if let exactHeaderIdentity { return exactHeaderIdentity }
-    }
-    let conversations = scoped.filter {
-      $0.role == kAXGroupRole as String && $0.actions.contains(kAXPressAction as String) &&
-        !($0.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-    }
-    if conversations.count == 1 { return conversations[0].title }
+    return activeCustomerIdentity(in: scoped)
+  }
 
+  private func activeCustomerIdentity(in scoped: [AXNode]) -> String? {
     guard let composer = scoped.first(where: { $0.role == kAXTextAreaRole as String }),
           let split = scoped
             .filter({ $0.role == kAXSplitGroupRole as String && composer.path.hasPrefix($0.path + "/") })
             .max(by: { $0.path.count < $1.path.count }),
-          let frame = split.frame,
-          let header = scoped.first(where: { node in
-            guard node.role == kAXStaticTextRole as String, let candidate = node.frame,
-                  let text = node.text, !text.isEmpty else { return false }
-            return candidate.minX >= frame.minX && candidate.maxX <= frame.maxX &&
-              candidate.maxY <= frame.minY && candidate.minY >= frame.minY - 100
-          })?.text else { return nil }
-    let matches = conversations.compactMap(\.title).filter {
-      visibleCustomerIdentityMatches(header, expected: $0)
+          let frame = split.frame else { return nil }
+    let headerNodes = scoped.filter { $0.path.hasPrefix(split.path + "/") }
+    let labels = headerNodes.compactMap { node -> CustomerSafety.HeaderLabel? in
+      guard node.role == kAXStaticTextRole as String,
+            let text = node.text, let bounds = node.frame else { return nil }
+      return CustomerSafety.HeaderLabel(text: text, frame: bounds)
     }
-    if matches.count == 1 { return matches[0] }
-    return cleanedRowCustomerIdentity(header)
+    let quickTransferFrames = headerNodes.compactMap { node -> CGRect? in
+      guard node.role == kAXButtonRole as String,
+            (node.title?.contains("快捷转接") == true ||
+             node.description?.contains("快捷转接") == true) else { return nil }
+      return node.frame
+    }
+    return CustomerSafety.activeHeaderIdentity(labels: labels, chatFrame: frame,
+                                               quickTransferFrames: quickTransferFrames)
   }
 
   func conversationIdentities() -> [String] {
@@ -2585,7 +2566,8 @@ final class QianniuAXCollector {
     guard let evidence = unreadScreenshot(pid: pid, matching: windowFrame) else {
       return activeFallback()
     }
-    let customerGroups = nodes.compactMap { node -> (String, CGRect)? in
+    let customerGroups = nodes.compactMap {
+      node -> (customer: String, frame: CGRect, flipped: Bool)? in
       guard node.path.hasPrefix(window.path + "/"),
             node.role == kAXGroupRole as String,
             node.actions.contains(kAXPressAction as String),
@@ -2596,33 +2578,23 @@ final class QianniuAXCollector {
             frame.maxY <= windowFrame.maxY - 30,
             frame.width >= 140, frame.width <= 360,
             frame.height >= 35, frame.height <= 100,
-            let customer = customerIDInRow(
+            let identity = customerIdentityInRow(
               frame: frame, windowBounds: evidence.bounds, image: evidence.image)
       else { return nil }
-      return (customer, frame)
+      return (identity.customer, frame, identity.flipped)
     }
     var seen = Set<String>()
-    var unique = customerGroups.filter { seen.insert($0.0).inserted }
+    let unique = customerGroups.filter { seen.insert($0.customer).inserted }
     if unique.isEmpty { return activeFallback() }
-    if let active = activeCustomerIdentity(),
-       !unique.contains(where: { exactCustomerIdentityMatches($0.0, active) }) {
-      let ambiguous = unique.indices.filter {
-        oneVsEllOCRConfusion(unique[$0].0, active)
-      }
-      // Only the verified active header may repair one unique OCR alias.
-      // Two similar rows remain unresolved rather than being merged.
-      if ambiguous.count == 1 {
-        let index = ambiguous[0]
-        unique[index] = (active, unique[index].1)
-      }
-    }
-    return unique.map { customer, frame in
+    return unique.map { customer, frame, flipped in
       let redPixels = unreadRedPixels(
-        frame: frame, windowBounds: evidence.bounds, image: evidence.image)
+        frame: frame, windowBounds: evidence.bounds, image: evidence.image,
+        flipped: flipped)
       let unread = redPixels >= 8
       let elapsed: Any = unread
         ? (unreadElapsedSeconds(frame: frame, windowBounds: evidence.bounds,
-                                image: evidence.image).map { $0 as Any } ?? NSNull())
+                                image: evidence.image, flipped: flipped)
+            .map { $0 as Any } ?? NSNull())
         : NSNull()
       return [
         "customer": customer,
@@ -2635,13 +2607,22 @@ final class QianniuAXCollector {
   }
 
   func openConversation(expectedCustomer: String, allowActivation: Bool = true,
+                        allowObservedIdentityResolution: Bool = false,
+                        deadline: Date,
                         completion: @escaping FlutterResult) {
+    let expiresAt = ProcessInfo.processInfo.systemUptime + min(8, max(0, deadline.timeIntervalSinceNow))
     queue.async { [weak self] in
       guard let self else { return }
+      let budget = AccessibilityBudget(deadline: deadline, uptimeDeadline: expiresAt)
+      defer { budget.close() }
       func finish(_ payload: [String: Any]) {
         DispatchQueue.main.async { completion(payload) }
       }
       let expected = expectedCustomer.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard budget.isCurrent, CustomerSafety.operationCurrent(deadline) else {
+        finish(["error": "operation_expired", "message": "Queued customer switch expired; JD was left untouched."])
+        return
+      }
       guard !expected.isEmpty, AXIsProcessTrusted(), let pid = runningPID() else {
         finish(["error": "conversation_unavailable", "message": "JingMai, Accessibility, or customer ID is unavailable."])
         return
@@ -2661,6 +2642,10 @@ final class QianniuAXCollector {
       let scoped = nodes.filter {
         $0.path == window.path || $0.path.hasPrefix(window.path + "/")
       }
+      guard self.clearOwnedComposer(in: scoped) else {
+        finish(["error": "owned_composer_recovery_failed", "message": "Could not safely clear this app's previous verified insertion. The reply remains queued."])
+        return
+      }
       if activeCustomerMatches(expected, nodes: scoped) {
         finish(["opened": true, "customer": expected, "method": "already_active"])
         return
@@ -2673,16 +2658,27 @@ final class QianniuAXCollector {
               node.actions.contains(kAXPressAction as String),
               let frame = node.frame,
               let evidence,
-              let customer = customerIDInRow(
+              let identity = customerIdentityInRow(
                 frame: frame, windowBounds: evidence.bounds, image: evidence.image)
         else { return nil }
-        return (node, customer)
+        return (node, identity.customer)
       }
       let exact = rowCandidates.filter { exactCustomerIdentityMatches($0.1, expected) }
-      let ambiguous = rowCandidates.filter { oneVsEllOCRConfusion($0.1, expected) }
-      let selectedViaUniqueOCRAlias = exact.isEmpty && ambiguous.count == 1
-      let candidates = !exact.isEmpty ? exact.map(\.0) :
-        (ambiguous.count == 1 ? ambiguous.map(\.0) : [])
+      let reconciled = exact.isEmpty
+        ? rowCandidates.filter {
+            CustomerSafety.canReconcileSidebarOCR($0.1, verifiedAX: expected)
+          }
+        : []
+      // A unique one-edit OCR spelling may identify which row to press, but it
+      // never becomes the customer identity. After the press, the independent
+      // AX header below must still equal `expected` exactly before capture or
+      // send can continue.
+      let candidates = (exact.count == 1 ? exact : reconciled.count == 1 ? reconciled : []).map(\.0)
+      guard candidates.count == 1 else {
+        finish(["error": "conversation_identity_ambiguous",
+                "message": "Exactly one exact or uniquely reconciled sidebar row must match \(expected); found exact=\(exact.count), near=\(reconciled.count)."])
+        return
+      }
       guard let target = candidates.min(by: {
         ($0.frame?.minX ?? .greatestFiniteMagnitude) <
           ($1.frame?.minX ?? .greatestFiniteMagnitude)
@@ -2691,20 +2687,24 @@ final class QianniuAXCollector {
         return
       }
 
-      func verifiedIdentity() -> String? {
-        if let active = activeCustomerIdentity() {
-          if exactCustomerIdentityMatches(active, expected) {
-            return active
-          }
-          // A unique row may be located through the OCR 1/l ambiguity, but
-          // retain the exact active-header identity as a separate value. This
-          // never changes either customer name and cannot merge two rows.
-          if selectedViaUniqueOCRAlias && oneVsEllOCRConfusion(active, expected) {
-            return active
-          }
-        }
+      var observedCustomer = activeCustomerIdentity(in: scoped)
+      let identityBeforeSelection = observedCustomer
+      let targetWasSelected =
+        boolAttribute(target.element, kAXSelectedAttribute as String) == true
+      func verifiedIdentity(allowOCRReconciliation: Bool = false) -> String? {
         guard let current = receptionNodes(pid: pid) else { return nil }
-        return activeCustomerMatches(expected, nodes: current) ? expected : nil
+        observedCustomer = activeCustomerIdentity(in: current)
+        if CustomerSafety.matches(observedCustomer, expected) {
+          return observedCustomer
+        }
+        if allowObservedIdentityResolution && allowOCRReconciliation &&
+            (targetWasSelected ||
+             !CustomerSafety.matches(observedCustomer, identityBeforeSelection)) &&
+            CustomerSafety.canReconcileSidebarOCR(
+              expected, verifiedAX: observedCustomer) {
+          return observedCustomer
+        }
+        return nil
       }
 
       if let verified = verifiedIdentity() {
@@ -2732,10 +2732,15 @@ final class QianniuAXCollector {
         return
       }
 
+      guard CustomerSafety.operationCurrent(deadline) else {
+        finish(["error": "operation_expired", "message": "Customer verification exceeded the switch deadline; JD was left untouched."])
+        return
+      }
       _ = AXUIElementPerformAction(target.element, kAXPressAction as CFString)
       for _ in 0..<8 {
+        guard budget.isCurrent else { break }
         usleep(125_000)
-        if let verified = verifiedIdentity() {
+        if let verified = verifiedIdentity(allowOCRReconciliation: true) {
           finish(["opened": true, "customer": verified, "method": "ax_press"])
           return
         }
@@ -2752,6 +2757,10 @@ final class QianniuAXCollector {
       // Reaching this point proves either activation was explicitly allowed or
       // Qianniu was already frontmost. Passive monitoring may click a verified
       // row only in the latter case; it still never steals focus.
+      guard CustomerSafety.operationCurrent(deadline) else {
+        finish(["error": "operation_expired", "message": "Customer switch deadline expired before the fallback click."])
+        return
+      }
       if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
         _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateIgnoringOtherApps])
         usleep(150_000)
@@ -2768,13 +2777,15 @@ final class QianniuAXCollector {
       down.post(tap: .cghidEventTap)
       up.post(tap: .cghidEventTap)
       for _ in 0..<12 {
+        guard budget.isCurrent else { break }
         usleep(125_000)
-        if let verified = verifiedIdentity() {
+        if let verified = verifiedIdentity(allowOCRReconciliation: true) {
           finish(["opened": true, "customer": verified, "method": "guarded_click"])
           return
         }
       }
       finish(["error": "conversation_verification_failed",
+              "observedCustomer": observedCustomer.map { $0 as Any } ?? NSNull(),
               "message": "JingMai did not activate the expected customer \(expected) after AXPress and a guarded row click."])
     }
   }
@@ -3224,7 +3235,8 @@ final class QianniuAXCollector {
                 frame.maxY <= splitFrame.minY && frame.minY >= splitFrame.minY - 100
             })
             .max(by: { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) }),
-          let customerName = customerNode.text else {
+          let customerName = activeCustomerIdentity(in: scopedNodes),
+          CustomerSafety.fullIdentity(customerName) != nil else {
       onDiagnostic?(["event": "customer_identity_missing",
                      "splitFrame": normalizedFrame(splitGroup.frame)])
       return
@@ -3251,9 +3263,9 @@ final class QianniuAXCollector {
     let captures: [[String: Any]] = messageNodes.compactMap { node in
       guard let body = node.text, body != customerName, body.count <= 20_000 else { return nil }
       let fingerprint = sha256([conversationKey, node.identifier ?? "", body, normalizedFrame(node.frame), node.path].joined(separator: "\u{1f}"))
-      guard seenFingerprints.insert(fingerprint).inserted else { return nil }
+      guard !seenFingerprints.contains(fingerprint) else { return nil }
       return [
-        "stableId": node.identifier.flatMap { $0.isEmpty ? nil : "ax:\($0)" } ?? "fp:\(fingerprint)",
+        "stableId": "fp:\(fingerprint)",
         "direction": inferDirection(node: node, container: messageArea),
         "body": body,
         "axPath": node.path,
@@ -3265,9 +3277,19 @@ final class QianniuAXCollector {
                      "note": "No unseen accessible messages are currently visible."])
       return
     }
+    guard let after = activeCustomerIdentity(), CustomerSafety.matches(after, customerName) else {
+      onDiagnostic?(["event": "customer_changed_during_capture",
+                     "expectedCustomer": customerName])
+      return
+    }
+    for capture in captures {
+      if let id = capture["stableId"] as? String { seenFingerprints.insert(String(id.dropFirst(3))) }
+    }
     onCapture?([
       "stableKey": conversationKey,
       "customerName": customerName,
+      "customerExternalId": customerName,
+      "verifiedCustomerId": after,
       "messages": captures,
       "capturedAtMs": Int(Date().timeIntervalSince1970 * 1000),
     ])
@@ -3279,7 +3301,7 @@ final class QianniuAXCollector {
   }
 
   private func stableConversationKey(_ identity: AXNode, customerName: String) -> String {
-    if let identifier = identity.identifier, !identifier.isEmpty { return "ax:\(identifier)" }
+    if let identifier = identity.identifier, !identifier.isEmpty { return "customer:\(sha256(customerName)):ax:\(identifier)" }
     return "customer:\(sha256(customerName))"
   }
 
@@ -3290,15 +3312,20 @@ final class QianniuAXCollector {
 
   private func walk(_ element: AXUIElement, path: String, depth: Int, maxDepth: Int,
                     maxNodes: Int, visit: (AXNode, Int) -> Void) {
+    let budget = AccessibilityBudget(deadline: Date().addingTimeInterval(4))
+    defer { budget.close() }
     guard depth <= maxDepth else { return }
     var visited = 0
+    var snapshot: [(AXNode, Int)] = []
     func recurse(_ current: AXUIElement, _ currentPath: String, _ currentDepth: Int) {
-      guard currentDepth <= maxDepth, visited < maxNodes else { return }
+      guard currentDepth <= maxDepth, budget.isCurrent else { return }
+      guard visited < maxNodes else { budget.invalidate(); return }
       visited += 1
       let node = makeNode(current, path: currentPath)
-      visit(node, currentDepth)
+      snapshot.append((node, currentDepth))
       var roleCounts: [String: Int] = [:]
       for child in node.children {
+        guard budget.isCurrent else { break }
         let role = stringAttribute(child, kAXRoleAttribute) ?? "AXUnknown"
         let index = roleCounts[role, default: 0]
         roleCounts[role] = index + 1
@@ -3306,11 +3333,16 @@ final class QianniuAXCollector {
       }
     }
     recurse(element, path, depth)
+    // Do not leak a partial tree to customer/header matching after a timeout.
+    guard budget.isCurrent else { budget.invalidate(); return }
+    for (node, depth) in snapshot { visit(node, depth) }
   }
 
   private func makeNode(_ element: AXUIElement, path: String) -> AXNode {
     var names: CFArray?
-    AXUIElementCopyActionNames(element, &names)
+    if accessibilityReadAllowed() {
+      _ = accessibilityReadSucceeded(AXUIElementCopyActionNames(element, &names))
+    }
     return AXNode(
       element: element,
       path: path,
@@ -3327,9 +3359,19 @@ final class QianniuAXCollector {
   }
 }
 
+private func accessibilityReadAllowed() -> Bool {
+  AccessibilityBudget.current?.isCurrent ?? true
+}
+
+private func accessibilityReadSucceeded(_ result: AXError) -> Bool {
+  if result == .cannotComplete { AccessibilityBudget.current?.invalidate() }
+  return result == .success && accessibilityReadAllowed()
+}
+
 private func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
   var value: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+  guard accessibilityReadAllowed(),
+        accessibilityReadSucceeded(AXUIElementCopyAttributeValue(element, attribute as CFString, &value)) else { return nil }
   if let string = value as? String { return string }
   if let number = value as? NSNumber { return number.stringValue }
   return nil
@@ -3337,21 +3379,24 @@ private func stringAttribute(_ element: AXUIElement, _ attribute: String) -> Str
 
 private func boolAttribute(_ element: AXUIElement, _ attribute: String) -> Bool? {
   var value: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+  guard accessibilityReadAllowed(),
+        accessibilityReadSucceeded(AXUIElementCopyAttributeValue(element, attribute as CFString, &value)) else { return nil }
   return (value as? NSNumber)?.boolValue
 }
 
 private func elementArrayAttribute(_ element: AXUIElement, _ attribute: String) -> [AXUIElement] {
   var value: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return [] }
+  guard accessibilityReadAllowed(),
+        accessibilityReadSucceeded(AXUIElementCopyAttributeValue(element, attribute as CFString, &value)) else { return [] }
   return value as? [AXUIElement] ?? []
 }
 
 private func frameAttribute(_ element: AXUIElement) -> CGRect? {
   var positionValue: CFTypeRef?
   var sizeValue: CFTypeRef?
-  guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
-        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
+  guard accessibilityReadAllowed(),
+        accessibilityReadSucceeded(AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)),
+        accessibilityReadSucceeded(AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)),
         let positionAX = positionValue, let sizeAX = sizeValue,
         CFGetTypeID(positionAX) == AXValueGetTypeID(), CFGetTypeID(sizeAX) == AXValueGetTypeID() else { return nil }
   var point = CGPoint.zero
@@ -3440,63 +3485,7 @@ private func averageImageHash(_ image: CGImage) -> String {
 /// Requiring most angular sectors plus the center triangle avoids promoting
 /// ordinary product photos merely because they contain one white control.
 private func looksLikeVideoThumbnail(_ image: CGImage) -> Bool {
-  let bitmap = NSBitmapImageRep(cgImage: image)
-  let width = bitmap.pixelsWide
-  let height = bitmap.pixelsHigh
-  let shortest = Double(min(width, height))
-  guard shortest >= 80 else { return false }
-  let imageCenterX = Double(width - 1) / 2
-  let imageCenterY = Double(height - 1) / 2
-
-  func brightness(x: Int, y: Int) -> Double {
-    guard x >= 0, y >= 0, x < width, y < height,
-          let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
-    else { return 0 }
-    return 0.2126 * Double(color.redComponent) +
-      0.7152 * Double(color.greenComponent) +
-      0.0722 * Double(color.blueComponent)
-  }
-
-  func hasPlayControl(centerX: Double, centerY: Double,
-                      nominalRadius: Double) -> Bool {
-    var brightSectors = 0
-    for sector in 0..<24 {
-      let angle = Double(sector) * 2 * Double.pi / 24
-      var maximum = 0.0
-      for offset in -4...4 {
-        let radius = nominalRadius + Double(offset)
-        let x = Int((centerX + cos(angle) * radius).rounded())
-        let y = Int((centerY + sin(angle) * radius).rounded())
-        maximum = max(maximum, brightness(x: x, y: y))
-      }
-      if maximum >= 0.82 { brightSectors += 1 }
-    }
-    guard brightSectors >= 18 else { return false }
-
-    var brightCenterSamples = 0
-    for yOffset in stride(from: -0.035, through: 0.035, by: 0.0175) {
-      for xOffset in stride(from: -0.015, through: 0.05, by: 0.01625) {
-        let x = Int((centerX + shortest * xOffset).rounded())
-        let y = Int((centerY + shortest * yOffset).rounded())
-        if brightness(x: x, y: y) >= 0.82 { brightCenterSamples += 1 }
-      }
-    }
-    return brightCenterSamples >= 5
-  }
-
-  for yOffset in stride(from: -0.12, through: 0.12, by: 0.02) {
-    for xOffset in stride(from: -0.14, through: 0.14, by: 0.02) {
-      let centerX = imageCenterX + Double(width) * xOffset
-      let centerY = imageCenterY + Double(height) * yOffset
-      for radiusRatio in stride(from: 0.065, through: 0.11, by: 0.01) {
-        if hasPlayControl(centerX: centerX, centerY: centerY,
-                          nominalRadius: shortest * radiusRatio) {
-          return true
-        }
-      }
-    }
-  }
-  return false
+  CustomerSafety.hasVideoPlayControl(image)
 }
 
 func failedSendRetryDelay(attempts: Int) -> TimeInterval {

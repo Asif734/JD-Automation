@@ -94,6 +94,25 @@ class UnreadCaptureRecovery {
   String? latestIncomingSenderKey;
   String? _tentativeRelaxedBody;
 
+  bool get hasVerifiedIncomingSignal => latestIncomingSenderKey != null;
+
+  /// A red sidebar pixel is only a priority hint. It becomes permission to
+  /// send a recovery notice after the active chat independently exposes a
+  /// current incoming sender clock belonging to this recovery window.
+  bool verifyIncomingSignal({
+    required String? senderKey,
+    required DateTime? sentAt,
+    required DateTime capturedAt,
+  }) {
+    if (senderKey == null || sentAt == null) return false;
+    if (sentAt.isBefore(detectedAt.subtract(detectedTurnClockTolerance)) ||
+        sentAt.isAfter(capturedAt.add(const Duration(minutes: 1)))) {
+      return false;
+    }
+    latestIncomingSenderKey = senderKey;
+    return true;
+  }
+
   /// Only a holding reply belonging to this recovery can discharge its SLA.
   /// The OCR clock tolerance is for incoming detection, never for replies:
   /// accepting a previous turn's holding reply silently drops the new turn.
@@ -138,6 +157,12 @@ class UnreadCaptureRecovery {
   bool captureRetryDue(DateTime now) =>
       lastCaptureAttemptAt == null ||
       !now.isBefore(lastCaptureAttemptAt!.add(const Duration(seconds: 8)));
+
+  /// A sidebar badge without a visible sender clock is inconclusive, not a
+  /// handled message. Make the row eligible for the next full capture pass.
+  void requestImmediateCaptureRetry() {
+    lastCaptureAttemptAt = null;
+  }
 
   bool useRelaxedBodyOcr(DateTime now) =>
       !now.isBefore(detectedAt.add(relaxedOcrAfter));

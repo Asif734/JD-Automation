@@ -122,4 +122,22 @@ void main() {
     expect(File('${root.path}/$customer.json').existsSync(), isTrue);
     expect(legacyFile.existsSync(), isFalse);
   });
+
+  test('fallback-only OCR aliases are not trusted identity evidence', () async {
+    final capturedAt = DateTime.utc(2026, 10, 13, 9, 23);
+    await store.appendCapture(CapturedConversation(
+      stableKey: 'customer:jd_41aeec7741d05',
+      customerName: 'jd_41aeec7741d05',
+      customerExternalId: 'jd_41aeec7741d05',
+      capturedAt: capturedAt,
+      messages: [incoming('real', 'hello', capturedAt)],
+    ));
+    await File('${root.path}/jd_4laeec7741d05.json').writeAsString('''{
+      "schema_version": 1,
+      "user_id": "jd_4laeec7741d05",
+      "messages": [{"source":"sla_fallback","direction":"outgoing"}]
+    }''');
+
+    expect(await store.trustedCustomerIds(), {'jd_41aeec7741d05'});
+  });
 }

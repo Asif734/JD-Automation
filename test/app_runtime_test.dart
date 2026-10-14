@@ -108,4 +108,28 @@ void main() {
     expect(await AppRuntime.bundledTool('ffprobe', executablePath: executable),
         isNull);
   });
+
+  test('bundled initial data is imported once without overwriting state',
+      () async {
+    final initial = Directory('${bundle.path}/initial_data');
+    await initial.create(recursive: true);
+    await File('${initial.path}/customer.json').writeAsString('snapshot');
+    await File('${initial.path}/media/photo.png')
+        .create(recursive: true)
+        .then((file) => file.writeAsBytes([1, 2, 3]));
+
+    expect(
+        await AppRuntime.installBundledInitialData(data,
+            executablePath: executable),
+        isTrue);
+    expect(await File('${data.path}/customer.json').readAsString(), 'snapshot');
+    await File('${data.path}/customer.json').writeAsString('live state');
+
+    expect(
+        await AppRuntime.installBundledInitialData(data,
+            executablePath: executable),
+        isFalse);
+    expect(
+        await File('${data.path}/customer.json').readAsString(), 'live state');
+  });
 }

@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
-// Packages only runtime evidence and media tools. No customer data, auth,
-// environment files, source repository, or Codex executable is distributed.
+// Packages the complete knowledge dataset, a stable snapshot of the current
+// customer state, and media tools. Auth/environment files, the source
+// repository, and the Codex executable are not distributed.
 Future<void> main(List<String> args) async {
   if (args.length != 1 || !args.single.endsWith('.app')) {
     throw ArgumentError(
@@ -23,24 +25,12 @@ Future<void> main(List<String> args) async {
   const knowledgeName = '格志京东客服知识库-2026-10-04';
   final sourceKnowledge = Directory(p.join(project.path, knowledgeName));
   final packagedKnowledge = Directory(p.join(runtime.path, knowledgeName));
-  await packagedKnowledge.create();
-  await for (final entry in sourceKnowledge.list(followLinks: false)) {
-    if (entry is File &&
-        (entry.path.endsWith('_kb.md') ||
-            p.basename(entry.path) ==
-                'customer_service_high_priority_issues.md')) {
-      await entry.copy(p.join(packagedKnowledge.path, p.basename(entry.path)));
-    }
-  }
+  final knowledgeFiles =
+      await copyCompleteDataset(sourceKnowledge, packagedKnowledge);
+  final packagedData = Directory(p.join(runtime.path, 'initial_data'));
+  final dataFiles = await snapshotAndCopyData(
+      Directory(p.join(project.path, 'data')), packagedData);
   final cards = Directory(p.join(packagedKnowledge.path, 'rag_cards'));
-  await cards.create();
-  await for (final entry in Directory(p.join(sourceKnowledge.path, 'rag_cards'))
-      .list(followLinks: false)) {
-    if (entry is File &&
-        (entry.path.endsWith('.json') || entry.path.endsWith('.jsonl'))) {
-      await entry.copy(p.join(cards.path, p.basename(entry.path)));
-    }
-  }
   final workspace = Directory(p.join(runtime.path, 'codex_workspace'));
   await workspace.create();
   for (final name in [
@@ -213,17 +203,120 @@ Future<void> main(List<String> args) async {
     'architecture': 'arm64',
     'minimum_macos': minimumMacOS,
     'knowledge': knowledgeName,
+    'knowledge_file_count': knowledgeFiles.length,
+    'knowledge_files': knowledgeFiles,
+    'initial_data_file_count': dataFiles.length,
+    'initial_data_files': dataFiles,
+    'initial_data_installation':
+        'Copied to Application Support on first launch only; existing data is never overwritten.',
     'external_dependency': 'Installed, authenticated Codex CLI and JD Jingmai',
     'bundled_media_binaries': realTargets.values
         .map((s) => p.relative(s, from: runtime.path))
         .toList(),
-    'excludes': ['customer data', 'credentials', 'Codex sessions'],
+    'includes': ['customer data', 'media', 'logs', 'Codex sessions'],
+    'excludes': ['credentials', 'environment files', 'source repository'],
   }));
   for (final name in ['ffmpeg', 'ffprobe']) {
     await run(p.join(bin.path, name), ['-version']);
   }
   stdout.writeln(
-      'Packaged runtime evidence and ${realTargets.length} media binaries; macOS $minimumMacOS+.');
+      'Packaged ${knowledgeFiles.length} verified knowledge files, ${dataFiles.length} customer-data files, and ${realTargets.length} media binaries; macOS $minimumMacOS+.');
+}
+
+/// Takes a stable build-time snapshot before hashing/package copy. The live
+/// review app may append logs while packaging, so source files are copied once
+/// into a temporary directory. SQLite uses its online backup command rather
+/// than a byte copy, yielding a consistent database even if it is open.
+Future<List<Map<String, Object>>> snapshotAndCopyData(
+    Directory source, Directory destination) async {
+  if (!await source.exists()) {
+    throw StateError('Customer data directory is missing: ${source.path}');
+  }
+  final snapshot = await Directory.systemTemp.createTemp('jd_data_snapshot_');
+  try {
+    final entries =
+        await source.list(recursive: true, followLinks: false).toList();
+    for (final entry in entries) {
+      if (entry is! File && entry is! Directory) {
+        throw StateError('Unsupported customer-data entry: ${entry.path}');
+      }
+    }
+    for (final entry in entries) {
+      final relative = p.relative(entry.path, from: source.path);
+      if (p.basename(relative) == '.DS_Store' ||
+          relative == 'jd_automation.sqlite3') {
+        continue;
+      }
+      final target = p.join(snapshot.path, relative);
+      if (entry is Directory) {
+        await Directory(target).create(recursive: true);
+      } else if (entry is File) {
+        await File(target).parent.create(recursive: true);
+        await entry.copy(target);
+      }
+    }
+    final sourceDatabase = File(p.join(source.path, 'jd_automation.sqlite3'));
+    if (await sourceDatabase.exists()) {
+      final snapshotDatabase = p.join(snapshot.path, 'jd_automation.sqlite3');
+      final escaped = snapshotDatabase.replaceAll("'", "''");
+      await run('sqlite3', [sourceDatabase.path, ".backup '$escaped'"]);
+      final integrity =
+          (await run('sqlite3', [snapshotDatabase, 'PRAGMA integrity_check;']))
+              .trim();
+      if (integrity != 'ok') {
+        throw StateError(
+            'Customer database snapshot failed integrity check: $integrity');
+      }
+    }
+    return await copyCompleteDataset(snapshot, destination);
+  } finally {
+    if (await snapshot.exists()) await snapshot.delete(recursive: true);
+  }
+}
+
+/// Copy every dataset file, preserving relative paths and verifying bytes.
+/// Finder metadata is not evidence. Reject links instead of shipping references
+/// to files outside the dataset or accidentally copying unrelated local state.
+Future<List<Map<String, Object>>> copyCompleteDataset(
+    Directory source, Directory destination) async {
+  final sourcePath = p.normalize(source.absolute.path);
+  final destinationPath = p.normalize(destination.absolute.path);
+  if (sourcePath == destinationPath ||
+      p.isWithin(sourcePath, destinationPath) ||
+      p.isWithin(destinationPath, sourcePath)) {
+    throw ArgumentError('Dataset source and destination must be separate.');
+  }
+  final entries =
+      await source.list(recursive: true, followLinks: false).toList();
+  for (final entry in entries) {
+    if (entry is! File && entry is! Directory) {
+      throw StateError('Unsupported dataset entry: ${entry.path}');
+    }
+  }
+  final files = entries
+      .whereType<File>()
+      .where((file) => p.basename(file.path) != '.DS_Store')
+      .toList()
+    ..sort((a, b) => a.path.compareTo(b.path));
+  await destination.create(recursive: true);
+  final manifest = <Map<String, Object>>[];
+  for (final sourceFile in files) {
+    final relativePath =
+        p.relative(sourceFile.path, from: source.absolute.path);
+    final destinationFile = File(p.join(destinationPath, relativePath));
+    await destinationFile.parent.create(recursive: true);
+    final digest = await sha256.bind(sourceFile.openRead()).first;
+    await sourceFile.copy(destinationFile.path);
+    if (await sha256.bind(destinationFile.openRead()).first != digest) {
+      throw StateError('Dataset copy failed verification: $relativePath');
+    }
+    manifest.add({
+      'path': relativePath,
+      'size_bytes': await destinationFile.length(),
+      'sha256': digest.toString(),
+    });
+  }
+  return manifest;
 }
 
 bool newerVersion(String a, String b) {

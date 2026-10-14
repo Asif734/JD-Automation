@@ -15,14 +15,24 @@ flutter run -d macos
 
 Run `zsh tools/build_standalone_macos.sh` on the build Mac (Flutter/Xcode and
 Homebrew FFmpeg/FFprobe are needed only for packaging). This produces
-`build/standalone/JD Automation Standalone.zip` and a separate
-`JD Automation Standalone.app`, version 0.1.1+2, with bundle ID
+`build/standalone-prompt-release/JD Automation Standalone.zip` and a separate
+`JD Automation Standalone.app`, version 0.1.5+6, with bundle ID
 `com.grozziie.jdAutomation.standalone`. The existing release app is not replaced.
 
-The single app contains the runtime knowledge cards/Markdown, Codex workspace
-and schemas, FFmpeg/FFprobe, and their non-system libraries and third-party
-notices. Customer histories, queued drafts, credentials, and Codex sessions
-are excluded. This package targets Apple Silicon and macOS 15 or newer.
+The single app contains the complete knowledge dataset (cards, Markdown,
+catalogs, indexes, source documents, and image/video/audio assets), Codex workspace
+and schemas, FFmpeg/FFprobe, their non-system libraries and third-party notices,
+and a build-time snapshot of the current `data/` directory including customer
+histories, SQLite queue state, customer media, diagnostic logs, and Codex
+sessions. Credentials and environment files remain excluded. This package
+targets Apple Silicon and macOS 15 or newer. Dataset and initial-data paths,
+byte sizes, and verified SHA-256 hashes are recorded in the
+bundled `jd_runtime/package_manifest.json`. Only Finder `.DS_Store` metadata
+is omitted; symbolic links are rejected rather than shipped as external dependencies.
+
+`zsh tools/build_review_macos.sh` produces the matching 0.1.5+6 Review app under
+`build/review-prompt-release/Build/Products/Release/`, using the project's
+existing dataset and customer data. Both build scripts leave older copies intact.
 
 On the receiving Mac, unzip it, move the app to Applications, and grant its own
 Accessibility/Screen Recording permissions (Speech Recognition for video
@@ -31,8 +41,9 @@ installed. Finder launches automatically detect Codex in the official
 `~/.local/bin` location, Homebrew, npm/NVM, or the matching VS Code extension;
 `CODEX_EXECUTABLE` remains an explicit operator override.
 
-Standalone customer state is created separately under
+On first launch, the bundled data snapshot is copied to
 `~/Library/Application Support/com.grozziie.jdAutomation.standalone/data`.
+An existing nonempty standalone data directory is never overwritten.
 Do not run both app variants against the same JD conversations simultaneously.
 To inspect an installation without starting capture or opening customer data,
 run its executable with `JD_INSTALLATION_CHECK=1`; it reports the resolved
@@ -57,7 +68,31 @@ The Flutter conversation dialog now uses the same API. It selects the latest cap
 
 The tester also accepts customer screenshots, photos, and videos. Images are supplied to the model as visual evidence; videos uploaded through the backend tester are stored but deliberately not treated as analyzed. Uploaded images are limited to 15 MB and videos to 50 MB. Retrieved knowledge records expose only allow-listed local media, and draft attachments are filtered against those retrieved IDs before being returned.
 
-The macOS JD capture path separately recognizes the centered play overlay on an incoming video bubble. JD 10.4 already stores received videos in its per-chat media cache, so the app copies the newest fresh cached video into the private customer media directory without clicking, typing, opening a menu, or changing the selected conversation. It then runs local FFmpeg at one frame per second with a hard limit of 20 frames. Those chronological JPEG frames are passed to Codex through the same guarded image-input path and their factual descriptions are saved back to the conversation JSON. FFmpeg also detects and extracts a mono 16 kHz audio track; meaningful audio is transcribed in Chinese and English through macOS Speech, while silent and no-audio videos are explicitly recorded as such.
+The macOS JD capture path recognizes outlined play controls throughout an incoming media crop, including controls displaced by clipping or adjacent text. Before accepting a screen-classified image, a bounded background check searches JD's recent video cache for a unique decoded-frame match. The comparison isolates one photographic preview, handles JD's stretched portrait cards, and permits only bounded vertical clipping retaining at least 70% of a frame. Different matching clips, flat placeholders, incomplete checks, and time-only shared-cache candidates are rejected. Duplicate copies of the identical MP4 are allowed. Customer identity is independently rechecked through AX after cache work. Cache results and crop dimensions are logged, while image/video cache work stays off the serial AX delivery queue. The app copies a uniquely matched video into that customer's private media directory without opening a viewer. FFmpeg extracts one frame per second, up to 20 frames, plus audio for optional macOS Speech transcription. Those frames are passed to Codex for internal analysis. An unverifiable video is left for capture recovery rather than downgraded to an ordinary image or assigned an unrelated recent clip.
+
+## Customer isolation and offline history replay
+
+Capture, sender labels, chat switching, and send acknowledgements require the same complete customer ID. OCR lookalikes (`1`/`l`), different case, truncated prefixes, missing identities, and conflicting headers do not create aliases. History files are checked against their stored `user_id`; newly verified media must remain inside its owner's media directory. Model session files also carry their exact owner, and older unbound sessions start fresh.
+
+Both variants share an OS automation lock under `~/Library/Application Support/JD Automation Shared/automation.lock`. Close the other variant before starting automation. The lock is held for the controller's lifetime, including while paused, and the OS releases it after process exit or a crash. Expired queued chat-switch/send operations are rejected before UI input.
+
+Delivery recovery is independent of capture: while automation is running, a five-second tick revisits durable drafts, generation work, and holding-message jobs. Chat-opening callbacks have a ten-second watchdog and send callbacks an eighteen-second watchdog; these do not cancel OS work. A missing send callback is treated as `send_unconfirmed`, retained for exact outgoing-receipt reconciliation and safe retry, not recorded as sent. Failed attempts retry without a fixed attempt limit. The serial worker releases after queue/refresh errors, skips human-contacting chats, and allows capture scans to join the UI queue between deliveries. Queue updates and acknowledgements are bound to the exact customer, draft creation, pending ID, reply, and incoming-batch boundary, so a late attempt cannot consume a replacement batch.
+
+Native AX reads use a process-wide 0.75-second messaging timeout ([Apple API documentation](https://developer.apple.com/documentation/applicationservices/1459345-axuielementsetmessagingtimeout)); traversals also have a four-second budget nested within switch/send deadlines. Timed-out snapshots are discarded entirely. Recovery clears only a recorded insertion with the same full active customer, unchanged text, and AX composer element; operator edits are left alone. The final Send click uses freshly verified customer, composer text, button bounds, JD focus, and a current deadline. These safeguards cannot make an unavailable/frozen JD service, stopped app, missing permissions, or disconnected network deliver a message. Such work stays pending rather than being falsely marked delivered or redirected to another customer.
+
+Local diagnostic events are appended to `data/logs/YYYY-MM-DD-PID.jsonl` for the release app, or the standalone data root's `logs` directory. Filenames use Bangladesh dates; each record includes UTC time, executable, PID, operation, relevant customer IDs, elapsed time, and exact native errors. Every error-banner assignment also writes a `ui.error` entry with the exact displayed text and error type (plus the code/message for `PlatformException`); clearing the banner does not remove its log. Video-download, scan-timeout, and model-capacity errors shown in the diagnostics panel are recorded too, with the underlying exception text. Chat bodies, screenshots, prompts, and reply text are not explicitly attached, but exception text can contain sensitive information. The logs are local customer data and should not be published.
+
+Replay the six existing JSON histories through the real capture event/persistence boundary with a mocked native channel and temporary database:
+
+```sh
+JD_REPLAY_DATA_ROOT="$PWD/data" flutter test --no-pub test/customer_isolation_replay_test.dart
+JD_REPLAY_DATA_ROOT="$PWD/data" flutter test --no-pub test/delivery_watchdog_test.dart test/serial_delivery_worker_test.dart
+dart run tools/customer_lease_check.dart
+swiftc macos/Runner/CustomerSafety.swift tools/customer_safety_check.swift -o /tmp/jd-customer-safety-check
+JD_REPLAY_PROJECT="$PWD" /tmp/jd-customer-safety-check
+```
+
+The replay uses up to 80 recent incoming messages from each requested history, 600 shuffled duplicate events, all 30 wrong-customer permutations, focus changes before simulated sends, ID lookalikes, foreign media, and corrupted file ownership. Delivery tests add lost open/send callbacks, late wrong-ID responses, repeated failures, independent retry ticks, storage errors, restart recovery, exact-receipt reconciliation, and replacement-batch guards. They cannot call a live JD window or a model. The Swift check additionally compares the actual Windows/M880 frames from the reported incident when `JD_REPLAY_PROJECT` is set and checks composer ownership and nested AX budget recovery. These tests validate software boundaries; live JD layout/permission compatibility still needs a supervised smoke check after installing the changed build.
 
 Only a customer's second explicit transfer request within ten minutes starts an automatic JD sub-account transfer. The native adapter verifies the exact active customer, opens `快捷转接`, expands `默认咨询组` once, reads account names with Apple Vision, and independently checks green/turquoise status badges. JD Automation fairly rotates among confirmed active accounts, sends a concise transfer acknowledgement, reopens the dialog, revalidates the target, and clicks only that row's explicit blue `转接` action. Red/offline accounts and `备注原因` are never clicked. Transfer attempts are durably logged; successful, transferring, and unconfirmed clicks are never retried automatically. The sidebar shows transfer records only and provides no manual human-review controls.
 
@@ -163,6 +198,12 @@ PYTHONPATH=backend pytest backend/tests
 ```
 
 ## Accessibility setup and AX mapping
+
+The distinctly named review media hotfix is created with `zsh tools/build_review_macos.sh` and saved at `build/review-media-hotfix/Build/Products/Release/JD Automation Review.app` (version `0.1.4`, build `5`). It includes the `0.1.3` customer-header fix and the image-to-video cache cross-check. It explicitly disables the standalone define, uses the project's existing `data/`, and uses bundle ID `com.grozziie.jdAutomation.review`. This avoids inheriting a previous standalone Flutter configuration. The complete bundle is signed and verified; the previous running review, release, and standalone binaries are not replaced. Close the previous copy before opening the hotfix.
+
+The October 13 header hotfix distinguishes the customer label aligned above the active chat's quick-transfer control from the separately right-aligned shop label. Selection is scoped to the composer's chat split and does not depend on the requested ID, a name blacklist, or prefix matching. Missing, truncated, or conflicting customer-slot evidence still blocks a send. Accessibility diagnostics print the resolved `activeCustomerId`; failed chat switches record the observed customer too. The native regression checks include the exact live JD 10.4.5.600 header geometry, all six customers, wrong-ID comparisons, duplicate/conflicting/truncated labels, missing control anchors, shop-only headers, and moved/scaled windows.
+
+Authorize this exact copy in System Settings. Permissions are read again when returning to the app and every two seconds while not granted; polling never prompts or starts automation. The screen and local status logs identify the actual bundle path, bundle ID, and permission result. Ad-hoc signing is the default and its designated requirement changes when code changes, so future rebuilt binaries may need renewed authorization. For stable signing, supply an installed certificate via `JD_REVIEW_SIGN_IDENTITY`; no privacy permissions are reset or granted by the build script.
 
 1. Start JD Jingmai and log in.
 2. In this app, click **Request Accessibility access**.

@@ -176,20 +176,7 @@ class OcrImageCandidateSelector {
       fromVerifiedCache || !isTextDense(region, observations);
 
   bool _isCustomer(String value, String customer) {
-    final raw = value.toLowerCase().trim();
-    final expected = customer.toLowerCase();
-    if (raw == expected) return true;
-    if (raw.startsWith(expected)) {
-      final suffix = raw.substring(expected.length).trim();
-      if (suffix.isEmpty || RegExp(r'\d{1,2}:\d{2}').hasMatch(suffix)) {
-        return true;
-      }
-    }
-    final prefix = raw
-        .replaceAll('...', '')
-        .replaceAll('…', '')
-        .replaceAll(RegExp(r'\s+'), '');
-    return prefix.length >= 6 && expected.startsWith(prefix);
+    return customerSenderLabelMatches(value, customer);
   }
 
   bool _isSeller(String value) {

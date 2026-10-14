@@ -63,6 +63,7 @@ class OcrCaptureExtractor {
       stableKey: capture.stableKey,
       customerName: capture.customerName,
       customerExternalId: capture.customerExternalId,
+      verifiedCustomerId: capture.verifiedCustomerId,
       messages: messages,
       capturedAt: capture.capturedAt,
     );
@@ -281,6 +282,7 @@ class OcrCaptureExtractor {
         stableKey: 'customer:${sha256.convert(utf8.encode(customerId))}',
         customerName: customerId,
         customerExternalId: customerId,
+        verifiedCustomerId: suppliedCustomer,
         capturedAt: inspection.capturedAt,
         messages: capturedMessages,
       ),
@@ -343,6 +345,14 @@ class OcrCaptureExtractor {
                 r'(?:[◎◉○口回□▣]\s*)?(?:按住\s*)?Shift\s*[+＋]\s*Space\s*可\s*快速\s*选中\s*输入框',
                 caseSensitive: false),
             '')
+        // JD platform notices are rendered between chat bubbles. Vision can
+        // append them to the newest customer body, but they are not customer
+        // content and must never influence intent or reply generation.
+        .replaceAll(
+            RegExp(r'(?:风险图片\s*)?当前会话您存在消极服务行为.*?(?:异常反馈|$)',
+                caseSensitive: false),
+            '')
+        .replaceAll('你撤回了一条消息', '')
         .replaceFirstMapped(
             RegExp(r'(^|[\s，。！？；：,.!?;:])D(?:\s*[◎◉○口回□▣])*\s*$'),
             (match) => match.group(1)?.trim() ?? '')
@@ -437,22 +447,7 @@ class OcrCaptureExtractor {
   }
 
   bool _sameIdentity(String value, String customerId) {
-    final full = customerId.trim().toLowerCase();
-    final raw = value.trim().toLowerCase();
-    if (raw == full) return true;
-    // Vision sometimes merges the sender and timestamp into one observation,
-    // for example "stoneshishininger 2026-08-26 11:03:13".
-    if (raw.startsWith(full)) {
-      final suffix = raw.substring(full.length).trim();
-      if (suffix.isEmpty || _timestamp.hasMatch(suffix)) return true;
-    }
-    final visiblePrefix = raw
-        .replaceAll('...', '')
-        .replaceAll('…', '')
-        .replaceAll(RegExp(r'\s+'), '');
-    // Qianniu truncates sender labels. A long visible prefix is accepted only
-    // after AX has supplied the exact active customer identity.
-    return visiblePrefix.length >= 6 && full.startsWith(visiblePrefix);
+    return customerSenderLabelMatches(value, customerId);
   }
 
   bool _looksLikeAccountIdentity(String value) {

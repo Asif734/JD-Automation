@@ -507,7 +507,10 @@ void main() {
 
   test('recognizes refund and video-guide requests', () {
     expect(isRefundRequest('I need a refund'), isTrue);
+    expect(isRefundRequest('I want to return the product'), isTrue);
+    expect(isRefundRequest('I need to send this back'), isTrue);
     expect(isRefundRequest('我要退款'), isTrue);
+    expect(isRefundRequest('我要退货'), isTrue);
     expect(isVideoGuideRequest('Please send the setup video guide'), isTrue);
     expect(isVideoGuideRequest('请发设置视频教程'), isTrue);
     expect(isVideoGuideRequest('I sent a fault video'), isFalse);
@@ -541,7 +544,7 @@ void main() {
     expect(route(list: true), 'product_list');
     expect(route(catalog: true), 'product_recommendation');
     expect(route(features: true), 'product_features');
-    expect(route(text: 'I need a refund', technical: true), 'refund_review');
+    expect(route(text: 'I need a refund', technical: true), 'refund_support');
     expect(route(), 'general_support');
   });
 
@@ -555,7 +558,7 @@ void main() {
         isFalse);
   });
 
-  test('forces refunds but not video-guide requests into human review', () {
+  test('asks for the problem before refund handling', () {
     final ordinary = service.parseResponse('''{
       "reply":"I can help.",
       "decision":"draft",
@@ -581,12 +584,112 @@ void main() {
       videoGuideRequested: true,
     );
 
-    expect(draftRequiresHumanReview(refund), isTrue);
-    expect(refund.reply, contains('退款申请'));
-    expect(draftHumanReviewReason(refund), contains('refund'));
+    expect(draftRequiresHumanReview(refund), isFalse);
+    expect(refund.decision, 'ask_clarification');
+    expect(refund.reply, contains('What problem'));
+    expect(refund.reply.toLowerCase(), isNot(contains('recorded')));
     expect(draftRequiresHumanReview(video), isFalse);
     expect(video.decision, 'draft');
     expect(video.riskLevel, 'low');
+  });
+
+  test('refund flow keeps a supported solution and transfers when exhausted',
+      () {
+    final supported = service.parseResponse('''{
+      "reply":"Reconnect the USB cable and select the printer again.",
+      "decision":"draft",
+      "confidence":0.9,
+      "used_record_ids":["usb_help"],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+    final unresolved = service.parseResponse('''{
+      "reply":"I cannot find a reliable solution.",
+      "decision":"human_review_required",
+      "confidence":0.4,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"high",
+      "risk_triggers":["solution_not_found"],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":true,
+      "reason":"No supported solution remains."
+    }''');
+
+    final kept = service.enforceHumanReviewPolicy(
+      supported,
+      'It cannot print',
+      refundFlowActive: true,
+      refundProblemKnown: true,
+    );
+    final transferred = service.enforceHumanReviewPolicy(
+      unresolved,
+      'It cannot print',
+      refundFlowActive: true,
+      refundProblemKnown: true,
+    );
+
+    expect(kept.reply, contains('Reconnect'));
+    expect(draftRequiresHumanReview(kept), isFalse);
+    expect(draftRequiresHumanReview(transferred), isTrue);
+    expect(isExplicitHumanTransfer(transferred), isTrue);
+    expect(draftHumanReviewReason(transferred), contains('Refund or return'));
+  });
+
+  test('repeated refund after the problem question transfers immediately', () {
+    final ordinary = service.parseResponse('''{
+      "reply":"I can help.",
+      "decision":"draft",
+      "confidence":0.9,
+      "used_record_ids":[],
+      "required_slots":[],
+      "actions":[],
+      "risk_level":"low",
+      "risk_triggers":[],
+      "auto_send_allowed":false,
+      "model":"ignored",
+      "attachments":[],
+      "image_descriptions":[],
+      "human_review_required":false,
+      "reason":null
+    }''');
+
+    final transferred = service.enforceHumanReviewPolicy(
+      ordinary,
+      'please refund',
+      refundFlowActive: true,
+      refundProblemKnown: false,
+      refundClarificationAlreadyAsked: true,
+    );
+
+    expect(draftRequiresHumanReview(transferred), isTrue);
+    expect(isExplicitHumanTransfer(transferred), isTrue);
+    expect(transferred.reply.toLowerCase(), contains('transfer'));
+    expect(transferred.reply.toLowerCase(), isNot(contains('recorded')));
+  });
+
+  test('recognizes refund problem details and troubleshooting refusal', () {
+    expect(refundProblemIsExplained('It cannot print'), isTrue);
+    expect(refundProblemIsExplained('我要退款，打印机卡纸了'), isTrue);
+    expect(refundProblemIsExplained('please refund'), isFalse);
+    expect(customerRefusesRefundTroubleshooting('Just refund'), isTrue);
+    expect(customerRefusesRefundTroubleshooting('不要排查，直接退款'), isTrue);
+    expect(
+        isRefundProblemClarification(
+            'What problem are you having with the product?'),
+        isTrue);
   });
 
   test('loads every unique JD tutorial link for reply selection', () async {

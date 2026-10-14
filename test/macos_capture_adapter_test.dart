@@ -85,12 +85,86 @@ void main() {
 
   test('customer identity matching supports independent Unicode names', () {
     expect(customerIdentitiesMatch(' 上海思谆志科技 ', '上海思谆志科技'), isTrue);
-    expect(customerIdentitiesMatch('CLFFD520', 'clffd520'), isTrue);
+    expect(customerIdentitiesMatch('CLFFD520', 'clffd520'), isFalse);
     expect(customerIdentitiesMatch('عميل', 'عميل'), isTrue);
     expect(customerIdentitiesMatch('গ্রাহক', 'গ্রাহক'), isTrue);
     expect(customerIdentitiesMatch('上海思谆志科技', 'jd_41aeec7741d05'), isFalse);
     expect(customerIdentitiesMatch('jd_4laeec7741d05', 'jd_41aeec7741d05'),
         isFalse);
+  });
+
+  test('a sidebar OCR typo resolves only to one trusted JD identity', () {
+    final lookalike = resolveObservedCustomerIdentity(
+      'jd_4laeec7741d05',
+      const {'jd_41aeec7741d05', 'jd_unrelated123'},
+    );
+    expect(
+        lookalike.kind, CustomerIdentityResolutionKind.uniqueTrustedNearMatch);
+    expect(lookalike.customer, 'jd_41aeec7741d05');
+
+    final missingCharacter = resolveObservedCustomerIdentity(
+      'jd_frqocwtljob',
+      const {'jd_frqocwtljjob'},
+    );
+    expect(missingCharacter.customer, 'jd_frqocwtljjob');
+  });
+
+  test('ambiguous or non-JD identities are never fuzzily redirected', () {
+    final ambiguous = resolveObservedCustomerIdentity(
+      'jd_abcdefgh',
+      const {'jd_abcdefgi', 'jd_abcdefgj'},
+    );
+    expect(ambiguous.kind, CustomerIdentityResolutionKind.ambiguous);
+    expect(ambiguous.customer, isNull);
+
+    final name = resolveObservedCustomerIdentity(
+      '上海世亦小关',
+      const {'上海世亦小闭'},
+    );
+    expect(name.kind, CustomerIdentityResolutionKind.unmatched);
+    expect(name.customer, isNull);
+  });
+
+  test('an unmatched sidebar ID is cross-checked against the AX header',
+      () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'openConversation');
+      final arguments = call.arguments! as Map<Object?, Object?>;
+      expect(arguments['expectedCustomer'], 'jd_4laeec7741d05');
+      expect(arguments['allowObservedIdentityResolution'], isTrue);
+      return <String, Object?>{
+        'opened': true,
+        'customer': 'jd_41aeec7741d05',
+        'method': 'ax_press',
+      };
+    });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+
+    expect(
+      await adapter.resolveConversationIdentityFromAx('jd_4laeec7741d05'),
+      'jd_41aeec7741d05',
+    );
+  });
+
+  test('an unrelated AX header cannot resolve an unmatched sidebar ID',
+      () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            channel,
+            (call) async => <String, Object?>{
+                  'opened': true,
+                  'customer': 'jd_unrelated123',
+                });
+    final adapter = MacOSCaptureAdapter(channel: channel);
+    addTearDown(adapter.close);
+
+    await expectLater(
+      adapter.resolveConversationIdentityFromAx('jd_4laeec7741d05'),
+      throwsA(isA<PlatformException>().having(
+          (error) => error.code, 'code', 'customer_switch_not_verified')),
+    );
   });
 
   test('failed message retry never requests a new send or inserts text',
@@ -110,7 +184,7 @@ void main() {
         isTrue);
   });
 
-  test('retry uses independently verified active customer identity', () async {
+  test('an unrelated native identity cannot create a retry alias', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       if (call.method == 'openConversation') {
@@ -123,15 +197,13 @@ void main() {
     });
     final adapter = MacOSCaptureAdapter(channel: channel);
     addTearDown(adapter.close);
-    await adapter.openConversation('row-name');
-    expect(
-        (await adapter.retryFailedOutgoingMessage(
-            expectedCustomer: 'row-name', candidate: candidate))['retried'],
-        isFalse);
+    await expectLater(
+        adapter.openConversation('row-name'),
+        throwsA(isA<PlatformException>()
+            .having((e) => e.code, 'code', 'customer_switch_not_verified')));
   });
 
-  test('keeps OCR row name while using separately verified active identity',
-      () async {
+  test('rejects a 1/l lookalike instead of redirecting later sends', () async {
     var calls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
@@ -147,17 +219,20 @@ void main() {
       }
       expect(call.method, 'sendDraftOnce');
       expect(arguments['expectedCustomer'], 'jd_41aeec7741d05');
-      return <String, Object?>{'sent': true};
+      return <String, Object?>{
+        'sent': true,
+        'customer': 'jd_41aeec7741d05',
+        'reply': 'test'
+      };
     });
     final adapter = MacOSCaptureAdapter(channel: channel);
     addTearDown(adapter.close);
 
-    await adapter.openConversation('jd_4laeec7741d05');
-    await adapter.sendDraftOnce(
-      expectedCustomer: 'jd_4laeec7741d05',
-      reply: 'test',
-    );
-    expect(calls, 2);
+    await expectLater(
+        adapter.openConversation('jd_4laeec7741d05'),
+        throwsA(isA<PlatformException>()
+            .having((e) => e.code, 'code', 'customer_switch_not_verified')));
+    expect(calls, 1); // Nothing was inserted or sent.
   });
 
   test('preserves a genuine l in the independently verified customer name',
@@ -175,7 +250,11 @@ void main() {
         };
       }
       expect(call.method, 'sendDraftOnce');
-      return <String, Object?>{'sent': true};
+      return <String, Object?>{
+        'sent': true,
+        'customer': 'jd_4laeec7741d05',
+        'reply': 'test'
+      };
     });
     final adapter = MacOSCaptureAdapter(channel: channel);
     addTearDown(adapter.close);
@@ -197,7 +276,7 @@ void main() {
       final arguments = (call.arguments as Map<Object?, Object?>?) ?? const {};
       switch (call.method) {
         case 'openConversation':
-          expect(arguments['expectedCustomer'], 'jd_4laeec7741d05');
+          expect(arguments['expectedCustomer'], 'jd_41aeec7741d05');
           return <String, Object?>{
             'opened': true,
             'customer': 'jd_41aeec7741d05',
@@ -221,13 +300,13 @@ void main() {
     final adapter = MacOSCaptureAdapter(channel: channel);
     addTearDown(adapter.close);
 
-    await adapter.openConversation('jd_4laeec7741d05');
+    await adapter.openConversation('jd_41aeec7741d05');
     final preview =
-        await adapter.listActiveTransferAccounts('jd_4laeec7741d05');
+        await adapter.listActiveTransferAccounts('jd_41aeec7741d05');
     expect(preview.sourceAccount, '格志打印机小甘');
     expect(preview.activeAccounts, ['格志打印机小秦', '格志打印机小雨(小雨)']);
     final result = await adapter.transferConversation(
-      expectedCustomer: 'jd_4laeec7741d05',
+      expectedCustomer: 'jd_41aeec7741d05',
       targetAccount: preview.activeAccounts.first,
     );
 

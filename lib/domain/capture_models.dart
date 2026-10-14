@@ -13,6 +13,7 @@ class CapturedConversation {
     required this.stableKey,
     required this.customerName,
     this.customerExternalId,
+    this.verifiedCustomerId,
     required this.messages,
     required this.capturedAt,
   });
@@ -23,6 +24,7 @@ class CapturedConversation {
       stableKey: map['stableKey']! as String,
       customerName: (map['customerName'] as String?) ?? 'Unknown customer',
       customerExternalId: map['customerExternalId'] as String?,
+      verifiedCustomerId: map['verifiedCustomerId'] as String?,
       messages: rawMessages
           .cast<Map<Object?, Object?>>()
           .map(CapturedMessage.fromMap)
@@ -35,6 +37,7 @@ class CapturedConversation {
   final String stableKey;
   final String customerName;
   final String? customerExternalId;
+  final String? verifiedCustomerId;
   final List<CapturedMessage> messages;
   final DateTime capturedAt;
 }

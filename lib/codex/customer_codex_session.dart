@@ -98,8 +98,13 @@ class CustomerCodexSessionStore {
     final file = _file(userId);
     if (!await file.exists()) return null;
     try {
-      return CustomerCodexSession.fromJson(
-          jsonDecode(await file.readAsString()));
+      final value = jsonDecode(await file.readAsString());
+      // Old unbound sessions start fresh; a thread cannot be reused merely
+      // because somebody copied it into another customer's hashed filename.
+      if (value is! Map<String, dynamic> || value['user_id'] != userId) {
+        return null;
+      }
+      return CustomerCodexSession.fromJson(value);
     } on FormatException {
       return null;
     } on FileSystemException {
@@ -111,7 +116,8 @@ class CustomerCodexSessionStore {
     await directory.create(recursive: true);
     final file = _file(userId);
     final temporary = File('${file.path}.tmp');
-    await temporary.writeAsString(jsonEncode(session.toJson()));
+    await temporary
+        .writeAsString(jsonEncode({'user_id': userId, ...session.toJson()}));
     await temporary.rename(file.path);
   }
 

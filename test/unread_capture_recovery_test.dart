@@ -258,6 +258,13 @@ void main() {
         isFalse);
     expect(recovery.captureRetryDue(start.add(const Duration(seconds: 13))),
         isTrue);
+
+    recovery.lastCaptureAttemptAt = start.add(const Duration(seconds: 13));
+    expect(recovery.captureRetryDue(start.add(const Duration(seconds: 14))),
+        isFalse);
+    recovery.requestImmediateCaptureRetry();
+    expect(recovery.captureRetryDue(start.add(const Duration(seconds: 14))),
+        isTrue);
     recovery.holdingSent = true;
     recovery.holdingSentAt = start.add(const Duration(seconds: 20));
     expect(
@@ -301,5 +308,35 @@ void main() {
     expect(recovery.confirmRelaxedBody('  random  text '), isFalse);
     expect(recovery.confirmRelaxedBody('other text'), isFalse);
     expect(recovery.confirmRelaxedBody('other   text'), isTrue);
+  });
+
+  test('a stale unread badge cannot verify an old visible sender clock', () {
+    final detectedAt = DateTime.utc(2026, 10, 13, 8, 56, 41);
+    final recovery = UnreadCaptureRecovery(
+      customer: '上海世亦小关',
+      unreadEvidence: 12,
+      detectedAt: detectedAt,
+      knownIncomingIds: const {},
+      knownOutgoingIds: const {},
+    );
+
+    expect(
+      recovery.verifyIncomingSignal(
+        senderKey: 'old-17:08:30',
+        sentAt: DateTime.utc(2026, 10, 12, 9, 8, 30),
+        capturedAt: detectedAt,
+      ),
+      isFalse,
+    );
+    expect(recovery.hasVerifiedIncomingSignal, isFalse);
+    expect(
+      recovery.verifyIncomingSignal(
+        senderKey: 'new-16:56:41',
+        sentAt: detectedAt,
+        capturedAt: detectedAt.add(const Duration(seconds: 3)),
+      ),
+      isTrue,
+    );
+    expect(recovery.hasVerifiedIncomingSignal, isTrue);
   });
 }

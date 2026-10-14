@@ -17,6 +17,7 @@ class CaptureDatabase {
 
   final Directory? _storageRoot;
   Database? _database;
+  Future<Database>? _databaseOpening;
   ConversationFileStore? _history;
   bool _legacyDraftsPurged = false;
   bool _reviewControlsSynced = false;
@@ -32,7 +33,9 @@ class CaptureDatabase {
     return value;
   }
 
-  Future<Database> get database async {
+  Future<Database> get database => _databaseOpening ??= _openDatabase();
+
+  Future<Database> _openDatabase() async {
     if (_database case final database?) return database;
     sqfliteFfiInit();
     final database = await databaseFactoryFfi.openDatabase(
@@ -1036,6 +1039,24 @@ class CaptureDatabase {
     );
   }
 
+  /// Finishes a reserved fallback without sending when a real seller reply is
+  /// already present for the same customer turn. This is terminal: returning
+  /// the row to `pending` would reopen the old conversation every retry tick.
+  Future<void> completeSlaFallbackAfterReply({
+    required String userId,
+    required String messageId,
+  }) async {
+    await (await database).update(
+      'sla_fallbacks',
+      {
+        'state': 'completed',
+        'updated_at_ms': DateTime.now().millisecondsSinceEpoch,
+      },
+      where: "user_id = ? AND message_id = ? AND state = 'sending'",
+      whereArgs: [userId, messageId],
+    );
+  }
+
   Future<bool> markSlaFallbackSent({
     required String userId,
     required String messageId,
@@ -1120,14 +1141,14 @@ class CaptureDatabase {
   Future<QueuedDelivery?> nextReadyDelivery() async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final generated = await db.query(
-      'generated_drafts',
-      where:
-          "delivery_state = 'ready' OR (delivery_state = 'retry' AND retry_at_ms <= ?)",
-      whereArgs: [now],
-      orderBy: 'pending_id ASC',
-      limit: 1,
-    );
+    final generated = await db.rawQuery('''
+      SELECT d.* FROM generated_drafts d
+      LEFT JOIN conversation_control c ON c.user_id=d.user_id
+      WHERE (d.delivery_state='ready' OR
+        (d.delivery_state='retry' AND d.retry_at_ms <= ?))
+        AND (c.state IS NULL OR c.state != 'human_contacting')
+      ORDER BY d.pending_id ASC LIMIT 1
+    ''', [now]);
     if (generated.isEmpty) return null;
     final row = generated.first;
     final pendingId = row['pending_id']! as int;
@@ -1136,6 +1157,8 @@ class CaptureDatabase {
       pendingId: pendingId,
       userId: row['user_id']! as String,
       draft: AiDraft.fromJson(raw, mediaBaseUrl: Uri()),
+      createdAtMs: row['created_at_ms']! as int,
+      batchEndMessageId: row['batch_end_message_id'] as String?,
     );
   }
 
@@ -1145,13 +1168,14 @@ class CaptureDatabase {
   Future<bool> isGeneratedDraftReadyForSend({
     required String userId,
     required String reply,
+    QueuedDelivery? expectedDelivery,
   }) async {
     final rows = await (await database).query(
       'generated_drafts',
       columns: ['user_id'],
-      where:
-          "user_id = ? AND reply = ? AND delivery_state IN ('ready','retry')",
-      whereArgs: [userId, reply],
+      where: "user_id = ? AND reply = ? AND delivery_state IN ('ready','retry')"
+          '${expectedDelivery?._identityClause ?? ''}',
+      whereArgs: [userId, reply, ...?expectedDelivery?._identityArguments],
       limit: 1,
     );
     return rows.isNotEmpty;
@@ -1213,14 +1237,17 @@ class CaptureDatabase {
     required String userId,
     required String error,
     Duration retryDelay = const Duration(seconds: 10),
+    QueuedDelivery? expectedDelivery,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await (await database).rawUpdate('''UPDATE generated_drafts
       SET delivery_state='retry',delivery_attempts=delivery_attempts+1,
-          retry_at_ms=?,last_error=? WHERE user_id=?''', [
+          retry_at_ms=?,last_error=? WHERE user_id=?
+          ${expectedDelivery?._identityClause ?? ''}''', [
       now + retryDelay.inMilliseconds,
       error,
       userId,
+      ...?expectedDelivery?._identityArguments,
     ]);
   }
 
@@ -1658,22 +1685,28 @@ class CaptureDatabase {
       {required String userId,
       required String reply,
       bool recordHistory = true,
-      int? expectedUnconfirmedCreatedAt}) async {
+      int? expectedUnconfirmedCreatedAt,
+      QueuedDelivery? expectedDelivery}) async {
     final db = await database;
     final rows = await db.query('generated_drafts',
         where: expectedUnconfirmedCreatedAt == null
-            ? 'user_id = ? AND reply = ?'
+            ? 'user_id = ? AND reply = ?${expectedDelivery?._identityClause ?? ''}'
             : '''user_id = ? AND reply = ? AND created_at_ms=? AND (
                 delivery_state='delivery_unknown' OR
                 (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
         whereArgs: [
           userId,
           reply,
-          if (expectedUnconfirmedCreatedAt != null) expectedUnconfirmedCreatedAt
+          if (expectedUnconfirmedCreatedAt != null)
+            expectedUnconfirmedCreatedAt
+          else
+            ...?expectedDelivery?._identityArguments,
         ],
         limit: 1);
     if (rows.isEmpty) {
-      if (expectedUnconfirmedCreatedAt != null) return false;
+      if (expectedUnconfirmedCreatedAt != null || expectedDelivery != null) {
+        return false;
+      }
       // Compatibility for an unsent draft created by a pre-v5 build.
       return (await history).markReplySent(userId: userId, reply: reply);
     }
@@ -1716,14 +1749,17 @@ class CaptureDatabase {
     final recorded = await db.transaction((txn) async {
       final deleted = await txn.delete('generated_drafts',
           where: expectedUnconfirmedCreatedAt == null
-              ? 'user_id = ?'
+              ? 'user_id = ?${expectedDelivery?._identityClause ?? ''}'
               : '''user_id=? AND reply=? AND created_at_ms=? AND (
                   delivery_state='delivery_unknown' OR
                   (delivery_state='retry' AND last_error LIKE '%send_unconfirmed%'))''',
           whereArgs: expectedUnconfirmedCreatedAt == null
-              ? [userId]
+              ? [userId, ...?expectedDelivery?._identityArguments]
               : [userId, reply, expectedUnconfirmedCreatedAt]);
-      if (expectedUnconfirmedCreatedAt != null && deleted != 1) return false;
+      if ((expectedUnconfirmedCreatedAt != null || expectedDelivery != null) &&
+          deleted != 1) {
+        return false;
+      }
       if (batchEnd != null && batchEnd.isNotEmpty) {
         await txn.rawInsert('''INSERT INTO answered_cursors(user_id,message_id)
           VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
@@ -1813,8 +1849,10 @@ class CaptureDatabase {
   }
 
   Future<void> close() async {
+    if (_databaseOpening != null) await _databaseOpening;
     await _database?.close();
     _database = null;
+    _databaseOpening = null;
   }
 
   Future<Directory> _resolveDefaultStorageRoot() async {
@@ -1843,7 +1881,11 @@ class CaptureDatabase {
     // Packaged installations have no source project. Allow an explicit
     // QIANNIU_DATA_DIR there; otherwise use the normal macOS fallback.
     final support = await getApplicationSupportDirectory();
-    return Directory(p.join(support.path, 'data'));
+    final root = Directory(p.join(support.path, 'data'));
+    if (AppRuntime.standalone) {
+      await AppRuntime.installBundledInitialData(root);
+    }
+    return root;
   }
 }
 
@@ -1852,11 +1894,21 @@ class QueuedDelivery {
     required this.pendingId,
     required this.userId,
     required this.draft,
+    required this.createdAtMs,
+    required this.batchEndMessageId,
   });
 
   final int pendingId;
   final String userId;
   final AiDraft draft;
+  final int createdAtMs;
+  final String? batchEndMessageId;
+
+  String get _identityClause =>
+      ' AND user_id=? AND pending_id=? AND created_at_ms=? AND reply=?'
+      ' AND batch_end_message_id IS ?';
+  List<Object?> get _identityArguments =>
+      [userId, pendingId, createdAtMs, draft.reply, batchEndMessageId];
 }
 
 class SlaFallbackJob {

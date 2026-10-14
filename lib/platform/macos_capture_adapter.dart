@@ -4,41 +4,36 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 import '../domain/capture_models.dart';
+import '../domain/customer_identity.dart';
+import '../storage/diagnostic_log.dart';
 import 'capture_adapter.dart';
-
-bool customerIdentitiesMatch(String? observed, String expected) {
-  String normalize(String value) =>
-      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-
-  return observed != null && normalize(observed) == normalize(expected);
-}
+export '../domain/customer_identity.dart';
 
 class MacOSCaptureAdapter implements CaptureAdapter {
-  MacOSCaptureAdapter({MethodChannel? channel})
-      : _channel = channel ?? const MethodChannel(_channelName) {
+  MacOSCaptureAdapter({
+    MethodChannel? channel,
+    DiagnosticLog? diagnosticLog,
+    this.openResponseTimeout = const Duration(seconds: 10),
+    this.sendResponseTimeout = const Duration(seconds: 18),
+  })  : _diagnosticLog = diagnosticLog,
+        _channel = channel ?? const MethodChannel(_channelName) {
     _channel.setMethodCallHandler(_onNativeCall);
   }
 
   static const _channelName = 'com.grozziie.jdAutomation/accessibility';
   final MethodChannel _channel;
+  final DiagnosticLog? _diagnosticLog;
+  // Response watchdogs are distinct from native mutation deadlines. Never
+  // abandon the Dart delivery worker waiting for a lost native callback.
+  final Duration openResponseTimeout;
+  final Duration sendResponseTimeout;
   final _captures = StreamController<CapturedConversation>.broadcast();
   final _diagnostics = StreamController<Map<String, Object?>>.broadcast();
   final _failedSendInspections =
       StreamController<FailedSendInspection>.broadcast();
-  final Map<String, String> _verifiedCustomerIdentities = {};
-
-  String _identityKey(String value) =>
-      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-
-  String _verifiedIdentityFor(String customer) =>
-      _verifiedCustomerIdentities[_identityKey(customer)] ?? customer;
-
-  void _rememberVerifiedIdentity(String requested, Object? verified) {
-    final identity = verified?.toString().trim() ?? '';
-    if (identity.isEmpty) return;
-    _verifiedCustomerIdentities[_identityKey(requested)] = identity;
-    _verifiedCustomerIdentities[_identityKey(identity)] = identity;
-  }
+  // A sidebar OCR spelling must never become a persistent alias that redirects
+  // later sends, transfers, retries, or media to a different customer.
+  String _verifiedIdentityFor(String customer) => customer.trim();
 
   @override
   Stream<CapturedConversation> get captures => _captures.stream;
@@ -58,8 +53,38 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   Future<void> _onNativeCall(MethodCall call) async {
     final arguments = (call.arguments as Map<Object?, Object?>?) ?? const {};
     if (call.method == 'capture') {
-      _captures.add(CapturedConversation.fromMap(arguments));
+      try {
+        final capture = CapturedConversation.fromMap(arguments);
+        final verified = arguments['verifiedCustomerId']?.toString();
+        if (!customerIdentitiesMatch(
+                verified, capture.customerExternalId ?? '') ||
+            !customerIdentitiesMatch(capture.customerName, verified!)) {
+          throw PlatformException(
+              code: 'capture_identity_unverified',
+              message:
+                  'Native capture did not prove the same full customer ID.');
+        }
+        _captures.add(capture);
+      } catch (error, stack) {
+        _diagnosticLog?.record('capture.rejected', fields: {
+          'customer_id': arguments['customerExternalId'],
+          'verified_customer_id': arguments['verifiedCustomerId'],
+          'error': error.toString(),
+        });
+        _captures.addError(error, stack);
+      }
     } else if (call.method == 'diagnostic') {
+      _diagnosticLog?.record('native.diagnostic', fields: {
+        for (final key in [
+          'event',
+          'customer',
+          'expectedCustomer',
+          'observedCustomer',
+          'reason',
+          'code'
+        ])
+          if (arguments[key] != null) key: arguments[key],
+      });
       _diagnostics.add(arguments.map((key, value) => MapEntry('$key', value)));
     } else if (call.method == 'failedSendCandidates') {
       final inspection = FailedSendInspection.fromMap(arguments);
@@ -125,6 +150,11 @@ class MacOSCaptureAdapter implements CaptureAdapter {
         return lastInspection;
       }
     }
+    _diagnosticLog?.record('inspectExpectedCustomer.rejected', fields: {
+      'code': 'customer_switch_not_verified',
+      'expected_customer': verifiedExpected,
+      'observed_customer': lastInspection?.activeCustomerId,
+    });
     throw PlatformException(
       code: 'customer_switch_not_verified',
       message: 'JingMai did not settle on $verifiedExpected. OCR data was '
@@ -138,14 +168,35 @@ class MacOSCaptureAdapter implements CaptureAdapter {
     required String reply,
     List<String> mediaPaths = const [],
   }) async {
-    final value = await _mapCall('sendDraftOnce', <String, Object?>{
-      'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
-      'reply': reply,
-      'mediaPaths': mediaPaths,
-    });
+    final value = await _mapCall(
+        'sendDraftOnce',
+        <String, Object?>{
+          'expectedCustomer': _verifiedIdentityFor(expectedCustomer),
+          'reply': reply,
+          'mediaPaths': mediaPaths,
+          'operationDeadlineMs': DateTime.now()
+              .add(const Duration(seconds: 12))
+              .millisecondsSinceEpoch,
+        },
+        sendResponseTimeout,
+        'send_unconfirmed');
     if (value['error'] case final String code) {
       throw PlatformException(
           code: code, message: value['message'] as String? ?? 'Send failed.');
+    }
+    if (value['sent'] != true ||
+        !customerIdentitiesMatch(
+            value['customer']?.toString(), expectedCustomer) ||
+        value['reply'] != reply.trim()) {
+      _diagnosticLog?.record('sendDraftOnce.rejected', fields: {
+        'code': 'send_confirmation_identity_mismatch',
+        'expected_customer': expectedCustomer,
+        'observed_customer': value['customer'],
+      });
+      throw PlatformException(
+          code: 'send_confirmation_identity_mismatch',
+          message:
+              'Send acknowledgement did not confirm the exact customer and reply.');
     }
     return value;
   }
@@ -339,17 +390,83 @@ class MacOSCaptureAdapter implements CaptureAdapter {
   Future<void> openConversation(String expectedCustomer,
       {bool allowActivation = true}) async {
     final nativeExpected = _verifiedIdentityFor(expectedCustomer);
-    final value = await _mapCall('openConversation', <String, Object?>{
-      'expectedCustomer': nativeExpected,
-      'allowActivation': allowActivation,
-    });
+    final value = await _mapCall(
+        'openConversation',
+        <String, Object?>{
+          'expectedCustomer': nativeExpected,
+          'allowActivation': allowActivation,
+          'operationDeadlineMs': DateTime.now()
+              .add(const Duration(seconds: 8))
+              .millisecondsSinceEpoch,
+        },
+        openResponseTimeout,
+        'conversation_open_timeout');
     if (value['error'] case final String code) {
       throw PlatformException(
           code: code,
           message:
               value['message'] as String? ?? 'Could not open conversation.');
     }
-    _rememberVerifiedIdentity(expectedCustomer, value['customer']);
+    if (value['opened'] != true ||
+        !customerIdentitiesMatch(
+            value['customer']?.toString(), nativeExpected)) {
+      _diagnosticLog?.record('openConversation.rejected', fields: {
+        'expected_customer': nativeExpected,
+        'observed_customer': value['customer'],
+      });
+      throw PlatformException(
+          code: 'customer_switch_not_verified',
+          message:
+              'Requested $nativeExpected, but native confirmed ${value['customer'] ?? 'unknown'}.');
+    }
+  }
+
+  /// Selects exactly one row by its observed sidebar spelling, then returns
+  /// the independently read AX-header identity. Native and Dart both require
+  /// exact agreement or one unambiguous edit before accepting the result.
+  Future<String> resolveConversationIdentityFromAx(String observedCustomer,
+      {bool allowActivation = false}) async {
+    final observed = _verifiedIdentityFor(observedCustomer);
+    final value = await _mapCall(
+        'openConversation',
+        <String, Object?>{
+          'expectedCustomer': observed,
+          'allowActivation': allowActivation,
+          'allowObservedIdentityResolution': true,
+          'operationDeadlineMs': DateTime.now()
+              .add(const Duration(seconds: 8))
+              .millisecondsSinceEpoch,
+        },
+        openResponseTimeout,
+        'conversation_identity_resolution_timeout');
+    if (value['error'] case final String code) {
+      throw PlatformException(
+          code: code,
+          message: value['message'] as String? ??
+              'Could not verify the sidebar identity from AX.');
+    }
+    final verified = value['customer']?.toString() ?? '';
+    final resolution =
+        resolveObservedCustomerIdentity(observed, <String>{verified});
+    if (value['opened'] != true ||
+        !resolution.resolved ||
+        resolution.customer != verified) {
+      _diagnosticLog?.record('conversation.ax_identity_rejected', fields: {
+        'observed_customer': observed,
+        'verified_customer': verified,
+        'resolution': resolution.kind.name,
+      });
+      throw PlatformException(
+          code: 'customer_switch_not_verified',
+          message:
+              'AX did not prove a safe identity for observed row $observed.');
+    }
+    _diagnosticLog?.record('conversation.ax_identity_verified', fields: {
+      'observed_customer': observed,
+      'verified_customer': verified,
+      'resolution': resolution.kind.name,
+    });
+    return verified;
   }
 
   /// Opens JD's transfer dialog and returns the current service account plus
@@ -439,10 +556,65 @@ class MacOSCaptureAdapter implements CaptureAdapter {
       _mapCall('inspectTree', <String, Object?>{'maxDepth': maxDepth});
 
   Future<Map<String, Object?>> _mapCall(String method,
-      [Object? arguments]) async {
-    final value =
-        await _channel.invokeMapMethod<Object?, Object?>(method, arguments);
-    return (value ?? const {}).map((key, value) => MapEntry('$key', value));
+      [Object? arguments,
+      Duration? responseTimeout,
+      String? timeoutCode]) async {
+    final args = arguments is Map ? arguments : const {};
+    final clock = Stopwatch()..start();
+    final context = <String, Object?>{
+      if (args['expectedCustomer'] != null)
+        'expected_customer': args['expectedCustomer'],
+      if (args['windowId'] != null) 'window_id': args['windowId'],
+    };
+    _diagnosticLog?.record('$method.started', fields: context);
+    try {
+      final nativeResponse =
+          _channel.invokeMapMethod<Object?, Object?>(method, arguments);
+      final value = await (responseTimeout == null
+          ? nativeResponse
+          : nativeResponse.timeout(responseTimeout, onTimeout: () {
+              throw PlatformException(
+                code: timeoutCode ?? 'native_response_timeout',
+                message: '$method did not return within '
+                    '${responseTimeout.inMilliseconds} ms. The reply remains '
+                    'pending; delivery must be reconciled and retried safely.',
+                details: {'reason': 'native_response_timeout', ...context},
+              );
+            }));
+      final result =
+          (value ?? const {}).map((key, value) => MapEntry('$key', value));
+      _diagnosticLog?.record('$method.completed', fields: {
+        ...context,
+        'elapsed_ms': clock.elapsedMilliseconds,
+        for (final key in [
+          'error',
+          'message',
+          'reason',
+          'customer',
+          'activeCustomerId',
+          'observedCustomer',
+          'kind',
+          'cacheCrossCheck',
+          'mediaWidth',
+          'mediaHeight',
+          'path',
+          'trusted',
+          'screenRecording',
+          'appBundleIdentifier',
+          'appBundlePath',
+          'appProcessId',
+        ])
+          if (result[key] != null) key: result[key],
+      });
+      return result;
+    } catch (error) {
+      _diagnosticLog?.record('$method.failed', fields: {
+        ...context,
+        'elapsed_ms': clock.elapsedMilliseconds,
+        'error': error.toString(),
+      });
+      rethrow;
+    }
   }
 }
 
@@ -495,6 +667,8 @@ class QianniuConversationRow {
     required this.unreadEvidence,
     required this.evidenceAvailable,
     this.unreadAgeSeconds,
+    this.observedCustomer,
+    this.identityNeedsAxVerification = false,
   });
 
   factory QianniuConversationRow.fromMap(Map<Object?, Object?> value) =>
@@ -504,6 +678,7 @@ class QianniuConversationRow {
         unreadEvidence: (value['unreadEvidence'] as num?)?.toInt() ?? 0,
         evidenceAvailable: value['evidenceAvailable'] == true,
         unreadAgeSeconds: (value['unreadAgeSeconds'] as num?)?.toInt(),
+        observedCustomer: value['customer']?.toString() ?? '',
       );
 
   final String customer;
@@ -513,6 +688,21 @@ class QianniuConversationRow {
 
   /// Elapsed time shown by JD's red unread badge, when confidently readable.
   final int? unreadAgeSeconds;
+  final String? observedCustomer;
+  final bool identityNeedsAxVerification;
+
+  QianniuConversationRow withCustomer(String value,
+          {bool? identityNeedsAxVerification}) =>
+      QianniuConversationRow(
+        customer: value,
+        unread: unread,
+        unreadEvidence: unreadEvidence,
+        evidenceAvailable: evidenceAvailable,
+        unreadAgeSeconds: unreadAgeSeconds,
+        observedCustomer: observedCustomer ?? customer,
+        identityNeedsAxVerification:
+            identityNeedsAxVerification ?? this.identityNeedsAxVerification,
+      );
 }
 
 class OcrObservation {
